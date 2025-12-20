@@ -1,551 +1,687 @@
-"""Converts Unsloth Python notebook to script."""
-
-from __future__ import annotations
-
-import argparse
-import atexit
+import copy
 import os
+import json
+import random
 import re
-import subprocess
-import sys
 import time
 from pathlib import Path
+from typing import Dict
 
+ROOT = Path("/matx/u/acshi").resolve()
+HF_HOME = ROOT / ".cache" / "huggingface"
+HF_HUB = HF_HOME / "hub"
+HF_DATASETS = HF_HOME / "datasets"
 
-def _setup_matx_storage(matx_root: str) -> dict[str, Path]:
-    """Force HF + datasets + general caches to go to /matx mount."""
-    root = Path(matx_root).expanduser().resolve()
-    paths = {
-        "root": root,
-        "hf_home": root / ".cache" / "huggingface",
-        "hf_datasets": root / ".cache" / "huggingface" / "datasets",
-        "hf_hub": root / ".cache" / "huggingface" / "hub",
-        "torch_home": root / ".cache" / "torch",
-        "xdg_cache": root / ".cache",
-        "runs": root / "workplace" / "games",
-    }
+for p in (HF_HOME, HF_HUB, HF_DATASETS):
+    p.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HOME", str(HF_HOME))
+os.environ.setdefault("HF_HUB_CACHE", str(HF_HUB))
+os.environ.setdefault("HF_DATASETS_CACHE", str(HF_DATASETS))
+WANDB_DIR = ROOT / "workplace" / "games" / "wandb"
+WANDB_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("WANDB_DIR", str(WANDB_DIR))
+os.environ.setdefault("WANDB_ENTITY", "acshi-stanford-university")
+os.environ.setdefault("WANDB_PROJECT", "games")
 
-    for p in paths.values():
-        p.mkdir(parents=True, exist_ok=True)
+import torch
+from torch.utils.data import Dataset
+from unsloth import FastLanguageModel
+from trl import GRPOTrainer, GRPOConfig
 
-    # Hugging Face caches
-    os.environ.setdefault("HF_HOME", str(paths["hf_home"]))
-    os.environ.setdefault("HF_DATASETS_CACHE", str(paths["hf_datasets"]))
-    os.environ.setdefault("HF_HUB_CACHE", str(paths["hf_hub"]))
-    os.environ.setdefault("TRANSFORMERS_CACHE", str(paths["hf_hub"]))
+try:
+    import wandb
+except Exception:
+    wandb = None
 
-    # Misc caches
-    os.environ.setdefault("TORCH_HOME", str(paths["torch_home"]))
-    os.environ.setdefault("XDG_CACHE_HOME", str(paths["xdg_cache"]))
+try:
+    import trackio
+except Exception:
+    trackio = None
 
-    # Logging/reporting
-    wandb_dir = paths["runs"] / "wandb"
-    wandb_cache = paths["root"] / ".cache" / "wandb"
-    wandb_data = paths["root"] / ".cache" / "wandb_data"
-    wandb_artifacts = paths["root"] / ".cache" / "wandb_artifacts"
-    for p in (wandb_dir, wandb_cache, wandb_data, wandb_artifacts):
-        p.mkdir(parents=True, exist_ok=True)
-
-    os.environ.setdefault("WANDB_DIR", str(wandb_dir))
-    os.environ.setdefault("WANDB_CACHE_DIR", str(wandb_cache))
-    os.environ.setdefault("WANDB_DATA_DIR", str(wandb_data))
-    os.environ.setdefault("WANDB_ARTIFACT_DIR", str(wandb_artifacts))
-
-    os.environ.setdefault("TRACKIO_DIR", str(paths["runs"] / "trackio"))
-
-    (paths["runs"] / "outputs").mkdir(parents=True, exist_ok=True)
-    return paths
-
-
-def _ensure_openenv(openenv_dir: Path) -> None:
-    """Clone OpenEnv onto /matx if it's not present."""
-    openenv_dir = openenv_dir.resolve()
-    if (openenv_dir / "src").exists():
-        return
-    openenv_dir.parent.mkdir(parents=True, exist_ok=True)
-    print(f"[train.py] Cloning OpenEnv into: {openenv_dir}")
-    subprocess.run(
-        ["git", "clone", "https://github.com/meta-pytorch/OpenEnv.git", str(openenv_dir)],
-        check=True,
-    )
-
-
-def _maybe_kill_process(proc) -> None:
-    try:
-        if proc is None:
-            return
-        proc.terminate()
-    except Exception:
-        pass
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+if hasattr(torch, "set_float32_matmul_precision"):
+    torch.set_float32_matmul_precision("high")
 
 
 class _EMA:
-    """EMA used as a role baseline (reward shaping)."""
+    def __init__(self, decay: float = 0.95):
+        self.decay = decay
+        self.value = 0.0
+        self.initialized = False
 
-    def __init__(self, gamma: float = 0.95):
-        self.gamma = float(gamma)
-        self._value = 0.0
-        self._initialized = False
+    def update(self, x: float):
+        if not self.initialized:
+            self.value = float(x)
+            self.initialized = True
+        else:
+            self.value = self.decay * self.value + (1.0 - self.decay) * float(x)
 
-    def get(self) -> float:
-        return float(self._value) if self._initialized else 0.0
 
-    def update(self, x: float) -> None:
-        x = float(x)
-        if not self._initialized:
-            self._value = x
-            self._initialized = True
+class _JSONLLogger:
+    def __init__(self, path: Path):
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.path, "a", encoding="utf-8")
+
+    def log(self, payload: dict):
+        self._fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
+        self._fh.flush()
+
+
+_ACTION_RE = re.compile(r"\[(check|bet|call|fold)\]", re.IGNORECASE)
+_BOXED_RE = re.compile(r"\\boxed\{([^}]*)\}")
+
+
+def _extract_action(text: str, legal_actions: list[str]) -> str | None:
+    matches = _ACTION_RE.findall(text or "")
+    if matches:
+        for m in reversed(matches):
+            a = f"[{m.lower()}]"
+            if a in legal_actions:
+                return a
+    boxed = _BOXED_RE.findall(text or "")
+    if boxed:
+        for m in reversed(boxed):
+            a = f"[{m.strip().lower()}]"
+            if a in legal_actions:
+                return a
+    return None
+
+
+_CARD_RANK = {"J": 0, "Q": 1, "K": 2}
+
+
+class KuhnPoker:
+    def __init__(self, num_rounds: int = 5):
+        self.num_rounds = num_rounds
+        self.reset(0)
+
+    def reset(self, seed: int):
+        rng = random.Random(int(seed))
+        self.start_player0 = rng.randint(0, 1)
+        self.round_cards = [rng.sample(["J", "Q", "K"], 2) for _ in range(self.num_rounds)]
+        self.round_idx = 1
+        self.chips = [0, 0]
+        self.history = []
+        self.actions_in_round = []
+        self.bet_by = None
+        self.current_player = self._round_start_player()
+        self.done = False
+        self.invalid_player = None
+        self.rewards = {0: 0.0, 1: 0.0}
+
+    def _round_start_player(self) -> int:
+        return (self.start_player0 + (self.round_idx - 1)) % 2
+
+    def legal_actions(self) -> list[str]:
+        if self.done:
+            return []
+        return ["[check]", "[bet]"] if self.bet_by is None else ["[call]", "[fold]"]
+
+    def _card(self, player_id: int) -> str:
+        return self.round_cards[self.round_idx - 1][player_id]
+
+    def _round_history_str(self) -> str:
+        if not self.actions_in_round:
+            return "None"
+        return " ".join([f"P{p}:{a}" for p, a in self.actions_in_round])
+
+    def _full_history_str(self) -> str:
+        if not self.history:
+            return "None"
+        return " ".join([f"R{r}P{p}:{a}" for r, p, a in self.history])
+
+    def observe(self, player_id: int) -> str:
+        legal = ", ".join(self.legal_actions())
+        return (
+            f"[GAME] You are Player {player_id} in a {self.num_rounds} round game of Kuhn Poker.\n"
+            "Game Rules:\n"
+            "- Kuhn Poker uses a 3-card deck with J, Q, K (J lowest, K highest)\n"
+            "- Each player antes 1 chip and receives 1 card each round\n"
+            f"- Game continues for {self.num_rounds} rounds\n"
+            "- The player with the most chips after all rounds wins\n"
+            "Action Rules:\n"
+            "- '[check]': Pass without betting (only if no bet is on the table)\n"
+            "- '[bet]': Add 1 chip to the pot (only if no bet is on the table)\n"
+            "- '[call]': Match an opponent's bet by adding 1 chip to the pot\n"
+            "- '[fold]': Surrender your hand and let your opponent win the pot\n"
+            f"[GAME] Scores (chips won so far): Player 0: {self.chips[0]}, Player 1: {self.chips[1]}\n"
+            f"[GAME] Starting round {self.round_idx} out of {self.num_rounds} rounds.\n"
+            f"Your card is: {self._card(player_id)}\n"
+            f"[GAME] Betting history this round: {self._round_history_str()}\n"
+            f"[GAME] Full game history: {self._full_history_str()}\n"
+            f"Your available actions are: {legal}\n"
+        )
+
+    def _end_round_showdown(self, pot_win: int):
+        c0, c1 = self._card(0), self._card(1)
+        winner = 0 if _CARD_RANK[c0] > _CARD_RANK[c1] else 1
+        payoff = pot_win if winner == 0 else -pot_win
+        self.chips[0] += payoff
+        self.chips[1] -= payoff
+        self.round_idx += 1
+        self.actions_in_round = []
+        self.bet_by = None
+        if self.round_idx > self.num_rounds:
+            self.done = True
+            outcome = 0
+            if self.chips[0] > self.chips[1]:
+                outcome = 1
+            elif self.chips[0] < self.chips[1]:
+                outcome = -1
+            self.rewards = {0: float(outcome), 1: float(-outcome)}
+        else:
+            self.current_player = self._round_start_player()
+
+    def _terminate_invalid(self, player_id: int):
+        self.done = True
+        self.invalid_player = player_id
+        other = 1 - player_id
+        self.rewards = {0: 0.5, 1: 0.5}
+        self.rewards[player_id] = -1.5
+        self.rewards[other] = 0.5
+
+    def step(self, action: str | None):
+        if self.done:
             return
-        self._value = self.gamma * self._value + (1.0 - self.gamma) * x
+        if action not in self.legal_actions():
+            self._terminate_invalid(self.current_player)
+            return
+
+        p = self.current_player
+        self.actions_in_round.append((p, action))
+        self.history.append((self.round_idx, p, action))
+
+        if self.bet_by is None:
+            if action == "[bet]":
+                self.bet_by = p
+                self.current_player = 1 - p
+                return
+            if len(self.actions_in_round) == 2:
+                self._end_round_showdown(1)
+                return
+            self.current_player = 1 - p
+            return
+
+        if action == "[fold]":
+            bettor = self.bet_by
+            payoff = 1 if bettor == 0 else -1
+            self.chips[0] += payoff
+            self.chips[1] -= payoff
+            self.round_idx += 1
+            self.actions_in_round = []
+            self.bet_by = None
+            if self.round_idx > self.num_rounds:
+                self.done = True
+                outcome = 0
+                if self.chips[0] > self.chips[1]:
+                    outcome = 1
+                elif self.chips[0] < self.chips[1]:
+                    outcome = -1
+                self.rewards = {0: float(outcome), 1: float(-outcome)}
+            else:
+                self.current_player = self._round_start_player()
+            return
+
+        self._end_round_showdown(2)
+
+    def to_json(self) -> str:
+        d = {
+            "num_rounds": self.num_rounds,
+            "start_player0": self.start_player0,
+            "round_cards": self.round_cards,
+            "round_idx": self.round_idx,
+            "chips": self.chips,
+            "history": self.history,
+            "actions_in_round": self.actions_in_round,
+            "bet_by": self.bet_by,
+            "current_player": self.current_player,
+            "done": self.done,
+            "invalid_player": self.invalid_player,
+            "rewards": self.rewards,
+        }
+        return json.dumps(d)
+
+    @classmethod
+    def from_json(cls, s: str) -> "KuhnPoker":
+        d = json.loads(s)
+        env = cls(num_rounds=int(d["num_rounds"]))
+        env.start_player0 = int(d["start_player0"])
+        env.round_cards = d["round_cards"]
+        env.round_idx = int(d["round_idx"])
+        env.chips = list(d["chips"])
+        env.history = [tuple(x) for x in d["history"]]
+        env.actions_in_round = [tuple(x) for x in d["actions_in_round"]]
+        env.bet_by = d["bet_by"]
+        env.current_player = int(d["current_player"])
+        env.done = bool(d["done"])
+        env.invalid_player = d["invalid_player"]
+        env.rewards = {int(k): float(v) for k, v in d["rewards"].items()}
+        return env
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--matx-root",
-        default="/matx/u/acshi",
-        help="Root of the 3T /matx mount where caches + outputs should be stored.",
-    )
-    parser.add_argument(
-        "--openenv-dir",
-        default=None,
-        help="Where to clone OpenEnv (default: <matx-root>/workplace/games/OpenEnv).",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default=None,
-        help="Where to save checkpoints (default: <matx-root>/workplace/games/outputs).",
-    )
-    parser.add_argument(
-        "--max-steps",
-        type=int,
-        default=600,
-        help="Max GRPO training steps (default: 600).",
-    )
-    parser.add_argument(
-        "--save-steps",
-        type=int,
-        default=100,
-        help="Checkpoint save frequency (default: 100).",
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume from last checkpoint in output_dir if available.",
-    )
+def _messages(player_id: int, observation: str):
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are playing Kuhn Poker. Think step by step, then respond with exactly one legal action token "
+                "in brackets: [check], [bet], [call], or [fold]."
+            ),
+        },
+        {"role": "user", "content": observation},
+    ]
 
-    # W&B logging
-    wandb_group = parser.add_mutually_exclusive_group()
-    wandb_group.add_argument(
-        "--wandb",
-        dest="use_wandb",
-        action="store_true",
-        help="Enable Weights & Biases logging (default).",
-    )
-    wandb_group.add_argument(
-        "--no-wandb",
-        dest="use_wandb",
-        action="store_false",
-        help="Disable Weights & Biases logging.",
-    )
-    parser.set_defaults(use_wandb=True)
-    parser.add_argument(
-        "--wandb-entity",
-        default="acshi-stanford-university",
-        help="W&B entity/team to log to.",
-    )
-    parser.add_argument(
-        "--wandb-project",
-        default="games",
-        help="W&B project name.",
-    )
-    parser.add_argument(
-        "--wandb-name",
-        default=None,
-        help="Optional W&B run name (defaults to an informative timestamped name).",
-    )
-    parser.add_argument(
-        "--wandb-mode",
-        default=None,
-        choices=["online", "offline", "disabled"],
-        help="Optional W&B mode. Use offline/disabled if needed.",
-    )
-    args = parser.parse_args()
 
-    # Must be set BEFORE importing HF / datasets to ensure caches go to /matx.
-    paths = _setup_matx_storage(args.matx_root)
-    runs_dir = paths["runs"]
+max_seq_length = 768
+lora_rank = 4
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="unsloth/gpt-oss-20b",
+    max_seq_length=max_seq_length,
+    dtype=None,
+    load_in_4bit=True,
+    offload_embedding=True,
+    cache_dir=str(HF_HUB),
+)
+model = FastLanguageModel.get_peft_model(
+    model,
+    r=lora_rank,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+    lora_alpha=lora_rank * 2,
+    use_gradient_checkpointing="unsloth",
+    random_state=3407,
+)
 
-    # Configure W&B BEFORE initializing the Trainer (HF/TRL callback reads env vars).
-    if args.use_wandb:
-        os.environ.setdefault("WANDB_ENTITY", args.wandb_entity)
-        os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
-        if args.wandb_mode is not None:
-            os.environ["WANDB_MODE"] = args.wandb_mode
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
 
-        if args.wandb_name is None:
-            ts = time.strftime("%Y%m%d_%H%M%S")
-            args.wandb_name = f"qwen3-4b-kuhn-grpo-{ts}"
-
-    openenv_dir = Path(args.openenv_dir) if args.openenv_dir else (runs_dir / "OpenEnv")
-    output_dir = Path(args.output_dir) if args.output_dir else (runs_dir / "outputs")
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Clone OpenEnv
-    _ensure_openenv(openenv_dir)
-
-    # Add OpenEnv source to PYTHONPATH
-    sys.path.insert(0, str(openenv_dir / "src"))
-    working_directory = str(openenv_dir)
-
-    # Notebook code starts here
-    # IMPORTANT: Unsloth should be imported before transformers for full patching.
-    import unsloth  # noqa: F401
-    from unsloth import FastLanguageModel
-    from unsloth import execute_with_time_limit, launch_openenv
-
-    import numpy as np
-    from datasets import Dataset
-
-    from envs.openspiel_env import OpenSpielEnv
-    from envs.openspiel_env.models import OpenSpielAction
-
-    # Load model & tokenizer (changed model only).
-    max_seq_length = 768  # Can increase for longer RL output
-    lora_rank = 4  # Larger rank = smarter, but slower
-    model_name = "Qwen/Qwen3-4B-Instruct-2507"
-
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=model_name,
-        load_in_4bit=True,
-        max_seq_length=max_seq_length,
-        offload_embedding=True,  # Offload embeddings to save more VRAM
-        cache_dir=str(paths["hf_hub"]),
+if wandb:
+    if not os.getenv("WANDB_NAME"):
+        os.environ["WANDB_NAME"] = f"gpt-oss-20b-kuhn-spiral-grpo-{int(time.time())}"
+    wandb.login(key=os.getenv("WANDB_API_KEY", ""), relogin=True)
+    wandb.init(
+        entity=os.getenv("WANDB_ENTITY", "acshi-stanford-university"),
+        project=os.getenv("WANDB_PROJECT", "games"),
+        name=os.getenv("WANDB_NAME"),
     )
 
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=lora_rank,
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ],
-        lora_alpha=lora_rank * 2,
-        use_gradient_checkpointing="unsloth",
-        random_state=3407,
-    )
+ROLE_BASELINE_EMA_GAMMA = 0.95
+_BASELINES = {0: _EMA(ROLE_BASELINE_EMA_GAMMA), 1: _EMA(ROLE_BASELINE_EMA_GAMMA)}
+_LATEST_RL_EXTRA_LOGS: dict[str, float] = {}
 
-    # OpenSpiel Kuhn Poker environment
-    global port
-    global openenv_process
-    port = 9000
-    openenv_process = None
+USE_ROLE_BASELINE = True
+FILTER_ZERO_ADV = True
+REWARD_SCALING = 1.0
+USE_INTERMEDIATE_REWARDS = True
+REWARD_GAMMA = 1.0
 
-    server = "envs.openspiel_env.server.app:app"
-    environment = {
-        **os.environ,
-        "PYTHONPATH": f"{working_directory}/src",
-        "OPENSPIEL_GAME": "kuhn_poker",
-        "OPENSPIEL_AGENT_PLAYER": "0",
-        "OPENSPIEL_OPPONENT_POLICY": "random",
+ROLLOUT_LOG_PATH = Path(__file__).resolve().parent / "selfplay_rollouts.jsonl"
+
+
+class _SelfPlayCollector:
+    def __init__(
+        self,
+        num_rounds: int,
+        temperature: float,
+        max_new_tokens: int,
+        log_path: Path,
+        seed: int = 0,
+    ):
+        self.num_rounds = num_rounds
+        self.temperature = temperature
+        self.max_new_tokens = max_new_tokens
+        self._rng = random.Random(seed)
+        self._logger = _JSONLLogger(log_path)
+        self._game_id = 0
+
+    def _next_seed(self) -> int:
+        return self._rng.randint(0, 2**31 - 1)
+
+    def collect_games(self, num_games: int) -> list[dict]:
+        samples: list[dict] = []
+        for _ in range(num_games):
+            game_id = self._game_id
+            self._game_id += 1
+
+            env = KuhnPoker(num_rounds=self.num_rounds)
+            env.reset(self._next_seed())
+
+            turn_records: list[dict] = []
+            per_player_indices = {0: [], 1: []}
+            turn_idx = 0
+
+            while not env.done:
+                pid = env.current_player
+                obs = env.observe(pid)
+                state_json = env.to_json()
+                legal = env.legal_actions()
+
+                raw_response = _generate_action(pid, obs, self.temperature, self.max_new_tokens)
+                action = _extract_action(raw_response, legal)
+                action_valid = action in legal
+
+                player_turn_idx = len(per_player_indices[pid])
+                per_player_indices[pid].append(len(turn_records))
+                turn_records.append(
+                    {
+                        "prompt": _messages(pid, obs),
+                        "player_id": pid,
+                        "state_json": state_json,
+                        "game_id": game_id,
+                        "turn_idx": turn_idx,
+                        "player_turn_idx": player_turn_idx,
+                    }
+                )
+
+                self._logger.log(
+                    {
+                        "type": "step",
+                        "game_id": game_id,
+                        "turn_idx": turn_idx,
+                        "player_id": pid,
+                        "player_turn_idx": player_turn_idx,
+                        "observation": obs,
+                        "raw_response": raw_response,
+                        "action": action,
+                        "action_valid": action_valid,
+                        "legal_actions": legal,
+                        "timestamp": time.time(),
+                    }
+                )
+
+                env.step(action)
+                turn_idx += 1
+
+            rewards = env.rewards
+            for pid in (0, 1):
+                player_indices = per_player_indices[pid]
+                total = len(player_indices)
+                for idx_pos, record_idx in enumerate(player_indices):
+                    turn_records[record_idx]["player_turns_total"] = total
+                    turn_records[record_idx]["steps_from_end"] = total - idx_pos - 1
+                    turn_records[record_idx]["final_reward"] = rewards[pid]
+
+            self._logger.log(
+                {
+                    "type": "game_end",
+                    "game_id": game_id,
+                    "turns": turn_idx,
+                    "rewards": rewards,
+                    "invalid_player": env.invalid_player,
+                    "timestamp": time.time(),
+                }
+            )
+
+            samples.extend(turn_records)
+        return samples
+
+
+class _SelfPlayDataset(Dataset):
+    def __init__(
+        self,
+        collector: _SelfPlayCollector,
+        games_per_batch: int,
+        size: int = 1024,
+        reuse_count: int = 2,
+    ):
+        super().__init__()
+        if size <= 0:
+            raise ValueError("size must be positive")
+        if reuse_count <= 0:
+            raise ValueError("reuse_count must be positive")
+        self.collector = collector
+        self.games_per_batch = games_per_batch
+        self.size = size
+        self.reuse_count = reuse_count
+        self._buffer: list[dict] = []
+        self._cache: dict[int, dict] = {}
+        self._cache_uses: dict[int, int] = {}
+
+    def __len__(self) -> int:
+        return self.size
+
+    def __getitem__(self, idx: int) -> dict:
+        if idx in self._cache:
+            sample = self._cache[idx]
+            self._cache_uses[idx] += 1
+        else:
+            if not self._buffer:
+                self._buffer = self.collector.collect_games(self.games_per_batch)
+            sample = self._buffer.pop(0)
+            self._cache[idx] = sample
+            self._cache_uses[idx] = 1
+
+        if self._cache_uses[idx] >= self.reuse_count:
+            self._cache.pop(idx, None)
+            self._cache_uses.pop(idx, None)
+
+        return copy.deepcopy(sample)
+
+
+def _generate_action(player_id: int, observation: str, temperature: float, max_new_tokens: int) -> str:
+    msgs = _messages(player_id, observation)
+    device = next(model.parameters()).device
+    input_ids = tokenizer.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt").to(device)
+
+    was_training = model.training
+    model.eval()
+    with torch.inference_mode():
+        out_ids = model.generate(
+            input_ids=input_ids,
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=temperature,
+            top_p=1.0,
+            use_cache=True,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+    if was_training:
+        model.train()
+    return tokenizer.decode(out_ids[0][input_ids.shape[-1] :], skip_special_tokens=True)
+
+
+def _rollout(env: KuhnPoker, temperature: float, max_new_tokens: int) -> tuple[dict, Dict[int, int], int]:
+    turn_counts = {0: 0, 1: 0}
+    turns = 0
+    was_training = model.training
+    model.eval()
+    with torch.inference_mode():
+        while not env.done:
+            pid = env.current_player
+            obs = env.observe(pid)
+            txt = _generate_action(pid, obs, temperature, max_new_tokens)
+            act = _extract_action(txt, env.legal_actions())
+            env.step(act)
+            turns += 1
+            turn_counts[pid] += 1
+    if was_training:
+        model.train()
+    return env.rewards, turn_counts, turns
+
+
+def spiral_kuhn_reward(
+    prompts=None,
+    completions=None,
+    player_id=None,
+    state_json=None,
+    trainer_state=None,
+    **kwargs,
+):
+    n = len(completions) if completions is not None else 0
+    if n == 0 or state_json is None or player_id is None:
+        return [0.0] * n
+
+    def _tolist(x):
+        if isinstance(x, (list, tuple)):
+            return list(x)
+        return [x] * n
+
+    pids = _tolist(player_id)
+    states = _tolist(state_json)
+    if len(pids) != n and len(pids) > 0 and n % len(pids) == 0:
+        k = n // len(pids)
+        pids = [pid for pid in pids for _ in range(k)]
+    if len(states) != n and len(states) > 0 and n % len(states) == 0:
+        k = n // len(states)
+        states = [st for st in states for _ in range(k)]
+
+    rewards = []
+    game_lens = 0
+    invalids = 0
+    wins_p0 = 0
+    raw_sum = 0.0
+    adv_sum = 0.0
+
+    for comp, pid, st in zip(completions, pids, states):
+        response = comp[0]["content"] if isinstance(comp, list) else str(comp)
+        pid = int(pid)
+        env = KuhnPoker.from_json(st)
+        act = _extract_action(response, env.legal_actions())
+        env.step(act)
+
+        turn_counts = {0: 0, 1: 0}
+        turn_counts[pid] += 1
+        if not env.done:
+            rollout_rewards, rollout_counts, rollout_turns = _rollout(
+                env,
+                temperature=1.0,
+                max_new_tokens=min(8092, max_completion_length),
+            )
+            for k, v in rollout_counts.items():
+                turn_counts[k] += v
+            total_turns = 1 + rollout_turns
+            rewards_dict = rollout_rewards
+        else:
+            total_turns = 1
+            rewards_dict = env.rewards
+
+        raw_reward = float(rewards_dict[pid]) * REWARD_SCALING
+        base = _BASELINES[pid].value if USE_ROLE_BASELINE else 0.0
+        if USE_ROLE_BASELINE:
+            _BASELINES[pid].update(raw_reward)
+            raw_reward -= base
+        steps_from_end = max(0, turn_counts[pid] - 1)
+        if USE_INTERMEDIATE_REWARDS:
+            adv = raw_reward * (REWARD_GAMMA**steps_from_end)
+        else:
+            adv = raw_reward
+        if FILTER_ZERO_ADV and adv == 0.0:
+            adv = 0.0
+        rewards.append(adv)
+
+        game_lens += total_turns
+        invalids += 1 if env.invalid_player is not None else 0
+        wins_p0 += 1 if rewards_dict.get(0, 0.0) > 0 else 0
+        raw_sum += float(rewards_dict.get(pid, 0.0))
+        adv_sum += adv
+
+    global _LATEST_RL_EXTRA_LOGS
+    _LATEST_RL_EXTRA_LOGS = {
+        "env/game_len_mean": game_lens / max(1, n),
+        "env/invalid_rate": invalids / max(1, n),
+        "env/win_rate_p0": wins_p0 / max(1, n),
+        "env/raw_reward_mean": raw_sum / max(1, n),
+        "env/adv_mean": adv_sum / max(1, n),
+        "baseline/p0": _BASELINES[0].value,
+        "baseline/p1": _BASELINES[1].value,
     }
 
-    import functools
+    return rewards
 
-    launch_openenv = functools.partial(
-        launch_openenv,
-        working_directory=working_directory,
-        server=server,
-        environment=environment,
-        openenv_class=OpenSpielEnv,
+
+sample_env = KuhnPoker(num_rounds=5)
+sample_env.reset(0)
+sample_pid = sample_env.current_player
+sample_prompt = _messages(sample_pid, sample_env.observe(sample_pid))
+maximum_length = len(
+    tokenizer.apply_chat_template(sample_prompt, add_generation_prompt=True, tokenize=True)
+)
+max_prompt_length = maximum_length + 1
+max_completion_length = 8092
+if max_completion_length <= 0:
+    raise ValueError(
+        f"max_completion_length={max_completion_length} is not positive; reduce prompt size or increase max_seq_length"
     )
 
-    atexit.register(lambda: _maybe_kill_process(globals().get("openenv_process", None)))
+report_to = []
+if wandb:
+    report_to.append("wandb")
+if trackio:
+    report_to.append("trackio")
+if not report_to:
+    report_to = "none"
 
-    # Prompt (produce agent outputs actions)
-    prompt = (
-        "\n".join(
-            [
-                "You are playing 2-player Kuhn Poker (OpenSpiel: kuhn_poker) against a random opponent.",
-                "You are the learning agent (Player 0).",
-                "Kuhn Poker basics:",
-                "- Each player antes 1 chip and receives one private card (J/Q/K).",
-                "- There is a single betting round.",
-                "- Actions (by stage):",
-                "  * First decision (no bet yet): [Check] or [Bet]",
-                "  * If you checked and the opponent then bets: you must respond with [Fold] or [Call]",
-                "Your job: choose a valid action plan.",
-                "\nOutput format (IMPORTANT):",
-                "- You MAY write reasoning traces before the final two lines.",
-                "- Then output exactly two lines:",
-                "  FIRST: [Check] OR FIRST: [Bet]",
-                "  RESPONSE: [Fold] OR RESPONSE: [Call]",
-                "(The RESPONSE will be used only if a second decision is needed.)",
-            ]
-        )
-    ).strip()
+output_dir_path = ROOT / "workplace" / "games" / "outputs"
+output_dir_path.mkdir(parents=True, exist_ok=True)
 
-    # SPIRAL-style reward shaping
-    # Invalid action => terminate & penalize agent
-    INVALID_ACTION_PENALTY = -1.5
-    ROLE_BASELINE = _EMA(gamma=0.95)
+training_args = GRPOConfig(
+    temperature=1.0,
+    learning_rate=2e-4,
+    weight_decay=0.001,
+    warmup_ratio=0.1,
+    lr_scheduler_type="linear",
+    optim="adamw_8bit",
+    logging_steps=1,
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=1,
+    num_generations=2,
+    max_prompt_length=max_prompt_length,
+    max_completion_length=max_completion_length,
+    max_steps=600,
+    save_steps=100,
+    report_to=report_to,
+    run_name=os.environ.get("WANDB_NAME", None),
+    output_dir=str(output_dir_path),
+    remove_unused_columns=False,
+)
 
-    ACTION_RE = re.compile(r"\[(Check|Bet|Fold|Call)\]", re.IGNORECASE)
+collector = _SelfPlayCollector(
+    num_rounds=5,
+    temperature=training_args.temperature,
+    max_new_tokens=min(8092, max_completion_length),
+    log_path=ROLLOUT_LOG_PATH,
+    seed=0,
+)
+prompt_batch = max(1, training_args.generation_batch_size // training_args.num_generations)
+dataset_size = max(prompt_batch, prompt_batch * 16, 1024)
+dataset_size -= dataset_size % prompt_batch
+reuse_count = max(
+    1,
+    training_args.num_generations
+    * training_args.num_iterations
+    * (training_args.steps_per_generation or 1),
+)
+train_dataset = _SelfPlayDataset(
+    collector,
+    games_per_batch=8,
+    size=dataset_size,
+    reuse_count=reuse_count,
+)
 
-    def extract_kuhn_plan(text: str) -> tuple[str | None, str | None]:
-        """Extract (first_action, response_action) from model text."""
-        if not text:
-            return None, None
-        matches = ACTION_RE.findall(text)
-        first = None
-        response = None
-        for m in matches:
-            a = m.strip().lower()
-            if first is None and a in ("check", "bet"):
-                first = a
-                continue
-            if response is None and a in ("fold", "call"):
-                response = a
-        return first, response
+trainer = GRPOTrainer(
+    model=model,
+    processing_class=tokenizer,
+    reward_funcs=spiral_kuhn_reward,
+    args=training_args,
+    train_dataset=train_dataset,
+)
 
-    def _extract_agent_reward(reward_obj) -> float:
-        """Best-effort extraction of the agent (player 0) reward from OpenEnv's reward payload."""
-        if reward_obj is None:
-            return 0.0
-        try:
-            if isinstance(reward_obj, dict):
-                return float(reward_obj.get(0, 0.0))
-            if isinstance(reward_obj, (list, tuple)):
-                return float(reward_obj[0]) if len(reward_obj) > 0 else 0.0
-            return float(reward_obj)
-        except Exception:
-            return 0.0
-
-    def _kuhn_action_to_id(action_name: str) -> int:
-        """Map semantic action name to OpenSpiel Kuhn Poker action id."""
-        if action_name in ("check", "fold"):
-            return 0
-        if action_name in ("bet", "call"):
-            return 1
-        raise ValueError(f"Unknown action: {action_name}")
-
-    @execute_with_time_limit(5)
-    def run_kuhn_episode(first_action: str | None, response_action: str | None):
-        """Play one Kuhn Poker episode using the model's parsed plan."""
-        # If FIRST is missing or invalid, terminate immediately
-        if first_action not in ("check", "bet"):
-            return float(INVALID_ACTION_PENALTY), True, 0, "invalid_first"
-
-        global port, openenv_process
-        port, openenv_process = launch_openenv(port, openenv_process)
-        result = openenv_process.reset()
-        current_state = result.observation
-
-        total_reward = 0.0
-        agent_decisions = 0
-
-        while not current_state.done:
-            # Kuhn Poker agent (player0) can act at most twice
-            if agent_decisions == 0:
-                action_name = first_action
-                allowed = ("check", "bet")
-            else:
-                # Second decision is only possible if the opponent bet after our check
-                action_name = response_action
-                allowed = ("fold", "call")
-
-            if action_name not in allowed:
-                return float(INVALID_ACTION_PENALTY), True, agent_decisions, "invalid_response"
-
-            action_id = _kuhn_action_to_id(action_name)
-
-            # Extra sanity check vs environment's legal_actions
-            if hasattr(current_state, "legal_actions") and current_state.legal_actions is not None:
-                if action_id not in current_state.legal_actions:
-                    return float(INVALID_ACTION_PENALTY), True, agent_decisions, "illegal_action_id"
-
-            action = OpenSpielAction(action_id=action_id, game_name="kuhn_poker")
-            result = openenv_process.step(action)
-            current_state = result.observation
-
-            if result.reward is not None:
-                total_reward += _extract_agent_reward(result.reward)
-
-            agent_decisions += 1
-
-            # The agent should not have more than 2 decisions in Kuhn
-            if agent_decisions > 2 and not current_state.done:
-                return float(INVALID_ACTION_PENALTY), True, agent_decisions, "too_many_turns"
-
-        return float(total_reward), False, agent_decisions, "terminal"
-
-    # Extra per-step RL stats
-    global LATEST_RL_EXTRA_LOGS
-    LATEST_RL_EXTRA_LOGS = {}
-
-    def spiral_kuhn_reward(completions, **kwargs):
-        """Reward function aligned with SPIRAL's Kuhn Poker setup."""
-        global LATEST_RL_EXTRA_LOGS
-
-        scores: list[float] = []
-        raw_rewards: list[float] = []
-        shaped_rewards: list[float] = []
-        agent_turns: list[float] = []
-
-        invalid_count = 0
-        timeout_count = 0
-        exception_count = 0
-        win_count = 0
-        loss_count = 0
-        draw_count = 0
-
-        baseline_start = ROLE_BASELINE.get()
-
-        for completion in completions:
-            response_text = completion[0]["content"]
-            first_action, response_action = extract_kuhn_plan(response_text)
-
-            try:
-                raw_reward, invalid, n_turns, reason = run_kuhn_episode(first_action, response_action)
-            except TimeoutError:
-                raw_reward, invalid, n_turns, reason = float(INVALID_ACTION_PENALTY), True, 0, "timeout"
-                timeout_count += 1
-            except Exception:
-                raw_reward, invalid, n_turns, reason = float(INVALID_ACTION_PENALTY), True, 0, "exception"
-                exception_count += 1
-
-            # SPIRAL-style role baseline shaping
-            baseline_before = ROLE_BASELINE.get()
-            ROLE_BASELINE.update(raw_reward)
-            shaped = float(raw_reward - baseline_before)
-
-            scores.append(shaped)
-            raw_rewards.append(float(raw_reward))
-            shaped_rewards.append(float(shaped))
-            agent_turns.append(float(n_turns))
-
-            if invalid:
-                invalid_count += 1
-            else:
-                if raw_reward > 0:
-                    win_count += 1
-                elif raw_reward < 0:
-                    loss_count += 1
-                else:
-                    draw_count += 1
-
-        n = max(1, len(completions))
-        baseline_end = ROLE_BASELINE.get()
-
-        def _mean(xs: list[float]) -> float:
-            return float(np.mean(xs)) if xs else 0.0
-
-        def _std(xs: list[float]) -> float:
-            return float(np.std(xs)) if xs else 0.0
-
-        # Diagnostics
-        LATEST_RL_EXTRA_LOGS = {
-            "env/invalid_action_rate": invalid_count / n,
-            "env/timeout_rate": timeout_count / n,
-            "env/exception_rate": exception_count / n,
-            "env/raw_reward_mean": _mean(raw_rewards),
-            "env/raw_reward_std": _std(raw_rewards),
-            "env/raw_reward_min": float(min(raw_rewards)) if raw_rewards else 0.0,
-            "env/raw_reward_max": float(max(raw_rewards)) if raw_rewards else 0.0,
-            "env/shaped_reward_mean": _mean(shaped_rewards),
-            "env/agent_turns_mean": _mean(agent_turns),
-            "env/agent_turns_min": float(min(agent_turns)) if agent_turns else 0.0,
-            "env/agent_turns_max": float(max(agent_turns)) if agent_turns else 0.0,
-            "env/win_rate": win_count / n,
-            "env/loss_rate": loss_count / n,
-            "env/draw_rate": draw_count / n,
-            "env/role_baseline_start": float(baseline_start),
-            "env/role_baseline_end": float(baseline_end),
-        }
-
-        return scores
-
-    # Dataset
-    dataset = Dataset.from_list(
-        [
-            {
-                "prompt": [{"role": "user", "content": prompt.strip()}],
-                "answer": 0,
-                "reasoning_effort": "low",
-            }
-        ]
-        * 1000
-    )
-
-    maximum_length = len(
-        tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt.strip()}],
-            add_generation_prompt=True,
-        )
-    )
-    print(f"[train.py] maximum_length = {maximum_length}")
-
-    # GRPO training setup
-    max_prompt_length = maximum_length + 1  # + 1 just in case!
-    max_completion_length = max_seq_length - max_prompt_length
-
-    from trl import GRPOConfig, GRPOTrainer
-
-    training_args = GRPOConfig(
-        temperature=1.0,
-        learning_rate=2e-4,
-        weight_decay=0.001,
-        warmup_ratio=0.1,
-        lr_scheduler_type="linear",
-        optim="adamw_8bit",
-        logging_steps=1,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=1,
-        num_generations=2,
-        max_prompt_length=max_prompt_length,
-        max_completion_length=max_completion_length,
-        max_steps=args.max_steps,
-        save_steps=args.save_steps,
-        report_to=(
-            ["wandb", "trackio"] if args.use_wandb else "trackio"
-        ),
-        run_name=(args.wandb_name if args.use_wandb else None),
-        output_dir=str(output_dir),
-    )
-
-    trainer = GRPOTrainer(
-        model=model,
-        processing_class=tokenizer,
-        reward_funcs=[
-            spiral_kuhn_reward,
-        ],
-        args=training_args,
-        train_dataset=dataset,
-    )
-
-    from transformers import TrainerCallback
-
-    class _ExtraRLMetricsCallback(TrainerCallback):
-        def on_log(self, args, state, control, logs=None, **kwargs):
-            if logs is None:
-                return
-            global LATEST_RL_EXTRA_LOGS
-            if isinstance(LATEST_RL_EXTRA_LOGS, dict) and LATEST_RL_EXTRA_LOGS:
-                logs.update(LATEST_RL_EXTRA_LOGS)
-
-    trainer.add_callback(_ExtraRLMetricsCallback())
-
-    # Train
-    if args.resume:
-        trainer.train(resume_from_checkpoint=True)
-    else:
-        trainer.train()
+from transformers import TrainerCallback
 
 
-if __name__ == "__main__":
-    main()
+class _ExtraRLMetricsCallback(TrainerCallback):
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not logs:
+            return
+        global _LATEST_RL_EXTRA_LOGS
+        if isinstance(_LATEST_RL_EXTRA_LOGS, dict) and _LATEST_RL_EXTRA_LOGS:
+            logs.update(_LATEST_RL_EXTRA_LOGS)
+
+
+trainer.add_callback(_ExtraRLMetricsCallback())
+
+trainer.train()
+trainer.save_model("spiral_kuhn_grpo_model")
