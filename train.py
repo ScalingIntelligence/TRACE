@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Dict
 
-ROOT = Path("/matx/u/acshi").resolve()
+ROOT = Path(f"/matx/u/{os.getenv('USER')}").resolve()
 HF_HOME = ROOT / ".cache" / "huggingface"
 HF_HUB = HF_HOME / "hub"
 HF_DATASETS = HF_HOME / "datasets"
@@ -21,7 +21,7 @@ os.environ.setdefault("HF_DATASETS_CACHE", str(HF_DATASETS))
 WANDB_DIR = ROOT / "workplace" / "games" / "wandb"
 WANDB_DIR.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("WANDB_DIR", str(WANDB_DIR))
-os.environ.setdefault("WANDB_ENTITY", "acshi-stanford-university")
+# os.environ.setdefault(f"WANDB_ENTITY", f"hangoo94-stanford-university")
 os.environ.setdefault("WANDB_PROJECT", "games")
 
 import torch
@@ -276,6 +276,9 @@ def _messages(player_id: int, observation: str):
     ]
 
 
+# Cap generation length because valid actions are single tokens; large values
+# were causing very long generations and GPU OOM.
+MAX_ACTION_TOKENS = 512
 max_seq_length = 768
 lora_rank = 4
 model, tokenizer = FastLanguageModel.from_pretrained(
@@ -303,7 +306,7 @@ if wandb:
         os.environ["WANDB_NAME"] = f"gpt-oss-20b-kuhn-spiral-grpo-{int(time.time())}"
     wandb.login(key=os.getenv("WANDB_API_KEY", ""), relogin=True)
     wandb.init(
-        entity=os.getenv("WANDB_ENTITY", "acshi-stanford-university"),
+        # entity=os.getenv("WANDB_ENTITY", "hangoo94-stanford-university"),
         project=os.getenv("WANDB_PROJECT", "games"),
         name=os.getenv("WANDB_NAME"),
     )
@@ -359,7 +362,9 @@ class _SelfPlayCollector:
                 state_json = env.to_json()
                 legal = env.legal_actions()
 
+                turn_t_start = time.time()
                 raw_response = _generate_action(pid, obs, self.temperature, self.max_new_tokens)
+                turn_t_after_generate = time.time()
                 action = _extract_action(raw_response, legal)
                 action_valid = action in legal
 
@@ -376,6 +381,10 @@ class _SelfPlayCollector:
                     }
                 )
 
+                env.step(action)
+                turn_idx += 1
+                turn_t_end = time.time()
+
                 self._logger.log(
                     {
                         "type": "step",
@@ -388,12 +397,11 @@ class _SelfPlayCollector:
                         "action": action,
                         "action_valid": action_valid,
                         "legal_actions": legal,
+                        "duration_generate_sec": turn_t_after_generate - turn_t_start,
+                        "duration_turn_sec": turn_t_end - turn_t_start,
                         "timestamp": time.time(),
                     }
                 )
-
-                env.step(action)
-                turn_idx += 1
 
             rewards = env.rewards
             for pid in (0, 1):
@@ -477,6 +485,7 @@ def _generate_action(player_id: int, observation: str, temperature: float, max_n
             top_p=1.0,
             use_cache=True,
             pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id
         )
     if was_training:
         model.train()
@@ -542,40 +551,35 @@ def spiral_kuhn_reward(
         act = _extract_action(response, env.legal_actions())
         env.step(act)
 
-        turn_counts = {0: 0, 1: 0}
-        turn_counts[pid] += 1
-        if not env.done:
-            rollout_rewards, rollout_counts, rollout_turns = _rollout(
-                env,
-                temperature=1.0,
-                max_new_tokens=min(8092, max_completion_length),
-            )
-            for k, v in rollout_counts.items():
-                turn_counts[k] += v
-            total_turns = 1 + rollout_turns
-            rewards_dict = rollout_rewards
+        # Terminal reward only: give reward only if game ended, otherwise 0
+        if env.done:
+            raw_reward = float(env.rewards[pid]) * REWARD_SCALING
+            total_turns = 1  # This action ended the game
         else:
+            # Game continues - no reward until terminal state
+            raw_reward = 0.0
             total_turns = 1
-            rewards_dict = env.rewards
 
-        raw_reward = float(rewards_dict[pid]) * REWARD_SCALING
         base = _BASELINES[pid].value if USE_ROLE_BASELINE else 0.0
-        if USE_ROLE_BASELINE:
+        if USE_ROLE_BASELINE and env.done:
+            # Only update baseline on terminal rewards
             _BASELINES[pid].update(raw_reward)
             raw_reward -= base
-        steps_from_end = max(0, turn_counts[pid] - 1)
-        if USE_INTERMEDIATE_REWARDS:
-            adv = raw_reward * (REWARD_GAMMA**steps_from_end)
-        else:
-            adv = raw_reward
+        elif USE_ROLE_BASELINE:
+            # For non-terminal actions, subtract baseline but reward is 0
+            raw_reward = 0.0 - base
+
+        # No intermediate reward discounting needed since we only give terminal rewards
+        adv = raw_reward
         if FILTER_ZERO_ADV and adv == 0.0:
             adv = 0.0
         rewards.append(adv)
 
         game_lens += total_turns
         invalids += 1 if env.invalid_player is not None else 0
-        wins_p0 += 1 if rewards_dict.get(0, 0.0) > 0 else 0
-        raw_sum += float(rewards_dict.get(pid, 0.0))
+        if env.done:
+            wins_p0 += 1 if env.rewards.get(0, 0.0) > 0 else 0
+            raw_sum += float(env.rewards.get(pid, 0.0))
         adv_sum += adv
 
     global _LATEST_RL_EXTRA_LOGS
@@ -600,7 +604,7 @@ maximum_length = len(
     tokenizer.apply_chat_template(sample_prompt, add_generation_prompt=True, tokenize=True)
 )
 max_prompt_length = maximum_length + 1
-max_completion_length = 8092
+max_completion_length = MAX_ACTION_TOKENS
 if max_completion_length <= 0:
     raise ValueError(
         f"max_completion_length={max_completion_length} is not positive; reduce prompt size or increase max_seq_length"
@@ -641,7 +645,7 @@ training_args = GRPOConfig(
 collector = _SelfPlayCollector(
     num_rounds=5,
     temperature=training_args.temperature,
-    max_new_tokens=min(8092, max_completion_length),
+    max_new_tokens=MAX_ACTION_TOKENS,
     log_path=ROLLOUT_LOG_PATH,
     seed=0,
 )
@@ -656,7 +660,7 @@ reuse_count = max(
 )
 train_dataset = _SelfPlayDataset(
     collector,
-    games_per_batch=8,
+    games_per_batch=2,
     size=dataset_size,
     reuse_count=reuse_count,
 )
