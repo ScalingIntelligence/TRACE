@@ -13,6 +13,10 @@ wandb
 fastapi
 uvicorn
 requests
+sympy
+regex
+word2number
+latex2sympy2
 open_spiel
 # Unsloth (latest from source, same as the notebook)
 unsloth_zoo[base] @ git+https://github.com/unslothai/unsloth-zoo
