@@ -16,6 +16,7 @@ import json
 import random
 import re
 import time
+import requests
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -261,12 +262,13 @@ class KuhnPoker:
 # =========================
 # Reasoning prompt + early stop on FINAL action line
 # =========================
+    # "Think step by step and you MAY include reasoning.\n"
+    # "Important:\n"
+    # "- Do NOT include any bracketed action tokens in your reasoning.\n"
+    # "- After reasoning, output exactly one FINAL action token on its own line: "
 SYSTEM_PROMPT = (
     "You are playing Kuhn Poker.\n"
-    "Think step by step and you MAY include reasoning.\n"
-    "Important:\n"
-    "- Do NOT include any bracketed action tokens in your reasoning.\n"
-    "- After reasoning, output exactly one FINAL action token on its own line: "
+    " Do NOT generate any other texts or reasoning, only output exactly one FINAL action token on its own line: "
     "[check] or [bet] or [call] or [fold]."
 )
 
@@ -318,6 +320,217 @@ def _generate_completion(model, tokenizer, player_id: int, observation: str, tem
     if was_training:
         model.train()
     return tokenizer.decode(out_ids[0][input_ids.shape[-1]:], skip_special_tokens=True)
+
+
+# Added vLLM backend that supports:
+#   - batched generation (one request for many prompts)
+#   - stop strings that terminate immediately after emitting the final action
+#     token line
+#   - dynamic LoRA adapter reloading (server mode) so rollouts always use the
+#     latest policy weights
+
+_VLLM_STOP_STRINGS = ["\n[check]", "\n[bet]", "\n[call]", "\n[fold]"]
+
+
+def _normalize_vllm_openai_base_url(base_url: str) -> str:
+    """Normalize a vLLM OpenAI-server base URL."""
+
+    url = (base_url or "").strip().rstrip("/")
+    if not url:
+        return url
+    if url.endswith("/v1"):
+        return url
+    return url + "/v1"
+
+
+def _build_prompt_text(tokenizer, msgs: list) -> str:
+    """
+        Build a string prompt using the model's chat template.
+        Uses string prompts for vLLM/OpenAI-server compatibility.
+    """
+    # Transformers' API is stable here, but keep a defensive fallback.
+    try:
+        return tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    except TypeError:
+        # Older tokenizers may not have tokenize=; fall back to token ids then decode.
+        ids = tokenizer.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt")[0]
+        return tokenizer.decode(ids, skip_special_tokens=False)
+
+
+class _InferenceBackend:
+    """Minimal interface so the collector can batch rollouts when possible."""
+
+    name: str = "base"
+
+    def is_enabled(self) -> bool:
+        return False
+
+    def supports_batch(self) -> bool:
+        return False
+
+    def sync_policy(self, policy_model: nn.Module, adapter_dir: Path) -> None:
+        return None
+
+    def generate(self, prompts: List[str], temperature: float, max_new_tokens: int) -> List[str]:
+        raise NotImplementedError
+
+
+class _HFLocalBackend(_InferenceBackend):
+    name = "hf_local"
+
+    def __init__(self, model, tokenizer):
+        self.model = model
+        self.tokenizer = tokenizer
+
+    def is_enabled(self) -> bool:
+        return True
+
+    def supports_batch(self) -> bool:
+        # Our HF path uses a custom stopping criteria that is easiest to keep per-sample.
+        return False
+
+    def generate(self, prompts: List[str], temperature: float, max_new_tokens: int) -> List[str]:
+        # prompts are ignored; we keep the original generation path using messages.
+        raise RuntimeError("_HFLocalBackend.generate should not be called with string prompts.")
+
+    def generate_one(self, player_id: int, observation: str, temperature: float, max_new_tokens: int) -> str:
+        return _generate_completion(self.model, self.tokenizer, player_id, observation, temperature, max_new_tokens)
+
+
+class _VLLMServerBackend(_InferenceBackend):
+    """Calls a running vllm serve OpenAI-compatible server."""
+
+    name = "vllm_server"
+
+    def __init__(
+        self,
+        base_url: str,
+        model_name: str,
+        api_key: str | None = None,
+        timeout_s: float = 120.0,
+        lora_name: str = "ppo_policy",
+        allow_lora_reload: bool = True,
+    ):
+        # Normalize to the OpenAI-compatible /v1 prefix so users can pass
+        # either http://host:8000 or http://host:8000/v1.
+        self.base_url = _normalize_vllm_openai_base_url(base_url)
+        self.model_name = model_name
+        self.lora_name = lora_name
+        self.allow_lora_reload = bool(allow_lora_reload)
+        self.timeout_s = float(timeout_s)
+        self.session = requests.Session()
+        self.headers: Dict[str, str] = {}
+        if api_key:
+            self.headers["Authorization"] = f"Bearer {api_key}"
+
+        # If LoRA reloading is enabled, we will request generations using the LoRA
+        # model name, not the base model name.
+        self._active_model_for_generation = self.lora_name if self.allow_lora_reload else self.model_name
+
+        # Probe the server early so we can cleanly fall back.
+        self._ok = self._probe_server()
+
+    def _probe_server(self) -> bool:
+        try:
+            r = self.session.get(self.base_url + "/models", headers=self.headers, timeout=min(10.0, self.timeout_s))
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    def is_enabled(self) -> bool:
+        return self._ok
+
+    def supports_batch(self) -> bool:
+        return True
+
+    def _post_json(self, path: str, payload: dict) -> requests.Response:
+        return self.session.post(
+            self.base_url + path,
+            headers=self.headers,
+            json=payload,
+            timeout=self.timeout_s,
+        )
+
+    def sync_policy(self, policy_model: nn.Module, adapter_dir: Path) -> None:
+        if not self._ok or not self.allow_lora_reload:
+            return
+
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        # Save the LoRA adapter only (fast), PEFT models save adapters by default.
+        policy_model.save_pretrained(str(adapter_dir))
+
+        # Best-effort reload on the server. Requires:
+        #   export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+        #   and vLLM server launched with --enable-lora.
+        try:
+            # Unload if present.
+            self._post_json("/unload_lora_adapter", {"lora_name": self.lora_name})
+            r = self._post_json(
+                "/load_lora_adapter",
+                {"lora_name": self.lora_name, "lora_path": str(adapter_dir)},
+            )
+            r.raise_for_status()
+        except Exception as e:
+            # If we can't ensure vLLM is using the latest policy adapter, we must
+            # not use it for rollouts (that would change the training logic).
+            print(
+                f"[vLLM] LoRA reload failed ({type(e).__name__}: {e}). "
+                "Disabling vLLM backend and falling back to local HF generation for correctness."
+            )
+            self._ok = False
+
+    def generate(self, prompts: List[str], temperature: float, max_new_tokens: int) -> List[str]:
+        if not self._ok:
+            raise RuntimeError("vLLM server backend is not available")
+
+        payload = {
+            "model": self._active_model_for_generation,
+            "prompt": prompts,
+            "max_tokens": int(max_new_tokens),
+            "temperature": float(temperature),
+            "top_p": 1.0,
+            "n": 1,
+            "stream": False,
+            "stop": _VLLM_STOP_STRINGS,
+            "reasoning_effort": "low",
+            "extra_body": {"reasoning_effort": "low"},
+            # vLLM OpenAI server supports this as an extra parameter.
+            "include_stop_str_in_output": True,
+        }
+        r = self._post_json("/completions", payload)
+        r.raise_for_status()
+        data = r.json()
+        out = [""] * len(prompts)
+        for ch in data.get("choices", []):
+            # For batched prompts, vLLM uses index to indicate the prompt index.
+            idx = int(ch.get("index", 0))
+            if 0 <= idx < len(out):
+                out[idx] = ch.get("text", "")
+        return out
+
+
+def _init_inference_backend(model, tokenizer) -> _InferenceBackend:
+    """Pick the fastest available inference backend."""
+    # Check for server-based vLLM when configured.
+    vllm_base_url = os.getenv("VLLM_BASE_URL", "").strip()
+    if vllm_base_url:
+        backend = _VLLMServerBackend(
+            base_url=vllm_base_url,
+            model_name=os.getenv("VLLM_MODEL", "unsloth/gpt-oss-20b"),
+            api_key=os.getenv("VLLM_API_KEY", "") or None,
+            timeout_s=float(os.getenv("VLLM_TIMEOUT_S", "120")),
+            lora_name=os.getenv("VLLM_LORA_NAME", "ppo_policy"),
+            allow_lora_reload=os.getenv("VLLM_ALLOW_LORA_RELOAD", "1") == "1",
+        )
+        if backend.is_enabled():
+            print(
+                f"[vLLM] Using OpenAI-compatible server backend at {backend.base_url} "
+                f"(model={backend.model_name})."
+            )
+            return backend
+        norm_url = _normalize_vllm_openai_base_url(vllm_base_url)
+        print(f"[vLLM] Server at {norm_url} not reachable; falling back to local HF generation.")
+    return _HFLocalBackend(model, tokenizer)
 
 
 # =========================
@@ -467,6 +680,7 @@ class StepSample:
 def collect_games(
     model,
     tokenizer,
+    backend: _InferenceBackend,
     num_games: int,
     num_rounds: int,
     temperature: float,
@@ -481,66 +695,155 @@ def collect_games(
     total_turns = 0
     p0_wins = 0
 
-    for g in range(num_games):
-        game_id = seed * 1_000_000 + g
-        env = KuhnPoker(num_rounds=num_rounds)
-        env.reset(rng.randint(0, 2**31 - 1))
+    # Batch rollout generation if the backend supports it (e.g., vLLM).
+    if backend.supports_batch():
+        envs: List[KuhnPoker] = []
+        game_ids: List[int] = []
+        episode_steps: List[List[Tuple[list, str, int, str]]] = []
+        turn_idxs = [0 for _ in range(num_games)]
 
-        episode_steps: List[Tuple[list, str, int, str]] = []
-        turn_idx = 0
+        for g in range(num_games):
+            game_id = seed * 1_000_000 + g
+            env = KuhnPoker(num_rounds=num_rounds)
+            env.reset(rng.randint(0, 2**31 - 1))
+            envs.append(env)
+            game_ids.append(game_id)
+            episode_steps.append([])
 
-        while not env.done:
-            pid = env.current_player
-            obs = env.observe(pid)
-            legal = env.legal_actions()
+        while True:
+            active = [i for i, e in enumerate(envs) if not e.done]
+            if not active:
+                break
+
+            prompts: List[str] = []
+            meta: List[Tuple[int, int, str, List[str], list]] = []
+
+            for i in active:
+                env = envs[i]
+                pid = env.current_player
+                obs = env.observe(pid)
+                legal = env.legal_actions()
+                msgs = _messages(pid, obs)
+                prompts.append(_build_prompt_text(tokenizer, msgs))
+                meta.append((i, pid, obs, legal, msgs))
 
             t0 = time.time()
-            completion = _generate_completion(model, tokenizer, pid, obs, temperature=temperature, max_new_tokens=max_new_tokens)
+            completions = backend.generate(prompts, temperature=temperature, max_new_tokens=max_new_tokens)
             t1 = time.time()
+            per_item_dt = (t1 - t0) / max(1, len(active))
 
-            act = _extract_action(completion, legal)
-            if act is None:
-                act = rng.choice(legal)
+            for j, (i, pid, obs, legal, msgs) in enumerate(meta):
+                completion = completions[j]
+                act = _extract_action(completion, legal)
+                if act is None:
+                    act = rng.choice(legal)
 
-            episode_steps.append((_messages(pid, obs), act, pid, completion))
-            env.step(act)
+                episode_steps[i].append((msgs, act, pid, completion))
+                envs[i].step(act)
 
-            turn_idx += 1
-            total_turns += 1
+                turn_idxs[i] += 1
+                total_turns += 1
+
+                logger.log({
+                    "type": "step",
+                    "game_id": game_ids[i],
+                    "turn_idx": turn_idxs[i],
+                    "player_id": pid,
+                    "legal_actions": legal,
+                    "action": act,
+                    "completion": completion,
+                    # Batched generation: we attribute average batch latency to each step.
+                    "duration_generate_sec": per_item_dt,
+                    "timestamp": time.time(),
+                })
+
+        # Episode end summaries + StepSample creation.
+        for i, env in enumerate(envs):
+            invalid_games += 1 if env.invalid_player is not None else 0
+            p0_wins += 1 if env.rewards.get(0, 0.0) > 0 else 0
 
             logger.log({
-                "type": "step",
-                "game_id": game_id,
-                "turn_idx": turn_idx,
-                "player_id": pid,
-                "legal_actions": legal,
-                "action": act,
-                "completion": completion,
-                "duration_generate_sec": t1 - t0,
+                "type": "game_end",
+                "game_id": game_ids[i],
+                "turns": turn_idxs[i],
+                "rewards": env.rewards,
+                "invalid_player": env.invalid_player,
                 "timestamp": time.time(),
             })
 
-        invalid_games += 1 if env.invalid_player is not None else 0
-        p0_wins += 1 if env.rewards.get(0, 0.0) > 0 else 0
+            for pm, act, pid, completion in episode_steps[i]:
+                samples.append(StepSample(
+                    prompt_msgs=pm,
+                    action_str=act,
+                    player_id=pid,
+                    ret=float(env.rewards[pid]),
+                    completion_text=completion,
+                    game_id=game_ids[i],
+                ))
+    else:
+        # Fallback path: original per-step generation
+        # Does not require vLLM
+        for g in range(num_games):
+            game_id = seed * 1_000_000 + g
+            env = KuhnPoker(num_rounds=num_rounds)
+            env.reset(rng.randint(0, 2**31 - 1))
 
-        logger.log({
-            "type": "game_end",
-            "game_id": game_id,
-            "turns": turn_idx,
-            "rewards": env.rewards,
-            "invalid_player": env.invalid_player,
-            "timestamp": time.time(),
-        })
+            episode_steps: List[Tuple[list, str, int, str]] = []
+            turn_idx = 0
 
-        for pm, act, pid, completion in episode_steps:
-            samples.append(StepSample(
-                prompt_msgs=pm,
-                action_str=act,
-                player_id=pid,
-                ret=float(env.rewards[pid]),
-                completion_text=completion,
-                game_id=game_id,
-            ))
+            while not env.done:
+                pid = env.current_player
+                obs = env.observe(pid)
+                legal = env.legal_actions()
+
+                t0 = time.time()
+                # Use HF generation (with custom stopping) in fallback mode.
+                completion = _generate_completion(model, tokenizer, pid, obs, temperature=temperature, max_new_tokens=max_new_tokens)
+                t1 = time.time()
+
+                act = _extract_action(completion, legal)
+                if act is None:
+                    act = rng.choice(legal)
+
+                episode_steps.append((_messages(pid, obs), act, pid, completion))
+                env.step(act)
+
+                turn_idx += 1
+                total_turns += 1
+
+                logger.log({
+                    "type": "step",
+                    "game_id": game_id,
+                    "turn_idx": turn_idx,
+                    "player_id": pid,
+                    "legal_actions": legal,
+                    "action": act,
+                    "completion": completion,
+                    "duration_generate_sec": t1 - t0,
+                    "timestamp": time.time(),
+                })
+
+            invalid_games += 1 if env.invalid_player is not None else 0
+            p0_wins += 1 if env.rewards.get(0, 0.0) > 0 else 0
+
+            logger.log({
+                "type": "game_end",
+                "game_id": game_id,
+                "turns": turn_idx,
+                "rewards": env.rewards,
+                "invalid_player": env.invalid_player,
+                "timestamp": time.time(),
+            })
+
+            for pm, act, pid, completion in episode_steps:
+                samples.append(StepSample(
+                    prompt_msgs=pm,
+                    action_str=act,
+                    player_id=pid,
+                    ret=float(env.rewards[pid]),
+                    completion_text=completion,
+                    game_id=game_id,
+                ))
 
     metrics = {
         "env/invalid_game_rate": invalid_games / max(1, num_games),
@@ -557,6 +860,7 @@ def collect_games(
 def evaluate_vs_random(
     current_model,
     tokenizer,
+    backend: _InferenceBackend,
     num_games: int,
     num_rounds: int,
     temperature: float,
@@ -564,55 +868,248 @@ def evaluate_vs_random(
     seed: int,
 ) -> Dict[str, float]:
     rng = random.Random(int(seed))
-    wins_current = 0
-    invalids = 0
-    total_turns = 0
 
     # seat swap for fairness
     half = max(1, num_games // 2)
 
-    def play_one(game_seed: int, current_is_p0: bool) -> Tuple[int, bool, int]:
+    # Build all envs up-front so we can optionally batch model turns.
+    envs: List[KuhnPoker] = []
+    current_is_p0: List[bool] = []
+    for i in range(num_games):
         env = KuhnPoker(num_rounds=num_rounds)
-        env.reset(game_seed)
-        turns = 0
-        while not env.done:
+        env.reset(rng.randint(0, 2**31 - 1))
+        envs.append(env)
+        current_is_p0.append(i < half)
+
+    turn_counts = [0 for _ in range(num_games)]
+
+    # Batched loop: each iteration we (1) batch all turns that require the current
+    # policy, then (2) play out the random-opponent turns.
+    while True:
+        active = [i for i, e in enumerate(envs) if not e.done]
+        if not active:
+            break
+
+        # 1) Policy turns (batched when available)
+        policy_idxs: List[int] = []
+        prompts: List[str] = []
+        meta: List[Tuple[int, int, List[str], str]] = []
+
+        for i in active:
+            env = envs[i]
             pid = env.current_player
+            is_policy_turn = (pid == 0 and current_is_p0[i]) or (pid == 1 and (not current_is_p0[i]))
+            if not is_policy_turn:
+                continue
             obs = env.observe(pid)
             legal = env.legal_actions()
+            msgs = _messages(pid, obs)
+            policy_idxs.append(i)
+            prompts.append(_build_prompt_text(tokenizer, msgs))
+            meta.append((i, pid, legal, obs))
 
-            if (pid == 0 and current_is_p0) or (pid == 1 and (not current_is_p0)):
-                completion = _generate_completion(current_model, tokenizer, pid, obs, temperature=temperature, max_new_tokens=max_new_tokens)
+        if prompts:
+            if backend.supports_batch():
+                completions = backend.generate(prompts, temperature=temperature, max_new_tokens=max_new_tokens)
+            else:
+                # HF fallback keeps identical stopping behavior
+                completions = [
+                    _generate_completion(current_model, tokenizer, pid, obs, temperature=temperature, max_new_tokens=max_new_tokens)
+                    for (_, pid, _legal, obs) in meta
+                ]
+
+            for j, (i, pid, legal, _obs) in enumerate(meta):
+                completion = completions[j]
                 act = _extract_action(completion, legal)
                 if act is None:
                     act = rng.choice(legal)
-            else:
-                act = rng.choice(legal)
+                envs[i].step(act)
+                turn_counts[i] += 1
 
-            env.step(act)
-            turns += 1
+        # 2) Random opponent turns
+        for i in active:
+            env = envs[i]
+            if env.done:
+                continue
+            pid = env.current_player
+            is_policy_turn = (pid == 0 and current_is_p0[i]) or (pid == 1 and (not current_is_p0[i]))
+            if is_policy_turn:
+                continue
+            legal = env.legal_actions()
+            env.step(rng.choice(legal))
+            turn_counts[i] += 1
 
-        invalid = env.invalid_player is not None
-        current_won = (env.rewards[0] > 0) if current_is_p0 else (env.rewards[1] > 0)
-        return (1 if current_won else 0), invalid, turns
-
-    for _ in range(half):
-        game_seed = rng.randint(0, 2**31 - 1)
-        w, inv, turns = play_one(game_seed, current_is_p0=True)
-        wins_current += w
-        invalids += 1 if inv else 0
-        total_turns += turns
-
-    for _ in range(num_games - half):
-        game_seed = rng.randint(0, 2**31 - 1)
-        w, inv, turns = play_one(game_seed, current_is_p0=False)
-        wins_current += w
-        invalids += 1 if inv else 0
-        total_turns += turns
+    # Aggregate metrics
+    wins_current = 0
+    invalids = 0
+    total_turns = sum(turn_counts)
+    for i, env in enumerate(envs):
+        invalids += 1 if env.invalid_player is not None else 0
+        current_won = (env.rewards[0] > 0) if current_is_p0[i] else (env.rewards[1] > 0)
+        wins_current += 1 if current_won else 0
 
     return {
         "eval/win_rate_vs_random": wins_current / max(1, num_games),
         "eval/invalid_game_rate": invalids / max(1, num_games),
         "eval/turns_per_game_mean": total_turns / max(1, num_games),
+    }
+
+
+@torch.no_grad()
+def evaluate_vs_base(
+    current_model,
+    base_model_adapter_dir: Path,
+    tokenizer,
+    backend: _InferenceBackend,
+    num_games: int,
+    num_rounds: int,
+    temperature: float,
+    max_new_tokens: int,
+    seed: int,
+) -> Dict[str, float]:
+    """
+    Evaluate current trained model against the base (untrained) model.
+    Uses the saved base model adapter weights for the opponent.
+    """
+    rng = random.Random(int(seed))
+    
+    # Load base model with saved adapter (untrained state)
+    # Load base model structure (unpack tuple: model, tokenizer)
+    base_model, _ = FastLanguageModel.from_pretrained(
+        model_name="unsloth/gpt-oss-20b",
+        max_seq_length=768,
+        dtype=None,
+        load_in_4bit=True,
+        offload_embedding=True,
+        cache_dir=str(HF_HUB),
+    )
+    # Create PEFT model structure (same config as main model)
+    base_model = FastLanguageModel.get_peft_model(
+        base_model,
+        r=4,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        lora_alpha=8,
+        use_gradient_checkpointing="unsloth",
+        random_state=3407,
+    )
+    # Load the saved base adapter weights
+    # Since base_model is already a PEFT model, use load_adapter
+    base_model.load_adapter(str(base_model_adapter_dir), adapter_name="base")
+    base_model.set_adapter("base")
+    base_model = base_model.to(DEVICE)
+    base_model.eval()
+    
+    # Create backend for base model (local HF only for simplicity)
+    base_backend = _HFLocalBackend(base_model, tokenizer)
+    
+    # Seat swap for fairness
+    half = max(1, num_games // 2)
+    
+    # Build all envs up-front
+    envs: List[KuhnPoker] = []
+    current_is_p0: List[bool] = []
+    for i in range(num_games):
+        env = KuhnPoker(num_rounds=num_rounds)
+        env.reset(rng.randint(0, 2**31 - 1))
+        envs.append(env)
+        current_is_p0.append(i < half)
+    
+    turn_counts = [0 for _ in range(num_games)]
+    
+    # Game loop: current model vs base model
+    while True:
+        active = [i for i, e in enumerate(envs) if not e.done]
+        if not active:
+            break
+        
+        # Current model turns (batched when available)
+        current_policy_idxs: List[int] = []
+        current_prompts: List[str] = []
+        current_meta: List[Tuple[int, int, List[str], str]] = []
+        
+        for i in active:
+            env = envs[i]
+            pid = env.current_player
+            is_current_turn = (pid == 0 and current_is_p0[i]) or (pid == 1 and (not current_is_p0[i]))
+            if not is_current_turn:
+                continue
+            obs = env.observe(pid)
+            legal = env.legal_actions()
+            msgs = _messages(pid, obs)
+            current_policy_idxs.append(i)
+            current_prompts.append(_build_prompt_text(tokenizer, msgs))
+            current_meta.append((i, pid, legal, obs))
+        
+        if current_prompts:
+            if backend.supports_batch():
+                completions = backend.generate(current_prompts, temperature=temperature, max_new_tokens=max_new_tokens)
+            else:
+                completions = [
+                    _generate_completion(current_model, tokenizer, pid, obs, temperature=temperature, max_new_tokens=max_new_tokens)
+                    for (_, pid, _legal, obs) in current_meta
+                ]
+            
+            for j, (i, pid, legal, _obs) in enumerate(current_meta):
+                completion = completions[j]
+                act = _extract_action(completion, legal)
+                if act is None:
+                    act = rng.choice(legal)
+                envs[i].step(act)
+                turn_counts[i] += 1
+        
+        # Base model turns
+        base_policy_idxs: List[int] = []
+        base_prompts: List[str] = []
+        base_meta: List[Tuple[int, int, List[str], str]] = []
+        
+        for i in active:
+            env = envs[i]
+            if env.done:
+                continue
+            pid = env.current_player
+            is_base_turn = (pid == 0 and (not current_is_p0[i])) or (pid == 1 and current_is_p0[i])
+            if not is_base_turn:
+                continue
+            obs = env.observe(pid)
+            legal = env.legal_actions()
+            msgs = _messages(pid, obs)
+            base_policy_idxs.append(i)
+            base_prompts.append(_build_prompt_text(tokenizer, msgs))
+            base_meta.append((i, pid, legal, obs))
+        
+        if base_prompts:
+            # Base model always uses local HF backend
+            completions = [
+                _generate_completion(base_model, tokenizer, pid, obs, temperature=temperature, max_new_tokens=max_new_tokens)
+                for (_, pid, _legal, obs) in base_meta
+            ]
+            
+            for j, (i, pid, legal, _obs) in enumerate(base_meta):
+                completion = completions[j]
+                act = _extract_action(completion, legal)
+                if act is None:
+                    act = rng.choice(legal)
+                envs[i].step(act)
+                turn_counts[i] += 1
+    
+    # Aggregate metrics
+    wins_current = 0
+    invalids = 0
+    total_turns = sum(turn_counts)
+    for i, env in enumerate(envs):
+        invalids += 1 if env.invalid_player is not None else 0
+        current_won = (env.rewards[0] > 0) if current_is_p0[i] else (env.rewards[1] > 0)
+        wins_current += 1 if current_won else 0
+    
+    # Clean up base model from memory
+    del base_model
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+    
+    return {
+        "eval/win_rate_vs_base": wins_current / max(1, num_games),
+        "eval/invalid_game_rate_vs_base": invalids / max(1, num_games),
+        "eval/turns_per_game_mean_vs_base": total_turns / max(1, num_games),
     }
 
 
@@ -648,6 +1145,18 @@ model = model.to(DEVICE)
 # Wrap with value head (critic)
 ac = PolicyWithValueHead(model).to(DEVICE)
 
+# Save initial base model adapter state for evaluation
+BASE_MODEL_ADAPTER_DIR = output_dir_path / "base_model_adapter"
+BASE_MODEL_ADAPTER_DIR.mkdir(parents=True, exist_ok=True)
+ac.lm.save_pretrained(str(BASE_MODEL_ADAPTER_DIR))
+print(f"[Base Model] Saved initial adapter state to {BASE_MODEL_ADAPTER_DIR}")
+
+# Initialize fastest available inference backend.
+inference_backend = _init_inference_backend(ac.lm, tokenizer)
+
+# Where we write the latest LoRA adapter so a vLLM server can reload it.
+VLLM_ADAPTER_DIR = output_dir_path / "vllm_adapter_latest"
+
 # =========================
 # Exact wandb init style you asked to keep
 # =========================
@@ -655,9 +1164,13 @@ if wandb:
     if not os.getenv("WANDB_NAME"):
         os.environ["WANDB_NAME"] = f"gpt-oss-20b-kuhn-spiral-ppo-{int(time.time())}"
     wandb.login(key=os.getenv("WANDB_API_KEY", ""), relogin=True)
+    # wandb.init(
+    #     project=os.getenv("WANDB_PROJECT", "games"),
+    #     name=os.getenv("WANDB_NAME"),
+    # )
     wandb.init(
-        project=os.getenv("WANDB_PROJECT", "games"),
-        name=os.getenv("WANDB_NAME"),
+        entity="forge_scaling_intelligence_lab",
+        project="games",
     )
 
 # =========================
@@ -671,12 +1184,12 @@ MINI_BATCH_SIZE = 2
 # Compute old_logp/old_v in tiny chunks to avoid full-batch GPU logits
 STATS_CHUNK_SIZE = 2
 
-LR = 2e-4
+LR = 1e-6
 CLIP_EPS = 0.2
 VF_COEF = 0.5
 
 MAX_GEN_TOKENS = 1024
-TEMPERATURE = 1.0
+TEMPERATURE = 0.7
 
 SAVE_EVERY_ITERS = 20
 EVAL_EVERY_ITERS = 20
@@ -696,9 +1209,18 @@ global_step = 0
 for it in tqdm(range(10_000), desc="PPO iters"):
     # 1) Collect self-play episodes
     t_collect0 = time.time()
+
+    # Keep vLLM's view of the policy weights up-to-date.
+    inference_backend.sync_policy(ac.lm, VLLM_ADAPTER_DIR)
+
+    # If the vLLM backend was disabled (e.g., LoRA reload not supported), fall back.
+    if not inference_backend.is_enabled():
+        inference_backend = _HFLocalBackend(ac.lm, tokenizer)
+
     batch, env_metrics = collect_games(
         model=ac.lm,  # current policy for rollout
         tokenizer=tokenizer,
+        backend=inference_backend,
         num_games=GAMES_PER_ITER,
         num_rounds=NUM_ROUNDS,
         temperature=TEMPERATURE,
@@ -856,22 +1378,74 @@ for it in tqdm(range(10_000), desc="PPO iters"):
     if wandb:
         wandb.log(logs, step=global_step)
 
-    # 6) Periodic eval vs random (no extra model)
+    # 6) Periodic eval vs random and vs base model
     if it % EVAL_EVERY_ITERS == 0:
-        print("Starting eval vs base")
         ac.eval()
-        eval_logs = evaluate_vs_random(
+
+        # If we're using vLLM for inference, refresh adapter weights post-update.
+        inference_backend.sync_policy(ac.lm, VLLM_ADAPTER_DIR)
+
+        if not inference_backend.is_enabled():
+            inference_backend = _HFLocalBackend(ac.lm, tokenizer)
+
+        # Eval vs random
+        print(f"[eval {it}] Starting eval vs random ({EVAL_GAMES} games)")
+        t_eval_random0 = time.time()
+        eval_logs_random = evaluate_vs_random(
             current_model=ac.lm,
             tokenizer=tokenizer,
+            backend=inference_backend,
             num_games=EVAL_GAMES,
             num_rounds=NUM_ROUNDS,
             temperature=1.0,
             max_new_tokens=MAX_GEN_TOKENS,
             seed=10_000 + it,
         )
-        print(f"[eval {it}] {eval_logs}")
+        t_eval_random1 = time.time()
+        win_rate_random = eval_logs_random.get("eval/win_rate_vs_random", 0.0)
+        print(f"[eval {it}] vs random: win_rate={win_rate_random:.3f} ({t_eval_random1-t_eval_random0:.1f}s)")
+        
+        # Eval vs base model (untrained)
+        print(f"[eval {it}] Starting eval vs base model ({EVAL_GAMES} games)")
+        t_eval_base0 = time.time()
+        eval_logs_base = evaluate_vs_base(
+            current_model=ac.lm,
+            base_model_adapter_dir=BASE_MODEL_ADAPTER_DIR,
+            tokenizer=tokenizer,
+            backend=inference_backend,
+            num_games=EVAL_GAMES,
+            num_rounds=NUM_ROUNDS,
+            temperature=1.0,
+            max_new_tokens=MAX_GEN_TOKENS,
+            seed=20_000 + it,
+        )
+        t_eval_base1 = time.time()
+        win_rate_base = eval_logs_base.get("eval/win_rate_vs_base", 0.0)
+        print(f"[eval {it}] vs base: win_rate={win_rate_base:.3f} ({t_eval_base1-t_eval_base0:.1f}s)")
+        
+        # Combine and organize all eval metrics for wandb
+        all_eval_logs = {
+            # Random opponent metrics
+            **eval_logs_random,
+            # Base model metrics  
+            **eval_logs_base,
+            # Evaluation timing
+            "eval/time_vs_random_sec": t_eval_random1 - t_eval_random0,
+            "eval/time_vs_base_sec": t_eval_base1 - t_eval_base0,
+            # Summary: improvement indicators
+            "eval/improvement_vs_base": win_rate_base - 0.5,  # >0 means better than base
+            "eval/improvement_vs_random": win_rate_random - 0.5,  # >0 means better than random
+        }
+        
+        # Print summary
+        print(f"[eval {it}] Summary: vs_random={win_rate_random:.3f}, vs_base={win_rate_base:.3f}")
+        if win_rate_base > 0.5:
+            print(f"[eval {it}] ✓ Model is better than base model!")
+        if win_rate_random > 0.5:
+            print(f"[eval {it}] ✓ Model is better than random!")
+        
         if wandb:
-            wandb.log(eval_logs, step=global_step)
+            wandb.log(all_eval_logs, step=global_step)
 
     # 7) Save checkpoints
     if it % SAVE_EVERY_ITERS == 0:
