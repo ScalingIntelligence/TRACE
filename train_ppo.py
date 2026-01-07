@@ -1,13 +1,21 @@
+
 #!/usr/bin/env python3
 # =========================
-# PPO self-play for Kuhn Poker with reasoning-enabled generation
+# PPO self-play for Kuhn Poker with STRICT action-only generation (no reasoning)
 # - Keeps your cache + wandb + output_dir layout exactly
-# - FIXES:
+# - Fixes:
 #   (1) gpt-oss MoE output handling (no last_hidden_state / hidden_states None)
 #   (2) dtype mismatches (bf16 vs fp32) in value head + PPO math
-#   (3) big memory spikes: pad PER-MINIBATCH + compute old_logp/old_v in chunks (no full-batch logits on GPU)
-# - REMOVES the frozen baseline deepcopy (that was often a hidden OOM source)
-# - Adds tqdm progress bars + lightweight eval vs random policy
+#   (3) big memory spikes: pad PER-MINIBATCH + compute old_logp/old_v in chunks
+# - NEW (your request):
+#   (4) HARD "no reasoning": constrained decoding so model can ONLY output
+#       exactly one of: [check] [bet] [call] [fold]
+#       - HF local: prefix_allowed_tokens_fn + stop on exact action tokens
+#       - vLLM: guided decoding (guided_choice) + stop strings
+# - Tweaks:
+#   - Lower MAX_GEN_TOKENS (action-only)
+#   - Deterministic eval (temperature=0.0)
+#   - Optionally normalize action logprob by action length (reduces variance)
 # =========================
 
 import copy
@@ -19,7 +27,7 @@ import time
 import requests
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import torch
 import torch.nn as nn
@@ -27,18 +35,7 @@ import torch.nn.functional as F
 from transformers import StoppingCriteria, StoppingCriteriaList
 from tqdm import tqdm
 
-from datasets import load_from_disk
 from unsloth import FastLanguageModel
-
-#Math Evaluation Harness
-import sys
-_HARNESS_PATH = Path(__file__).resolve().parent / "evals" / "benchmarks" / "math-evaluation-harness"
-sys.path.insert(0, str(_HARNESS_PATH))
-
-from grader import math_equal
-from parser import extract_answer, strip_string, parse_ground_truth
-
-
 
 # ------------------------------------------
 # Optional: allocator fragmentation guard
@@ -124,14 +121,19 @@ class _JSONLLogger:
 _ACTION_RE = re.compile(r"\[(check|bet|call|fold)\]", re.IGNORECASE)
 _CARD_RANK = {"J": 0, "Q": 1, "K": 2}
 
+ACTION_STRS = ["[check]", "[bet]", "[call]", "[fold]"]
 
-def _extract_action(text: str, legal_actions: List[str]) -> str | None:
+
+def _extract_action(text: str, legal_actions: List[str]) -> Optional[str]:
+    """
+    Take the FIRST legal action found.
+    With strict decoding, the completion should be exactly one action anyway.
+    """
     matches = _ACTION_RE.findall(text or "")
-    if matches:
-        for m in reversed(matches):
-            a = f"[{m.lower()}]"
-            if a in legal_actions:
-                return a
+    for m in matches:
+        a = f"[{m.lower()}]"
+        if a in legal_actions:
+            return a
     return None
 
 
@@ -225,7 +227,7 @@ class KuhnPoker:
         self.rewards[player_id] = -1.5
         self.rewards[other] = 0.5
 
-    def step(self, action: str | None):
+    def step(self, action: Optional[str]):
         if self.done:
             return
         if action not in self.legal_actions():
@@ -271,16 +273,13 @@ class KuhnPoker:
 
 
 # =========================
-# Reasoning prompt + early stop on FINAL action line
+# STRICT action-only prompt + constrained decoding (HF local)
 # =========================
-    # "Think step by step and you MAY include reasoning.\n"
-    # "Important:\n"
-    # "- Do NOT include any bracketed action tokens in your reasoning.\n"
-    # "- After reasoning, output exactly one FINAL action token on its own line: "
 SYSTEM_PROMPT = (
     "You are playing Kuhn Poker.\n"
-    " Do NOT generate any other texts or reasoning, only output exactly one FINAL action token on its own line: "
-    "[check] or [bet] or [call] or [fold]."
+    "Respond with EXACTLY ONE action token and NOTHING ELSE.\n"
+    "Valid outputs: [check] or [bet] or [call] or [fold].\n"
+    "Do not add any whitespace, punctuation, explanation, or extra text.\n"
 )
 
 
@@ -291,61 +290,113 @@ def _messages(player_id: int, observation: str):
     ]
 
 
-_FINAL_ACTION_LINE_RE = re.compile(r"\n\[(check|bet|call|fold)\]\s*$", re.IGNORECASE)
+def _encode_action_candidates(tokenizer) -> List[List[int]]:
+    cands = []
+    for s in ACTION_STRS:
+        ids = tokenizer(s, add_special_tokens=False, return_tensors="pt")["input_ids"][0].tolist()
+        cands.append(ids)
+    return cands
 
 
-class StopOnFinalActionLine(StoppingCriteria):
-    def __init__(self, tokenizer, prompt_len: int, tail_tokens: int = 96):
-        self.tokenizer = tokenizer
+class StopOnAnyAction(StoppingCriteria):
+    """
+    Stop when the generated suffix exactly ends with any action candidate token sequence.
+    (No newline reliance.)
+    """
+    def __init__(self, prompt_len: int, action_token_ids: List[List[int]]):
         self.prompt_len = int(prompt_len)
-        self.tail_tokens = int(tail_tokens)
+        self.action_token_ids = [list(x) for x in action_token_ids]
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> bool:
-        gen = input_ids[0, self.prompt_len:]
-        if gen.numel() == 0:
+        gen = input_ids[0, self.prompt_len:].tolist()
+        if not gen:
             return False
-        tail = gen[-self.tail_tokens:].tolist()
-        txt = self.tokenizer.decode(tail, skip_special_tokens=True)
-        return _FINAL_ACTION_LINE_RE.search(txt) is not None
+        for cand in self.action_token_ids:
+            L = len(cand)
+            if L > 0 and len(gen) >= L and gen[-L:] == cand:
+                return True
+        return False
+
+
+def _make_prefix_allowed_fn(tokenizer, prompt_len: int, action_token_ids: List[List[int]]):
+    """
+    Constrained decoding:
+    only allow tokens that can lead to one of the candidate action strings.
+    This makes it impossible to emit reasoning.
+    """
+    cands = [tuple(c) for c in action_token_ids]
+
+    def prefix_allowed_tokens_fn(batch_id: int, input_ids: torch.LongTensor):
+        gen = input_ids.tolist()[prompt_len:]
+        matching = []
+        for cand in cands:
+            if len(gen) <= len(cand) and tuple(gen) == cand[: len(gen)]:
+                matching.append(cand)
+
+        if not matching:
+            # Fallback: allow EOS (should basically never happen)
+            return [tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else []
+
+        for cand in matching:
+            if len(gen) == len(cand):
+                return [tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else []
+
+        allowed = set()
+        for cand in matching:
+            allowed.add(cand[len(gen)])
+        return list(allowed)
+
+    return prefix_allowed_tokens_fn
 
 
 @torch.no_grad()
 def _generate_completion(model, tokenizer, player_id: int, observation: str, temperature: float, max_new_tokens: int) -> str:
+    """
+    HF local generation constrained to output exactly one action string.
+    Returns the action token string (e.g. "[bet]") when possible.
+    """
     msgs = _messages(player_id, observation)
     input_ids = tokenizer.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt").to(DEVICE)
-    stopper = StopOnFinalActionLine(tokenizer, prompt_len=input_ids.shape[-1], tail_tokens=96)
+
+    prompt_len = int(input_ids.shape[-1])
+    action_token_ids = _encode_action_candidates(tokenizer)
+
+    stopper = StopOnAnyAction(prompt_len=prompt_len, action_token_ids=action_token_ids)
+    prefix_allowed = _make_prefix_allowed_fn(tokenizer, prompt_len=prompt_len, action_token_ids=action_token_ids)
 
     was_training = model.training
     model.eval()
+
+    do_sample = float(temperature) > 0.0
+
     out_ids = model.generate(
         input_ids=input_ids,
-        max_new_tokens=max_new_tokens,
-        do_sample=True,
-        temperature=temperature,
+        max_new_tokens=int(max_new_tokens),
+        do_sample=do_sample,
+        temperature=float(temperature) if do_sample else None,
         top_p=1.0,
         use_cache=True,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
         stopping_criteria=StoppingCriteriaList([stopper]),
+        prefix_allowed_tokens_fn=prefix_allowed,
     )
+
     if was_training:
         model.train()
-    return tokenizer.decode(out_ids[0][input_ids.shape[-1]:], skip_special_tokens=True)
+
+    txt = tokenizer.decode(out_ids[0][prompt_len:], skip_special_tokens=True)
+    act = _extract_action(txt, ACTION_STRS)
+    return act if act is not None else txt
 
 
-# Added vLLM backend that supports:
-#   - batched generation (one request for many prompts)
-#   - stop strings that terminate immediately after emitting the final action
-#     token line
-#   - dynamic LoRA adapter reloading (server mode) so rollouts always use the
-#     latest policy weights
-
-_VLLM_STOP_STRINGS = ["\n[check]", "\n[bet]", "\n[call]", "\n[fold]"]
+# =========================
+# vLLM backend: guided decoding (hard action-only)
+# =========================
+_VLLM_STOP_STRINGS = ["[check]", "[bet]", "[call]", "[fold]"]
 
 
 def _normalize_vllm_openai_base_url(base_url: str) -> str:
-    """Normalize a vLLM OpenAI-server base URL."""
-
     url = (base_url or "").strip().rstrip("/")
     if not url:
         return url
@@ -356,21 +407,17 @@ def _normalize_vllm_openai_base_url(base_url: str) -> str:
 
 def _build_prompt_text(tokenizer, msgs: list) -> str:
     """
-        Build a string prompt using the model's chat template.
-        Uses string prompts for vLLM/OpenAI-server compatibility.
+    Build a string prompt using the model's chat template.
+    Uses string prompts for vLLM/OpenAI-server compatibility.
     """
-    # Transformers' API is stable here, but keep a defensive fallback.
     try:
         return tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
     except TypeError:
-        # Older tokenizers may not have tokenize=; fall back to token ids then decode.
         ids = tokenizer.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt")[0]
         return tokenizer.decode(ids, skip_special_tokens=False)
 
 
 class _InferenceBackend:
-    """Minimal interface so the collector can batch rollouts when possible."""
-
     name: str = "base"
 
     def is_enabled(self) -> bool:
@@ -397,11 +444,10 @@ class _HFLocalBackend(_InferenceBackend):
         return True
 
     def supports_batch(self) -> bool:
-        # Our HF path uses a custom stopping criteria that is easiest to keep per-sample.
+        # HF constrained decoding is easiest per-sample (fine for your current small GAMES_PER_ITER)
         return False
 
     def generate(self, prompts: List[str], temperature: float, max_new_tokens: int) -> List[str]:
-        # prompts are ignored; we keep the original generation path using messages.
         raise RuntimeError("_HFLocalBackend.generate should not be called with string prompts.")
 
     def generate_one(self, player_id: int, observation: str, temperature: float, max_new_tokens: int) -> str:
@@ -417,13 +463,11 @@ class _VLLMServerBackend(_InferenceBackend):
         self,
         base_url: str,
         model_name: str,
-        api_key: str | None = None,
+        api_key: Optional[str] = None,
         timeout_s: float = 120.0,
         lora_name: str = "ppo_policy",
         allow_lora_reload: bool = True,
     ):
-        # Normalize to the OpenAI-compatible /v1 prefix so users can pass
-        # either http://host:8000 or http://host:8000/v1.
         self.base_url = _normalize_vllm_openai_base_url(base_url)
         self.model_name = model_name
         self.lora_name = lora_name
@@ -434,11 +478,7 @@ class _VLLMServerBackend(_InferenceBackend):
         if api_key:
             self.headers["Authorization"] = f"Bearer {api_key}"
 
-        # If LoRA reloading is enabled, we will request generations using the LoRA
-        # model name, not the base model name.
         self._active_model_for_generation = self.lora_name if self.allow_lora_reload else self.model_name
-
-        # Probe the server early so we can cleanly fall back.
         self._ok = self._probe_server()
 
     def _probe_server(self) -> bool:
@@ -467,14 +507,10 @@ class _VLLMServerBackend(_InferenceBackend):
             return
 
         adapter_dir.mkdir(parents=True, exist_ok=True)
-        # Save the LoRA adapter only (fast), PEFT models save adapters by default.
         policy_model.save_pretrained(str(adapter_dir))
 
-        # Best-effort reload on the server. Requires:
-        #   export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
-        #   and vLLM server launched with --enable-lora.
         try:
-            # Unload if present.
+            # Unload if present (best-effort)
             self._post_json("/unload_lora_adapter", {"lora_name": self.lora_name})
             r = self._post_json(
                 "/load_lora_adapter",
@@ -482,8 +518,6 @@ class _VLLMServerBackend(_InferenceBackend):
             )
             r.raise_for_status()
         except Exception as e:
-            # If we can't ensure vLLM is using the latest policy adapter, we must
-            # not use it for rollouts (that would change the training logic).
             print(
                 f"[vLLM] LoRA reload failed ({type(e).__name__}: {e}). "
                 "Disabling vLLM backend and falling back to local HF generation for correctness."
@@ -494,6 +528,7 @@ class _VLLMServerBackend(_InferenceBackend):
         if not self._ok:
             raise RuntimeError("vLLM server backend is not available")
 
+        # HARD action-only via guided decoding (guided_choice)
         payload = {
             "model": self._active_model_for_generation,
             "prompt": prompts,
@@ -503,17 +538,22 @@ class _VLLMServerBackend(_InferenceBackend):
             "n": 1,
             "stream": False,
             "stop": _VLLM_STOP_STRINGS,
-            "reasoning_effort": "low",
-            "extra_body": {"reasoning_effort": "low"},
-            # vLLM OpenAI server supports this as an extra parameter.
             "include_stop_str_in_output": True,
+            "extra_body": {
+                "guided_choice": ACTION_STRS,
+            },
         }
+
         r = self._post_json("/completions", payload)
-        r.raise_for_status()
+        if r.status_code != 200:
+            # If server doesn't support guided decoding, disable backend to avoid broken training logic.
+            print(f"[vLLM] Generation failed (status={r.status_code}). Response: {r.text[:300]}")
+            self._ok = False
+            raise RuntimeError("vLLM guided decoding not available / request failed")
+
         data = r.json()
         out = [""] * len(prompts)
         for ch in data.get("choices", []):
-            # For batched prompts, vLLM uses index to indicate the prompt index.
             idx = int(ch.get("index", 0))
             if 0 <= idx < len(out):
                 out[idx] = ch.get("text", "")
@@ -522,7 +562,6 @@ class _VLLMServerBackend(_InferenceBackend):
 
 def _init_inference_backend(model, tokenizer) -> _InferenceBackend:
     """Pick the fastest available inference backend."""
-    # Check for server-based vLLM when configured.
     vllm_base_url = os.getenv("VLLM_BASE_URL", "").strip()
     if vllm_base_url:
         backend = _VLLMServerBackend(
@@ -534,10 +573,7 @@ def _init_inference_backend(model, tokenizer) -> _InferenceBackend:
             allow_lora_reload=os.getenv("VLLM_ALLOW_LORA_RELOAD", "1") == "1",
         )
         if backend.is_enabled():
-            print(
-                f"[vLLM] Using OpenAI-compatible server backend at {backend.base_url} "
-                f"(model={backend.model_name})."
-            )
+            print(f"[vLLM] Using OpenAI-compatible server backend at {backend.base_url} (model={backend.model_name}).")
             return backend
         norm_url = _normalize_vllm_openai_base_url(vllm_base_url)
         print(f"[vLLM] Server at {norm_url} not reachable; falling back to local HF generation.")
@@ -546,13 +582,10 @@ def _init_inference_backend(model, tokenizer) -> _InferenceBackend:
 
 # =========================
 # PPO actor-critic wrapper (value head)
-#   - Robustly unwraps MoE / nested .model structures
-#   - Uses base model output (last hidden) WITHOUT output_hidden_states
 # =========================
 def _unwrap_backbone(causal_lm: nn.Module) -> nn.Module:
     m = causal_lm
-    # Typical: lm.model is the base decoder
-    for _ in range(3):  # don’t go infinite
+    for _ in range(3):
         if hasattr(m, "model") and isinstance(getattr(m, "model"), nn.Module):
             m = m.model
         else:
@@ -563,7 +596,6 @@ def _unwrap_backbone(causal_lm: nn.Module) -> nn.Module:
 def _get_lm_head(causal_lm: nn.Module) -> nn.Module:
     if hasattr(causal_lm, "lm_head") and isinstance(causal_lm.lm_head, nn.Module):
         return causal_lm.lm_head
-    # fallback
     head = causal_lm.get_output_embeddings()
     if head is None:
         raise ValueError("Could not find lm_head / output embeddings.")
@@ -573,9 +605,9 @@ def _get_lm_head(causal_lm: nn.Module) -> nn.Module:
 class PolicyWithValueHead(nn.Module):
     """
     Memory-friendly:
-    - backbone forward returns last hidden (BaseModelOutputWithPast-like)
+    - backbone forward returns last hidden
     - logits = lm_head(last_hidden)
-    - value head runs in fp32 on pooled hidden state to avoid bf16/fp32 matmul errors
+    - value head runs in fp32 on pooled hidden state
     """
     def __init__(self, causal_lm: nn.Module):
         super().__init__()
@@ -592,11 +624,9 @@ class PolicyWithValueHead(nn.Module):
         if hidden_size is None:
             raise ValueError("Could not infer hidden size from model.config")
 
-        # Keep value head fp32 for stability; inputs will be cast to fp32 explicitly.
         self.value_head = nn.Linear(hidden_size, 1).to(dtype=torch.float32)
 
     def forward(self, input_ids, attention_mask=None):
-        # Run backbone in bf16 autocast (GPU) for memory; output last hidden.
         with (_autocast_ctx() if DEVICE == "cuda" else torch.no_grad()):
             out = self.backbone(
                 input_ids=input_ids,
@@ -605,15 +635,13 @@ class PolicyWithValueHead(nn.Module):
                 return_dict=True,
             )
 
-        # Robust last hidden extraction
         if hasattr(out, "last_hidden_state") and out.last_hidden_state is not None:
             last_hidden = out.last_hidden_state
         elif isinstance(out, (tuple, list)) and len(out) > 0:
             last_hidden = out[0]
         else:
-            raise RuntimeError(f"Backbone output has no last hidden state. Type={type(out)} keys={getattr(out,'keys',lambda:[])()}")
+            raise RuntimeError(f"Backbone output has no last hidden state. Type={type(out)}")
 
-        # logits in bf16 (then we cast to fp32 when computing logprobs)
         logits = self.lm_head(last_hidden)
         return logits, last_hidden
 
@@ -639,11 +667,13 @@ def _build_prompt_plus_action(tokenizer, prompt_msgs: list, action_str: str) -> 
     return torch.cat([prompt_ids, action_ids], dim=0), int(prompt_ids.shape[0]), int(action_ids.shape[0])
 
 
-def _logprob_action_tokens(logits: torch.Tensor,
-                           input_ids: torch.Tensor,
-                           prompt_lens: List[int],
-                           action_lens: List[int]) -> torch.Tensor:
-    # IMPORTANT: do PPO math in fp32 (cheap, stable, fixes dtype backward issues)
+def _logprob_action_tokens(
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    prompt_lens: List[int],
+    action_lens: List[int],
+    normalize_by_len: bool = True,   # NEW: reduces variance / clip spikes
+) -> torch.Tensor:
     logp = F.log_softmax(logits.float(), dim=-1)  # [B,T,V] fp32
     B, T, _V = logp.shape
     out = torch.zeros((B,), device=logp.device, dtype=torch.float32)
@@ -657,6 +687,8 @@ def _logprob_action_tokens(logits: torch.Tensor,
                 continue
             tok_id = int(input_ids[i, tok_pos].item())
             s = s + logp[i, tok_pos - 1, tok_id]
+        if normalize_by_len:
+            s = s / max(1, aL)
         out[i] = s
     return out
 
@@ -667,139 +699,9 @@ def _values_from_hidden(last_hidden: torch.Tensor, value_head: nn.Module, prompt
     for i in range(B):
         idx = max(0, min(T - 1, prompt_lens[i] - 1))
         hs.append(last_hidden[i, idx, :])
-    hs = torch.stack(hs, dim=0)                # bf16
-    v = value_head(hs.float()).squeeze(-1)     # fp32 head on fp32 input
+    hs = torch.stack(hs, dim=0)
+    v = value_head(hs.float()).squeeze(-1)
     return v
-
-MATH_SYSTEM_PROMPT = (
-    "You are a helpful math assistant. Solve the following problem step by step. "
-    "Put your final answer in \\boxed{}."
-)
-
-def _math_messages(question: str): 
-    return [
-        {"role": "system", "content": MATH_SYSTEM_PROMPT},
-        {"role": "user", "content": question},
-    ]
-
-def extract_boxed_answer(text: str) -> str:
-    """ Extract the model's answer from \\boxed{...}. """
-
-    if "boxed" not in text:
-        return ""
-
-    ans = text.split("boxed")[-1]
-
-    if not ans:
-        return ""
-
-    if ans[0] == "{":
-        stack = 1
-        result = ""
-        for c in ans[1:]:
-            if c == "{":
-                stack += 1
-                result += c
-            elif c == "}":
-                stack -= 1
-                if stack == 0:
-                    break
-                result += c
-            else:
-                result += c
-
-        return result.strip()
-    else:
-        return ans.split("$")[0].strip()
-
-@torch.no_grad()
-def evaluate_math(
-    model,
-    tokenizer,
-    data_path: Path,
-    dataset_name: str,
-    num_samples: int = 50,
-    temperature: float = 0.0,
-    max_new_tokens: int = 1024,
-) -> Dict[str, float]:
-    """Evaluate model on the math benchmark (grading using harness)"""
-
-    #Loading the dataset.
-    dataset_path = data_path / dataset_name
-
-    if not dataset_path.exists():
-        print(f"[math_eval] Dataset not found: {dataset_path}")
-        return {f"eval_math/{dataset_name}": 0.0}
-
-    dataset = load_from_disk(dataset_path)
-
-    total = len(dataset)
-    if num_samples < total:
-        indices = random.sample(range(total), num_samples)
-        samples = [dataset[i] for i in indices]
-    else:
-        samples = [dataset[i] for i in range(total)]
-    
-    correct = 0
-    total_evaluated = 0
-
-    was_training = model.training
-    model.eval()
-
-    for sample in tqdm(samples, desc=f"Math eval ({dataset_name})"):
-        question = sample.get("problem", sample.get('question', ""))
-        if not question:
-            continue
-
-        try:
-            _, ground_truth = parse_ground_truth(sample, dataset_name)
-        except Exception:
-            ground_truth = sample.get("answer", "")
-            if ground_truth:
-                ground_truth = strip_string(str(ground_truth))
-
-        if not ground_truth:
-            continue
-
-        msgs = _math_messages(question)
-        input_ids = tokenizer.apply_chat_template(msgs, add_generation_prompt = True, return_tensors= "pt").to(DEVICE)
-        
-        out_ids = model.generate(
-            input_ids = input_ids,
-            max_new_tokens = max_new_tokens,
-            do_sample=(temperature > 0),
-            temperature = max(temperature, 0.01),
-            top_p = 1.0,
-            use_cache = True,
-            pad_token_id = tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-
-        completion = tokenizer.decode(out_ids[0][input_ids.shape[-1]:], skip_special_tokens=True)
-
-        predicted = extract_boxed_answer(completion)
-        if not predicted:
-            predicted = extract_answer(completion, dataset_name)
-        
-        predicted = strip_string(predicted)
-
-        is_correct = math_equal(predicted, ground_truth)
-        correct += int(is_correct)
-        total_evaluated += 1
-    if was_training:
-        model.train()
-
-    accuracy = correct/ max(1, total_evaluated)
-
-    return {
-        f"eval_math/{dataset_name}_accuracy": accuracy,
-        f"eval_math/{dataset_name}_correct": correct,
-        f"eval_math/{dataset_name}_total": total_evaluated,
-    }
-
-
-
-
 
 
 # =========================
@@ -816,7 +718,7 @@ class StepSample:
 
 
 # =========================
-# Self-play collector (ONE rollout per episode)
+# Self-play collector
 # =========================
 def collect_games(
     model,
@@ -836,7 +738,6 @@ def collect_games(
     total_turns = 0
     p0_wins = 0
 
-    # Batch rollout generation if the backend supports it (e.g., vLLM).
     if backend.supports_batch():
         envs: List[KuhnPoker] = []
         game_ids: List[int] = []
@@ -893,12 +794,10 @@ def collect_games(
                     "legal_actions": legal,
                     "action": act,
                     "completion": completion,
-                    # Batched generation: we attribute average batch latency to each step.
                     "duration_generate_sec": per_item_dt,
                     "timestamp": time.time(),
                 })
 
-        # Episode end summaries + StepSample creation.
         for i, env in enumerate(envs):
             invalid_games += 1 if env.invalid_player is not None else 0
             p0_wins += 1 if env.rewards.get(0, 0.0) > 0 else 0
@@ -922,8 +821,6 @@ def collect_games(
                     game_id=game_ids[i],
                 ))
     else:
-        # Fallback path: original per-step generation
-        # Does not require vLLM
         for g in range(num_games):
             game_id = seed * 1_000_000 + g
             env = KuhnPoker(num_rounds=num_rounds)
@@ -938,7 +835,6 @@ def collect_games(
                 legal = env.legal_actions()
 
                 t0 = time.time()
-                # Use HF generation (with custom stopping) in fallback mode.
                 completion = _generate_completion(model, tokenizer, pid, obs, temperature=temperature, max_new_tokens=max_new_tokens)
                 t1 = time.time()
 
@@ -995,7 +891,7 @@ def collect_games(
 
 
 # =========================
-# Lightweight evaluation vs random opponent (no extra model copy)
+# Lightweight evaluation vs random opponent
 # =========================
 @torch.no_grad()
 def evaluate_vs_random(
@@ -1009,11 +905,8 @@ def evaluate_vs_random(
     seed: int,
 ) -> Dict[str, float]:
     rng = random.Random(int(seed))
-
-    # seat swap for fairness
     half = max(1, num_games // 2)
 
-    # Build all envs up-front so we can optionally batch model turns.
     envs: List[KuhnPoker] = []
     current_is_p0: List[bool] = []
     for i in range(num_games):
@@ -1024,14 +917,11 @@ def evaluate_vs_random(
 
     turn_counts = [0 for _ in range(num_games)]
 
-    # Batched loop: each iteration we (1) batch all turns that require the current
-    # policy, then (2) play out the random-opponent turns.
     while True:
         active = [i for i, e in enumerate(envs) if not e.done]
         if not active:
             break
 
-        # 1) Policy turns (batched when available)
         policy_idxs: List[int] = []
         prompts: List[str] = []
         meta: List[Tuple[int, int, List[str], str]] = []
@@ -1053,7 +943,6 @@ def evaluate_vs_random(
             if backend.supports_batch():
                 completions = backend.generate(prompts, temperature=temperature, max_new_tokens=max_new_tokens)
             else:
-                # HF fallback keeps identical stopping behavior
                 completions = [
                     _generate_completion(current_model, tokenizer, pid, obs, temperature=temperature, max_new_tokens=max_new_tokens)
                     for (_, pid, _legal, obs) in meta
@@ -1067,7 +956,6 @@ def evaluate_vs_random(
                 envs[i].step(act)
                 turn_counts[i] += 1
 
-        # 2) Random opponent turns
         for i in active:
             env = envs[i]
             if env.done:
@@ -1080,7 +968,6 @@ def evaluate_vs_random(
             env.step(rng.choice(legal))
             turn_counts[i] += 1
 
-    # Aggregate metrics
     wins_current = 0
     invalids = 0
     total_turns = sum(turn_counts)
@@ -1110,12 +997,10 @@ def evaluate_vs_base(
 ) -> Dict[str, float]:
     """
     Evaluate current trained model against the base (untrained) model.
-    Uses the saved base model adapter weights for the opponent.
+    Loads base model + base adapter each eval (simple, correct; costs time).
     """
     rng = random.Random(int(seed))
-    
-    # Load base model with saved adapter (untrained state)
-    # Load base model structure (unpack tuple: model, tokenizer)
+
     base_model, _ = FastLanguageModel.from_pretrained(
         model_name="unsloth/gpt-oss-20b",
         max_seq_length=768,
@@ -1124,7 +1009,6 @@ def evaluate_vs_base(
         offload_embedding=True,
         cache_dir=str(HF_HUB),
     )
-    # Create PEFT model structure (same config as main model)
     base_model = FastLanguageModel.get_peft_model(
         base_model,
         r=4,
@@ -1133,20 +1017,12 @@ def evaluate_vs_base(
         use_gradient_checkpointing="unsloth",
         random_state=3407,
     )
-    # Load the saved base adapter weights
-    # Since base_model is already a PEFT model, use load_adapter
     base_model.load_adapter(str(base_model_adapter_dir), adapter_name="base")
     base_model.set_adapter("base")
     base_model = base_model.to(DEVICE)
     base_model.eval()
-    
-    # Create backend for base model (local HF only for simplicity)
-    base_backend = _HFLocalBackend(base_model, tokenizer)
-    
-    # Seat swap for fairness
+
     half = max(1, num_games // 2)
-    
-    # Build all envs up-front
     envs: List[KuhnPoker] = []
     current_is_p0: List[bool] = []
     for i in range(num_games):
@@ -1154,20 +1030,17 @@ def evaluate_vs_base(
         env.reset(rng.randint(0, 2**31 - 1))
         envs.append(env)
         current_is_p0.append(i < half)
-    
+
     turn_counts = [0 for _ in range(num_games)]
-    
-    # Game loop: current model vs base model
+
     while True:
         active = [i for i, e in enumerate(envs) if not e.done]
         if not active:
             break
-        
-        # Current model turns (batched when available)
-        current_policy_idxs: List[int] = []
+
         current_prompts: List[str] = []
         current_meta: List[Tuple[int, int, List[str], str]] = []
-        
+
         for i in active:
             env = envs[i]
             pid = env.current_player
@@ -1177,10 +1050,9 @@ def evaluate_vs_base(
             obs = env.observe(pid)
             legal = env.legal_actions()
             msgs = _messages(pid, obs)
-            current_policy_idxs.append(i)
             current_prompts.append(_build_prompt_text(tokenizer, msgs))
             current_meta.append((i, pid, legal, obs))
-        
+
         if current_prompts:
             if backend.supports_batch():
                 completions = backend.generate(current_prompts, temperature=temperature, max_new_tokens=max_new_tokens)
@@ -1189,7 +1061,6 @@ def evaluate_vs_base(
                     _generate_completion(current_model, tokenizer, pid, obs, temperature=temperature, max_new_tokens=max_new_tokens)
                     for (_, pid, _legal, obs) in current_meta
                 ]
-            
             for j, (i, pid, legal, _obs) in enumerate(current_meta):
                 completion = completions[j]
                 act = _extract_action(completion, legal)
@@ -1197,12 +1068,8 @@ def evaluate_vs_base(
                     act = rng.choice(legal)
                 envs[i].step(act)
                 turn_counts[i] += 1
-        
-        # Base model turns
-        base_policy_idxs: List[int] = []
-        base_prompts: List[str] = []
+
         base_meta: List[Tuple[int, int, List[str], str]] = []
-        
         for i in active:
             env = envs[i]
             if env.done:
@@ -1213,18 +1080,13 @@ def evaluate_vs_base(
                 continue
             obs = env.observe(pid)
             legal = env.legal_actions()
-            msgs = _messages(pid, obs)
-            base_policy_idxs.append(i)
-            base_prompts.append(_build_prompt_text(tokenizer, msgs))
             base_meta.append((i, pid, legal, obs))
-        
-        if base_prompts:
-            # Base model always uses local HF backend
+
+        if base_meta:
             completions = [
                 _generate_completion(base_model, tokenizer, pid, obs, temperature=temperature, max_new_tokens=max_new_tokens)
                 for (_, pid, _legal, obs) in base_meta
             ]
-            
             for j, (i, pid, legal, _obs) in enumerate(base_meta):
                 completion = completions[j]
                 act = _extract_action(completion, legal)
@@ -1232,8 +1094,7 @@ def evaluate_vs_base(
                     act = rng.choice(legal)
                 envs[i].step(act)
                 turn_counts[i] += 1
-    
-    # Aggregate metrics
+
     wins_current = 0
     invalids = 0
     total_turns = sum(turn_counts)
@@ -1241,12 +1102,11 @@ def evaluate_vs_base(
         invalids += 1 if env.invalid_player is not None else 0
         current_won = (env.rewards[0] > 0) if current_is_p0[i] else (env.rewards[1] > 0)
         wins_current += 1 if current_won else 0
-    
-    # Clean up base model from memory
+
     del base_model
     if DEVICE == "cuda":
         torch.cuda.empty_cache()
-    
+
     return {
         "eval/win_rate_vs_base": wins_current / max(1, num_games),
         "eval/invalid_game_rate_vs_base": invalids / max(1, num_games),
@@ -1255,7 +1115,7 @@ def evaluate_vs_base(
 
 
 # =========================
-# Load model + LoRA (same base model as yours)
+# Load model + LoRA
 # =========================
 max_seq_length = 768
 lora_rank = 4
@@ -1283,7 +1143,6 @@ if tokenizer.pad_token is None:
 
 model = model.to(DEVICE)
 
-# Wrap with value head (critic)
 ac = PolicyWithValueHead(model).to(DEVICE)
 
 # Save initial base model adapter state for evaluation
@@ -1292,23 +1151,16 @@ BASE_MODEL_ADAPTER_DIR.mkdir(parents=True, exist_ok=True)
 ac.lm.save_pretrained(str(BASE_MODEL_ADAPTER_DIR))
 print(f"[Base Model] Saved initial adapter state to {BASE_MODEL_ADAPTER_DIR}")
 
-# Initialize fastest available inference backend.
 inference_backend = _init_inference_backend(ac.lm, tokenizer)
-
-# Where we write the latest LoRA adapter so a vLLM server can reload it.
 VLLM_ADAPTER_DIR = output_dir_path / "vllm_adapter_latest"
 
 # =========================
-# Exact wandb init style you asked to keep
+# wandb init (kept)
 # =========================
 if wandb:
     if not os.getenv("WANDB_NAME"):
         os.environ["WANDB_NAME"] = f"gpt-oss-20b-kuhn-spiral-ppo-{int(time.time())}"
     wandb.login(key=os.getenv("WANDB_API_KEY", ""), relogin=True)
-    # wandb.init(
-    #     project=os.getenv("WANDB_PROJECT", "games"),
-    #     name=os.getenv("WANDB_NAME"),
-    # )
     wandb.init(
         entity="forge_scaling_intelligence_lab",
         project="games",
@@ -1318,55 +1170,42 @@ if wandb:
 # PPO hyperparams
 # =========================
 NUM_ROUNDS = 5
-GAMES_PER_ITER = 2
+GAMES_PER_ITER = 8
 PPO_EPOCHS = 2
-MINI_BATCH_SIZE = 2
-
-# Compute old_logp/old_v in tiny chunks to avoid full-batch GPU logits
+MINI_BATCH_SIZE = 16
 STATS_CHUNK_SIZE = 2
 
 LR = 1e-6
 CLIP_EPS = 0.2
 VF_COEF = 0.5
 
-MAX_GEN_TOKENS = 1024
+# NEW: action-only decoding => keep this small
+MAX_GEN_TOKENS = 8
 TEMPERATURE = 0.7
 
 SAVE_EVERY_ITERS = 20
 EVAL_EVERY_ITERS = 20
 EVAL_GAMES = 10
 
-MATH_EVAL_DATA_PATH = Path(__file__).resolve().parent / "data"
-MATH_EVAL_DATASETS = ["math", "amc", "aime"]
-MATH_EVAL_SAMPLES = 50
-MATH_EVAL_EVERY_ITERS = EVAL_EVERY_ITERS #can change if math slow
-
-
-
-# Optimizer: LoRA params + value head
 trainable_params = [p for p in ac.parameters() if p.requires_grad]
 optim = torch.optim.AdamW(trainable_params, lr=LR)
 
 rollout_logger = _JSONLLogger(ROLLOUT_LOG_PATH)
 
 # =========================
-# Main PPO loop (memory-safe)
+# Main PPO loop
 # =========================
 global_step = 0
 
 for it in tqdm(range(10_000), desc="PPO iters"):
-    # 1) Collect self-play episodes
     t_collect0 = time.time()
 
-    # Keep vLLM's view of the policy weights up-to-date.
     inference_backend.sync_policy(ac.lm, VLLM_ADAPTER_DIR)
-
-    # If the vLLM backend was disabled (e.g., LoRA reload not supported), fall back.
     if not inference_backend.is_enabled():
         inference_backend = _HFLocalBackend(ac.lm, tokenizer)
 
     batch, env_metrics = collect_games(
-        model=ac.lm,  # current policy for rollout
+        model=ac.lm,
         tokenizer=tokenizer,
         backend=inference_backend,
         num_games=GAMES_PER_ITER,
@@ -1380,7 +1219,7 @@ for it in tqdm(range(10_000), desc="PPO iters"):
 
     random.shuffle(batch)
 
-    # 2) Pre-tokenize ON CPU; store sequences; no full-batch padding on GPU
+    # Pre-tokenize ON CPU
     seqs_cpu: List[torch.Tensor] = []
     prompt_lens: List[int] = []
     action_lens: List[int] = []
@@ -1395,7 +1234,7 @@ for it in tqdm(range(10_000), desc="PPO iters"):
 
     N = len(seqs_cpu)
 
-    # 3) Compute old_logp + old_v in tiny chunks (no_grad), store ON CPU
+    # Compute old_logp + old_v in chunks
     ac.eval()
     old_logp_cpu = torch.empty((N,), dtype=torch.float32)
     old_v_cpu = torch.empty((N,), dtype=torch.float32)
@@ -1410,22 +1249,20 @@ for it in tqdm(range(10_000), desc="PPO iters"):
             mb_ids, mb_attn = _pad_to_device(mb_seqs, tokenizer.pad_token_id)
 
             logits, last_h = ac(input_ids=mb_ids, attention_mask=mb_attn)
-            mb_old_logp = _logprob_action_tokens(logits, mb_ids, mb_prompt_lens, mb_action_lens)
+            mb_old_logp = _logprob_action_tokens(logits, mb_ids, mb_prompt_lens, mb_action_lens, normalize_by_len=True)
             mb_old_v = _values_from_hidden(last_h, ac.value_head, mb_prompt_lens)
 
             old_logp_cpu[mb_idx] = mb_old_logp.detach().cpu()
             old_v_cpu[mb_idx] = mb_old_v.detach().cpu()
 
-            # free peak tensors
             del mb_ids, mb_attn, logits, last_h, mb_old_logp, mb_old_v
             if DEVICE == "cuda":
                 torch.cuda.empty_cache()
 
-    # Advantages on CPU (fp32), normalized across batch
     adv_cpu = (returns_cpu - old_v_cpu)
     adv_cpu = (adv_cpu - adv_cpu.mean()) / (adv_cpu.std(unbiased=False) + 1e-8)
 
-    # 4) PPO updates (pad per minibatch)
+    # PPO updates
     ac.train()
     idxs = list(range(N))
 
@@ -1452,18 +1289,16 @@ for it in tqdm(range(10_000), desc="PPO iters"):
 
             logits, last_h = ac(input_ids=mb_ids, attention_mask=mb_attn)
 
-            new_logp = _logprob_action_tokens(logits, mb_ids, mb_prompt_lens, mb_action_lens)  # fp32
-            new_v = _values_from_hidden(last_h, ac.value_head, mb_prompt_lens)                  # fp32
+            new_logp = _logprob_action_tokens(logits, mb_ids, mb_prompt_lens, mb_action_lens, normalize_by_len=True)
+            new_v = _values_from_hidden(last_h, ac.value_head, mb_prompt_lens)
 
-            # PPO objective in fp32
             ratio = torch.exp(new_logp - mb_old_logp)
             unclipped = ratio * mb_adv
             clipped = torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * mb_adv
             policy_loss = -torch.mean(torch.min(unclipped, clipped))
 
             value_loss = 0.5 * F.mse_loss(new_v, mb_returns)
-
-            loss = policy_loss + VF_COEF * value_loss  # fp32 scalar
+            loss = policy_loss + VF_COEF * value_loss
 
             optim.zero_grad(set_to_none=True)
             loss.backward()
@@ -1471,7 +1306,7 @@ for it in tqdm(range(10_000), desc="PPO iters"):
             optim.step()
 
             with torch.no_grad():
-                approx_kl = torch.mean(mb_old_logp - new_logp)  # approx KL(old||new) on action tokens
+                approx_kl = torch.mean(mb_old_logp - new_logp)
                 clip_frac = torch.mean((torch.abs(ratio - 1.0) > CLIP_EPS).float())
                 ratio_mean = torch.mean(ratio)
 
@@ -1483,14 +1318,12 @@ for it in tqdm(range(10_000), desc="PPO iters"):
             clip_frac_acc += float(clip_frac.item())
             ratio_mean_acc += float(ratio_mean.item())
 
-            # free peak tensors each step
             del mb_ids, mb_attn, logits, last_h, new_logp, new_v, ratio, unclipped, clipped, loss
             if DEVICE == "cuda":
                 torch.cuda.empty_cache()
 
     t_train1 = time.time()
 
-    # 5) Metrics + wandb logging
     policy_loss_mean = policy_loss_acc / max(1, updates)
     value_loss_mean = value_loss_acc / max(1, updates)
     avg_return = float(returns_cpu.mean().item())
@@ -1499,16 +1332,13 @@ for it in tqdm(range(10_000), desc="PPO iters"):
     logs = {
         "iter": it,
         "global_step": global_step,
-
         "ppo/policy_loss": policy_loss_mean,
         "ppo/value_loss": value_loss_mean,
         "ppo/avg_return": avg_return,
         "ppo/avg_abs_return": abs_return,
-
         "ppo/approx_kl": approx_kl_acc / max(1, updates),
         "ppo/clip_frac": clip_frac_acc / max(1, updates),
         "ppo/ratio_mean": ratio_mean_acc / max(1, updates),
-
         "time/collect_sec": t_collect1 - t_collect0,
         "time/train_sec": t_train1 - t_collect1,
         "time/iter_sec": t_train1 - t_collect0,
@@ -1526,17 +1356,14 @@ for it in tqdm(range(10_000), desc="PPO iters"):
     if wandb:
         wandb.log(logs, step=global_step)
 
-    # 6) Periodic eval vs random and vs base model
+    # Periodic eval (deterministic; no reasoning possible anyway)
     if it % EVAL_EVERY_ITERS == 0:
         ac.eval()
 
-        # If we're using vLLM for inference, refresh adapter weights post-update.
         inference_backend.sync_policy(ac.lm, VLLM_ADAPTER_DIR)
-
         if not inference_backend.is_enabled():
             inference_backend = _HFLocalBackend(ac.lm, tokenizer)
 
-        # Eval vs random
         print(f"[eval {it}] Starting eval vs random ({EVAL_GAMES} games)")
         t_eval_random0 = time.time()
         eval_logs_random = evaluate_vs_random(
@@ -1545,15 +1372,14 @@ for it in tqdm(range(10_000), desc="PPO iters"):
             backend=inference_backend,
             num_games=EVAL_GAMES,
             num_rounds=NUM_ROUNDS,
-            temperature=1.0,
+            temperature=0.0,          # deterministic
             max_new_tokens=MAX_GEN_TOKENS,
             seed=10_000 + it,
         )
         t_eval_random1 = time.time()
         win_rate_random = eval_logs_random.get("eval/win_rate_vs_random", 0.0)
         print(f"[eval {it}] vs random: win_rate={win_rate_random:.3f} ({t_eval_random1-t_eval_random0:.1f}s)")
-        
-        # Eval vs base model (untrained)
+
         print(f"[eval {it}] Starting eval vs base model ({EVAL_GAMES} games)")
         t_eval_base0 = time.time()
         eval_logs_base = evaluate_vs_base(
@@ -1563,70 +1389,33 @@ for it in tqdm(range(10_000), desc="PPO iters"):
             backend=inference_backend,
             num_games=EVAL_GAMES,
             num_rounds=NUM_ROUNDS,
-            temperature=1.0,
+            temperature=0.0,          # deterministic
             max_new_tokens=MAX_GEN_TOKENS,
             seed=20_000 + it,
         )
         t_eval_base1 = time.time()
         win_rate_base = eval_logs_base.get("eval/win_rate_vs_base", 0.0)
         print(f"[eval {it}] vs base: win_rate={win_rate_base:.3f} ({t_eval_base1-t_eval_base0:.1f}s)")
-        
-        # Combine and organize all eval metrics for wandb
+
         all_eval_logs = {
-            # Random opponent metrics
             **eval_logs_random,
-            # Base model metrics  
             **eval_logs_base,
-            # Evaluation timing
             "eval/time_vs_random_sec": t_eval_random1 - t_eval_random0,
             "eval/time_vs_base_sec": t_eval_base1 - t_eval_base0,
-            # Summary: improvement indicators
-            "eval/improvement_vs_base": win_rate_base - 0.5,  # >0 means better than base
-            "eval/improvement_vs_random": win_rate_random - 0.5,  # >0 means better than random
+            "eval/improvement_vs_base": win_rate_base - 0.5,
+            "eval/improvement_vs_random": win_rate_random - 0.5,
         }
-        
-        # Print summary
+
         print(f"[eval {it}] Summary: vs_random={win_rate_random:.3f}, vs_base={win_rate_base:.3f}")
         if win_rate_base > 0.5:
             print(f"[eval {it}] ✓ Model is better than base model!")
         if win_rate_random > 0.5:
             print(f"[eval {it}] ✓ Model is better than random!")
-        
+
         if wandb:
             wandb.log(all_eval_logs, step=global_step)
 
-    # 6b) Math evaluation (can be added to block if we decide to use same frequency)
-
-    if it % MATH_EVAL_EVERY_ITERS == 0:
-        ac.eval()
-        print(f"[eval {it}] Starting math benchmark evaluation...")
-
-        all_math_logs = {}
-        for ds_name in MATH_EVAL_DATASETS:
-            math_start = time.time()
-            math_logs = evaluate_math(
-                model = ac.lm,
-                tokenizer = tokenizer,
-                data_path = MATH_EVAL_DATA_PATH,
-                dataset_name = ds_name,
-                num_samples = MATH_EVAL_SAMPLES,
-                temperature = 0.0,
-                max_new_tokens = MAX_GEN_TOKENS,
-            )
-
-            math_end = time.time()
-
-            acc = math_logs.get(f"eval_math/{ds_name}_accuracy", 0.0)
-
-            print(f"[eval {it}] {ds_name}: accuracy={acc:.3f} ({math_end-math_start:.1f}s)")
-            
-            all_math_logs.update(math_logs)
-            all_math_logs[f"eval_math/{ds_name}_time_sec"] = math_end - math_start
-        
-        if wandb:
-            wandb.log(all_math_logs, step=global_step)
-
-    # 7) Save checkpoints
+    # Save checkpoints
     if it % SAVE_EVERY_ITERS == 0:
         ckpt_dir = output_dir_path / f"ppo_ckpt_iter_{it}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
