@@ -577,7 +577,7 @@ class _VLLMServerBackend(_InferenceBackend):
             )
             self._ok = False
 
-    def generate(self, prompts: List[str], temperature: float, max_new_tokens: int) -> List[str]:
+    def generate(self, prompts: List[str], temperature: float, max_new_tokens: int, mode: str = "poker") -> List[str]:
         if not self._ok:
             raise RuntimeError("vLLM server backend is not available")
 
@@ -590,14 +590,15 @@ class _VLLMServerBackend(_InferenceBackend):
             "top_p": 1.0,
             "n": 1,
             "stream": False,
-            "stop": _VLLM_STOP_STRINGS,
-            "include_stop_str_in_output": True,
         }
         
-        if USE_CONSTRAINED_DECODING:
-            payload["extra_body"] = {
-                "guided_choice": ACTION_STRS,
-            }
+        if mode == "poker":
+            payload["stop"] = _VLLM_STOP_STRINGS
+            payload["include_stop_str_in_output"] = True
+            if USE_CONSTRAINED_DECODING:
+                payload["extra_body"] = {
+                    "guided_choice": ACTION_STRS,
+                }
 
         r = self._post_json("/completions", payload)
         if r.status_code != 200:
@@ -814,6 +815,7 @@ def evaluate_math(
     num_samples: int = 50,
     temperature: float = 0.0,
     max_new_tokens: int = 1024,
+    backend = None,
 ) -> Dict[str, float]:
     """Evaluate model on the math benchmark (grading using harness)"""
 
@@ -833,13 +835,10 @@ def evaluate_math(
     else:
         samples = [dataset[i] for i in range(total)]
     
-    correct = 0
-    total_evaluated = 0
 
-    was_training = model.training
-    model.eval()
-
-    for sample in tqdm(samples, desc=f"Math eval ({dataset_name})"):
+    prompts = []
+    ground_truths = []
+    for sample in samples:
         question = sample.get("problem", sample.get('question', ""))
         if not question:
             continue
@@ -855,34 +854,59 @@ def evaluate_math(
             continue
 
         msgs = _math_messages(question)
-        input_ids = tokenizer.apply_chat_template(msgs, add_generation_prompt = True, return_tensors= "pt").to(DEVICE)
-        
-        out_ids = model.generate(
-            input_ids = input_ids,
-            max_new_tokens = max_new_tokens,
-            do_sample=(temperature > 0),
-            temperature = max(temperature, 0.01),
-            top_p = 1.0,
-            use_cache = True,
-            pad_token_id = tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
+        prompt_text = _build_prompt_text(tokenizer, msgs)
+        prompts.append(prompt_text)
+        ground_truths.append(ground_truth)
 
-        completion = tokenizer.decode(out_ids[0][input_ids.shape[-1]:], skip_special_tokens=True)
+    if not prompts:
+        return {f"eval_math/{dataset_name}_accuracy": 0.0}
 
-        
+
+    if backend is not None and backend.is_enabled() and backend.supports_batch():
+        completions = backend.generate(prompts, temperature=temperature, max_new_tokens=max_new_tokens, mode = "math")
+    else:
+        print("falling back")
+        was_training = model.training
+        model.eval()
+        completions = []
+        for prompt in tqdm(prompts, desc=f"Math eval ({dataset_name})"):
+            input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(DEVICE)
+            out_ids = model.generate(
+                input_ids = input_ids,
+                max_new_tokens = max_new_tokens,
+                do_sample=(temperature > 0),
+                temperature = max(temperature, 0.01),
+                top_p = 1.0,
+                use_cache = True,
+                pad_token_id = tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+
+            completion = tokenizer.decode(out_ids[0][input_ids.shape[-1]:], skip_special_tokens=True)
+            completions.append(completion)
+
+            del input_ids, out_ids
+            if DEVICE == "cuda":
+                torch.cuda.empty_cache()
+
+        if was_training:
+            model.train()
+
+
+    correct = 0
+    for completion, ground_truth in zip(completions, ground_truths):
         predicted = extract_boxed_answer(completion)
         if not predicted:
             predicted = extract_answer(completion, dataset_name)
-        
+    
         predicted = strip_string(predicted)
-        print(predicted, ground_truth)
-        is_correct = math_equal(predicted, ground_truth)
-        correct += int(is_correct)
-        total_evaluated += 1
-    if was_training:
-        model.train()
 
+        if math_equal(predicted, ground_truth):
+            correct += 1
+
+
+    total_evaluated = len(ground_truths)
+    
     accuracy = correct/ max(1, total_evaluated)
 
     return {
@@ -1377,11 +1401,11 @@ VF_COEF = 0.5
 # NEW: action-only decoding => keep this small
 MAX_GEN_TOKENS = 8
 TEMPERATURE = 0.7
-MAX_TOKENS_MATH_EVAL = 8
+MAX_TOKENS_MATH_EVAL = 3072
 
 SAVE_EVERY_ITERS = 20
 EVAL_EVERY_ITERS = 20
-EVAL_GAMES = 10
+EVAL_GAMES = 25
 
 MATH_EVAL_DATA_PATH = Path(__file__).resolve().parent / "data"
 MATH_EVAL_DATASETS = ["math", "amc", "aime"]
@@ -1407,37 +1431,7 @@ for it in tqdm(range(10_000), desc="PPO iters"):
     if not inference_backend.is_enabled():
         inference_backend = _HFLocalBackend(ac.lm, tokenizer)
 
-
-     # 6a) Math evaluation (can be added to block if we decide to use same frequency)
-
-    if it % MATH_EVAL_EVERY_ITERS == 0:
-        ac.eval()
-        print(f"[eval {it}] Starting math benchmark evaluation...")
-
-        all_math_logs = {}
-        for ds_name in MATH_EVAL_DATASETS:
-            math_start = time.time()
-            math_logs = evaluate_math(
-                model = ac.lm,
-                tokenizer = tokenizer,
-                data_path = MATH_EVAL_DATA_PATH,
-                dataset_name = ds_name,
-                num_samples = MATH_EVAL_SAMPLES,
-                temperature = 0.0,
-                max_new_tokens = MAX_TOKENS_MATH_EVAL,
-            )
-
-            math_end = time.time()
-
-            acc = math_logs.get(f"eval_math/{ds_name}_accuracy", 0.0)
-
-            print(f"[eval {it}] {ds_name}: accuracy={acc:.3f} ({math_end-math_start:.1f}s)")
-            
-            all_math_logs.update(math_logs)
-            all_math_logs[f"eval_math/{ds_name}_time_sec"] = math_end - math_start
-        
-        if wandb:
-            wandb.log(all_math_logs, step=global_step)
+    
 
     batch, env_metrics = collect_games(
         model=ac.lm,
@@ -1653,7 +1647,40 @@ for it in tqdm(range(10_000), desc="PPO iters"):
             wandb.log(all_eval_logs, step=global_step)
 
     
+     # 6a) Math evaluation (can be added to block if we decide to use same frequency)
 
+    if it % MATH_EVAL_EVERY_ITERS == 0 and it > 0:
+        ac.eval()
+        print(f"[eval {it}] Starting math benchmark evaluation...")
+
+        all_math_logs = {}
+        for ds_name in MATH_EVAL_DATASETS:
+            math_start = time.time()
+            math_logs = evaluate_math(
+                model = ac.lm,
+                tokenizer = tokenizer,
+                data_path = MATH_EVAL_DATA_PATH,
+                dataset_name = ds_name,
+                num_samples = MATH_EVAL_SAMPLES,
+                temperature = 0.0,
+                max_new_tokens = MAX_TOKENS_MATH_EVAL,
+                backend = inference_backend,
+            )
+
+            math_end = time.time()
+
+            acc = math_logs.get(f"eval_math/{ds_name}_accuracy", 0.0)
+
+            print(f"[eval {it}] {ds_name}: accuracy={acc:.3f} ({math_end-math_start:.1f}s)")
+            
+            all_math_logs.update(math_logs)
+            all_math_logs[f"eval_math/{ds_name}_time_sec"] = math_end - math_start
+        
+        if wandb:
+            wandb.log(all_math_logs, step=global_step)
+
+
+    
     # Save checkpoints
     if it % SAVE_EVERY_ITERS == 0:
         ckpt_dir = output_dir_path / f"ppo_ckpt_iter_{it}"
