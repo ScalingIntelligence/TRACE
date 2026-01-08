@@ -1,24 +1,29 @@
 
 #!/usr/bin/env python3
 # =========================
-# PPO self-play for Kuhn Poker with STRICT action-only generation (no reasoning)
+# PPO self-play for Kuhn Poker with optional STRICT action-only generation (no reasoning)
 # - Keeps your cache + wandb + output_dir layout exactly
+# - Uses Qwen3-4B-Instruct-2507 model instead of gpt-oss
 # - Fixes:
-#   (1) gpt-oss MoE output handling (no last_hidden_state / hidden_states None)
-#   (2) dtype mismatches (bf16 vs fp32) in value head + PPO math
-#   (3) big memory spikes: pad PER-MINIBATCH + compute old_logp/old_v in chunks
-# - NEW (your request):
-#   (4) HARD "no reasoning": constrained decoding so model can ONLY output
+#   (1) dtype mismatches (bf16 vs fp32) in value head + PPO math
+#   (2) big memory spikes: pad PER-MINIBATCH + compute old_logp/old_v in chunks
+# - Optional constrained decoding (--use_constrained_decoding):
+#   (3) HARD "no reasoning": constrained decoding so model can ONLY output
 #       exactly one of: [check] [bet] [call] [fold]
 #       - HF local: prefix_allowed_tokens_fn + stop on exact action tokens
 #       - vLLM: guided decoding (guided_choice) + stop strings
+#   - If disabled, uses normal generation
 # - Tweaks:
 #   - Lower MAX_GEN_TOKENS (action-only)
 #   - Deterministic eval (temperature=0.0)
 #   - Optionally normalize action logprob by action length (reduces variance)
+#   - enable_thinking=False in chat template
 # =========================
 
+from unsloth import FastLanguageModel
+import argparse
 import copy
+import gc
 import os
 import json
 import random
@@ -35,8 +40,6 @@ import torch.nn.functional as F
 from transformers import StoppingCriteria, StoppingCriteriaList
 from tqdm import tqdm
 
-from unsloth import FastLanguageModel
-
 # ------------------------------------------
 # Optional: allocator fragmentation guard
 # (safe even if already set outside)
@@ -44,9 +47,31 @@ from unsloth import FastLanguageModel
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 # =========================
+# Parse command-line arguments
+# =========================
+parser = argparse.ArgumentParser(description="PPO self-play for Kuhn Poker")
+parser.add_argument(
+    "--root",
+    type=str,
+    default=None,
+    help="Root directory for cache, wandb, and outputs. Defaults to /matx/u/{USER} if not specified."
+)
+parser.add_argument(
+    "--use_constrained_decoding",
+    type=lambda x: str(x).lower() in ("true", "1", "yes", "on"),
+    default=False,
+    help="If True, use constrained decoding to force action-only outputs. If False, use normal generation. Default: True"
+)
+args = parser.parse_args()
+USE_CONSTRAINED_DECODING = bool(args.use_constrained_decoding)
+
+# =========================
 # Your exact cache + wandb layout
 # =========================
-ROOT = Path(f"/matx/u/{os.getenv('USER')}").resolve()
+if args.root is not None:
+    ROOT = Path(args.root).resolve()
+else:
+    ROOT = Path(f"/matx/u/{os.getenv('USER')}").resolve()
 HF_HOME = ROOT / ".cache" / "huggingface"
 HF_HUB = HF_HOME / "hub"
 HF_DATASETS = HF_HOME / "datasets"
@@ -352,35 +377,43 @@ def _make_prefix_allowed_fn(tokenizer, prompt_len: int, action_token_ids: List[L
 @torch.no_grad()
 def _generate_completion(model, tokenizer, player_id: int, observation: str, temperature: float, max_new_tokens: int) -> str:
     """
-    HF local generation constrained to output exactly one action string.
+    HF local generation. If use_constrained_decoding is True, constrained to output exactly one action string.
     Returns the action token string (e.g. "[bet]") when possible.
     """
     msgs = _messages(player_id, observation)
-    input_ids = tokenizer.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt").to(DEVICE)
+    input_ids = tokenizer.apply_chat_template(
+        msgs, 
+        add_generation_prompt=True, 
+        return_tensors="pt",
+        enable_thinking=False
+    ).to(DEVICE)
 
     prompt_len = int(input_ids.shape[-1])
-    action_token_ids = _encode_action_candidates(tokenizer)
-
-    stopper = StopOnAnyAction(prompt_len=prompt_len, action_token_ids=action_token_ids)
-    prefix_allowed = _make_prefix_allowed_fn(tokenizer, prompt_len=prompt_len, action_token_ids=action_token_ids)
-
+    
     was_training = model.training
     model.eval()
 
     do_sample = float(temperature) > 0.0
 
-    out_ids = model.generate(
-        input_ids=input_ids,
-        max_new_tokens=int(max_new_tokens),
-        do_sample=do_sample,
-        temperature=float(temperature) if do_sample else None,
-        top_p=1.0,
-        use_cache=True,
-        pad_token_id=tokenizer.pad_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-        stopping_criteria=StoppingCriteriaList([stopper]),
-        prefix_allowed_tokens_fn=prefix_allowed,
-    )
+    generate_kwargs = {
+        "input_ids": input_ids,
+        "max_new_tokens": int(max_new_tokens),
+        "do_sample": do_sample,
+        "temperature": float(temperature) if do_sample else None,
+        "top_p": 1.0,
+        "use_cache": True,
+        "pad_token_id": tokenizer.pad_token_id,
+        "eos_token_id": tokenizer.eos_token_id,
+    }
+
+    if USE_CONSTRAINED_DECODING:
+        action_token_ids = _encode_action_candidates(tokenizer)
+        stopper = StopOnAnyAction(prompt_len=prompt_len, action_token_ids=action_token_ids)
+        prefix_allowed = _make_prefix_allowed_fn(tokenizer, prompt_len=prompt_len, action_token_ids=action_token_ids)
+        generate_kwargs["stopping_criteria"] = StoppingCriteriaList([stopper])
+        generate_kwargs["prefix_allowed_tokens_fn"] = prefix_allowed
+
+    out_ids = model.generate(**generate_kwargs)
 
     if was_training:
         model.train()
@@ -411,9 +444,19 @@ def _build_prompt_text(tokenizer, msgs: list) -> str:
     Uses string prompts for vLLM/OpenAI-server compatibility.
     """
     try:
-        return tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+        return tokenizer.apply_chat_template(
+            msgs, 
+            tokenize=False, 
+            add_generation_prompt=True,
+            enable_thinking=False
+        )
     except TypeError:
-        ids = tokenizer.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt")[0]
+        ids = tokenizer.apply_chat_template(
+            msgs, 
+            add_generation_prompt=True, 
+            return_tensors="pt",
+            enable_thinking=False
+        )[0]
         return tokenizer.decode(ids, skip_special_tokens=False)
 
 
@@ -528,7 +571,7 @@ class _VLLMServerBackend(_InferenceBackend):
         if not self._ok:
             raise RuntimeError("vLLM server backend is not available")
 
-        # HARD action-only via guided decoding (guided_choice)
+        # HARD action-only via guided decoding (guided_choice) if constrained decoding is enabled
         payload = {
             "model": self._active_model_for_generation,
             "prompt": prompts,
@@ -539,10 +582,12 @@ class _VLLMServerBackend(_InferenceBackend):
             "stream": False,
             "stop": _VLLM_STOP_STRINGS,
             "include_stop_str_in_output": True,
-            "extra_body": {
-                "guided_choice": ACTION_STRS,
-            },
         }
+        
+        if USE_CONSTRAINED_DECODING:
+            payload["extra_body"] = {
+                "guided_choice": ACTION_STRS,
+            }
 
         r = self._post_json("/completions", payload)
         if r.status_code != 200:
@@ -566,7 +611,7 @@ def _init_inference_backend(model, tokenizer) -> _InferenceBackend:
     if vllm_base_url:
         backend = _VLLMServerBackend(
             base_url=vllm_base_url,
-            model_name=os.getenv("VLLM_MODEL", "unsloth/gpt-oss-20b"),
+            model_name=os.getenv("VLLM_MODEL", "Qwen/Qwen3-4B-Instruct-2507"),
             api_key=os.getenv("VLLM_API_KEY", "") or None,
             timeout_s=float(os.getenv("VLLM_TIMEOUT_S", "120")),
             lora_name=os.getenv("VLLM_LORA_NAME", "ppo_policy"),
@@ -662,7 +707,12 @@ def _pad_to_device(seqs: List[torch.Tensor], pad_id: int) -> Tuple[torch.Tensor,
 
 
 def _build_prompt_plus_action(tokenizer, prompt_msgs: list, action_str: str) -> Tuple[torch.Tensor, int, int]:
-    prompt_ids = tokenizer.apply_chat_template(prompt_msgs, add_generation_prompt=True, return_tensors="pt")[0]
+    prompt_ids = tokenizer.apply_chat_template(
+        prompt_msgs, 
+        add_generation_prompt=True, 
+        return_tensors="pt",
+        enable_thinking=False
+    )[0]
     action_ids = tokenizer(action_str, add_special_tokens=False, return_tensors="pt")["input_ids"][0]
     return torch.cat([prompt_ids, action_ids], dim=0), int(prompt_ids.shape[0]), int(action_ids.shape[0])
 
@@ -1002,7 +1052,7 @@ def evaluate_vs_base(
     rng = random.Random(int(seed))
 
     base_model, _ = FastLanguageModel.from_pretrained(
-        model_name="unsloth/gpt-oss-20b",
+        model_name="Qwen/Qwen3-4B-Instruct-2507",
         max_seq_length=768,
         dtype=None,
         load_in_4bit=True,
@@ -1105,6 +1155,9 @@ def evaluate_vs_base(
 
     del base_model
     if DEVICE == "cuda":
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        gc.collect()
         torch.cuda.empty_cache()
 
     return {
@@ -1121,7 +1174,7 @@ max_seq_length = 768
 lora_rank = 4
 
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name="unsloth/gpt-oss-20b",
+    model_name="Qwen/Qwen3-4B-Instruct-2507",
     max_seq_length=max_seq_length,
     dtype=None,
     load_in_4bit=True,
@@ -1159,7 +1212,7 @@ VLLM_ADAPTER_DIR = output_dir_path / "vllm_adapter_latest"
 # =========================
 if wandb:
     if not os.getenv("WANDB_NAME"):
-        os.environ["WANDB_NAME"] = f"gpt-oss-20b-kuhn-spiral-ppo-{int(time.time())}"
+        os.environ["WANDB_NAME"] = f"qwen3-4b-kuhn-spiral-ppo-{int(time.time())}"
     wandb.login(key=os.getenv("WANDB_API_KEY", ""), relogin=True)
     wandb.init(
         entity="forge_scaling_intelligence_lab",
@@ -1356,6 +1409,13 @@ for it in tqdm(range(10_000), desc="PPO iters"):
     if wandb:
         wandb.log(logs, step=global_step)
 
+    # Clean up batch data from memory
+    del batch, seqs_cpu, prompt_lens, action_lens, returns_cpu, old_logp_cpu, old_v_cpu, adv_cpu
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+        gc.collect()
+        torch.cuda.empty_cache()
+
     # Periodic eval (deterministic; no reasoning possible anyway)
     if it % EVAL_EVERY_ITERS == 0:
         ac.eval()
@@ -1414,6 +1474,12 @@ for it in tqdm(range(10_000), desc="PPO iters"):
 
         if wandb:
             wandb.log(all_eval_logs, step=global_step)
+        
+        # Clean up after evaluation
+        if DEVICE == "cuda":
+            torch.cuda.empty_cache()
+            gc.collect()
+            torch.cuda.empty_cache()
 
     # Save checkpoints
     if it % SAVE_EVERY_ITERS == 0:
