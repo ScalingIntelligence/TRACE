@@ -1,25 +1,22 @@
 
 #!/usr/bin/env python3
 # =========================
-# PPO self-play for Kuhn Poker with optional STRICT action-only generation (no reasoning)
+# PPO self-play for Kuhn Poker with STRICT action-only generation (no reasoning)
 # - Keeps your cache + wandb + output_dir layout exactly
-# - Uses Qwen3-4B-Instruct-2507 model instead of gpt-oss
 # - Fixes:
-#   (1) dtype mismatches (bf16 vs fp32) in value head + PPO math
-#   (2) big memory spikes: pad PER-MINIBATCH + compute old_logp/old_v in chunks
-# - Optional constrained decoding (--use_constrained_decoding):
-#   (3) HARD "no reasoning": constrained decoding so model can ONLY output
+#   (1) gpt-oss MoE output handling (no last_hidden_state / hidden_states None)
+#   (2) dtype mismatches (bf16 vs fp32) in value head + PPO math
+#   (3) big memory spikes: pad PER-MINIBATCH + compute old_logp/old_v in chunks
+# - NEW (your request):
+#   (4) HARD "no reasoning": constrained decoding so model can ONLY output
 #       exactly one of: [check] [bet] [call] [fold]
 #       - HF local: prefix_allowed_tokens_fn + stop on exact action tokens
 #       - vLLM: guided decoding (guided_choice) + stop strings
-#   - If disabled, uses normal generation
 # - Tweaks:
 #   - Lower MAX_GEN_TOKENS (action-only)
 #   - Deterministic eval (temperature=0.0)
 #   - Optionally normalize action logprob by action length (reduces variance)
-#   - enable_thinking=False in chat template
 # =========================
-
 from unsloth import FastLanguageModel
 import argparse
 import copy
@@ -40,6 +37,17 @@ import torch.nn.functional as F
 from transformers import StoppingCriteria, StoppingCriteriaList
 from tqdm import tqdm
 
+from datasets import load_from_disk
+
+import sys
+_HARNESS_PATH = Path(__file__).resolve().parent / "evals" / "benchmarks" / "math-evaluation-harness"
+sys.path.insert(0, str(_HARNESS_PATH))
+
+from grader import math_equal
+from parser import extract_answer, strip_string, parse_ground_truth
+
+
+
 # ------------------------------------------
 # Optional: allocator fragmentation guard
 # (safe even if already set outside)
@@ -58,7 +66,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--use_constrained_decoding",
-    type=lambda x: str(x).lower() in ("true", "1", "yes", "on"),
+    type=bool,
     default=False,
     help="If True, use constrained decoding to force action-only outputs. If False, use normal generation. Default: True"
 )
@@ -72,6 +80,8 @@ if args.root is not None:
     ROOT = Path(args.root).resolve()
 else:
     ROOT = Path(f"/matx/u/{os.getenv('USER')}").resolve()
+
+
 HF_HOME = ROOT / ".cache" / "huggingface"
 HF_HUB = HF_HOME / "hub"
 HF_DATASETS = HF_HOME / "datasets"
@@ -754,6 +764,138 @@ def _values_from_hidden(last_hidden: torch.Tensor, value_head: nn.Module, prompt
     return v
 
 
+MATH_SYSTEM_PROMPT = (
+    "You are a helpful math assistant. Solve the following problem step by step. "
+    "Put your final answer in \\boxed{}."
+)
+
+def _math_messages(question: str): 
+    return [
+        {"role": "system", "content": MATH_SYSTEM_PROMPT},
+        {"role": "user", "content": question},
+    ]
+
+def extract_boxed_answer(text: str) -> str:
+    """ Extract the model's answer from \\boxed{...}. """
+
+    if "boxed" not in text:
+        return ""
+
+    ans = text.split("boxed")[-1]
+
+    if not ans:
+        return ""
+
+    if ans[0] == "{":
+        stack = 1
+        result = ""
+        for c in ans[1:]:
+            if c == "{":
+                stack += 1
+                result += c
+            elif c == "}":
+                stack -= 1
+                if stack == 0:
+                    break
+                result += c
+            else:
+                result += c
+
+        return result.strip()
+    else:
+        return ans.split("$")[0].strip()
+
+@torch.no_grad()
+def evaluate_math(
+    model,
+    tokenizer,
+    data_path: Path,
+    dataset_name: str,
+    num_samples: int = 50,
+    temperature: float = 0.0,
+    max_new_tokens: int = 1024,
+) -> Dict[str, float]:
+    """Evaluate model on the math benchmark (grading using harness)"""
+
+    #Loading the dataset.
+    dataset_path = data_path / dataset_name
+
+    if not dataset_path.exists():
+        print(f"[math_eval] Dataset not found: {dataset_path}")
+        return {f"eval_math/{dataset_name}": 0.0}
+
+    dataset = load_from_disk(dataset_path)
+
+    total = len(dataset)
+    if num_samples < total:
+        indices = random.sample(range(total), num_samples)
+        samples = [dataset[i] for i in indices]
+    else:
+        samples = [dataset[i] for i in range(total)]
+    
+    correct = 0
+    total_evaluated = 0
+
+    was_training = model.training
+    model.eval()
+
+    for sample in tqdm(samples, desc=f"Math eval ({dataset_name})"):
+        question = sample.get("problem", sample.get('question', ""))
+        if not question:
+            continue
+
+        try:
+            _, ground_truth = parse_ground_truth(sample, dataset_name)
+        except Exception:
+            ground_truth = sample.get("answer", "")
+            if ground_truth:
+                ground_truth = strip_string(str(ground_truth))
+
+        if not ground_truth:
+            continue
+
+        msgs = _math_messages(question)
+        input_ids = tokenizer.apply_chat_template(msgs, add_generation_prompt = True, return_tensors= "pt").to(DEVICE)
+        
+        out_ids = model.generate(
+            input_ids = input_ids,
+            max_new_tokens = max_new_tokens,
+            do_sample=(temperature > 0),
+            temperature = max(temperature, 0.01),
+            top_p = 1.0,
+            use_cache = True,
+            pad_token_id = tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+
+        completion = tokenizer.decode(out_ids[0][input_ids.shape[-1]:], skip_special_tokens=True)
+
+        
+        predicted = extract_boxed_answer(completion)
+        if not predicted:
+            predicted = extract_answer(completion, dataset_name)
+        
+        predicted = strip_string(predicted)
+        print(predicted, ground_truth)
+        is_correct = math_equal(predicted, ground_truth)
+        correct += int(is_correct)
+        total_evaluated += 1
+    if was_training:
+        model.train()
+
+    accuracy = correct/ max(1, total_evaluated)
+
+    return {
+        f"eval_math/{dataset_name}_accuracy": accuracy,
+        f"eval_math/{dataset_name}_correct": correct,
+        f"eval_math/{dataset_name}_total": total_evaluated,
+    }
+
+
+
+
+
+
 # =========================
 # Trajectory storage
 # =========================
@@ -1235,10 +1377,18 @@ VF_COEF = 0.5
 # NEW: action-only decoding => keep this small
 MAX_GEN_TOKENS = 8
 TEMPERATURE = 0.7
+MAX_TOKENS_MATH_EVAL = 8
 
 SAVE_EVERY_ITERS = 20
 EVAL_EVERY_ITERS = 20
 EVAL_GAMES = 10
+
+MATH_EVAL_DATA_PATH = Path(__file__).resolve().parent / "data"
+MATH_EVAL_DATASETS = ["math", "amc", "aime"]
+MATH_EVAL_SAMPLES = 50
+MATH_EVAL_EVERY_ITERS = EVAL_EVERY_ITERS #can change if math slow
+
+
 
 trainable_params = [p for p in ac.parameters() if p.requires_grad]
 optim = torch.optim.AdamW(trainable_params, lr=LR)
@@ -1256,6 +1406,38 @@ for it in tqdm(range(10_000), desc="PPO iters"):
     inference_backend.sync_policy(ac.lm, VLLM_ADAPTER_DIR)
     if not inference_backend.is_enabled():
         inference_backend = _HFLocalBackend(ac.lm, tokenizer)
+
+
+     # 6a) Math evaluation (can be added to block if we decide to use same frequency)
+
+    if it % MATH_EVAL_EVERY_ITERS == 0:
+        ac.eval()
+        print(f"[eval {it}] Starting math benchmark evaluation...")
+
+        all_math_logs = {}
+        for ds_name in MATH_EVAL_DATASETS:
+            math_start = time.time()
+            math_logs = evaluate_math(
+                model = ac.lm,
+                tokenizer = tokenizer,
+                data_path = MATH_EVAL_DATA_PATH,
+                dataset_name = ds_name,
+                num_samples = MATH_EVAL_SAMPLES,
+                temperature = 0.0,
+                max_new_tokens = MAX_TOKENS_MATH_EVAL,
+            )
+
+            math_end = time.time()
+
+            acc = math_logs.get(f"eval_math/{ds_name}_accuracy", 0.0)
+
+            print(f"[eval {it}] {ds_name}: accuracy={acc:.3f} ({math_end-math_start:.1f}s)")
+            
+            all_math_logs.update(math_logs)
+            all_math_logs[f"eval_math/{ds_name}_time_sec"] = math_end - math_start
+        
+        if wandb:
+            wandb.log(all_math_logs, step=global_step)
 
     batch, env_metrics = collect_games(
         model=ac.lm,
@@ -1409,12 +1591,7 @@ for it in tqdm(range(10_000), desc="PPO iters"):
     if wandb:
         wandb.log(logs, step=global_step)
 
-    # Clean up batch data from memory
-    del batch, seqs_cpu, prompt_lens, action_lens, returns_cpu, old_logp_cpu, old_v_cpu, adv_cpu
-    if DEVICE == "cuda":
-        torch.cuda.empty_cache()
-        gc.collect()
-        torch.cuda.empty_cache()
+    
 
     # Periodic eval (deterministic; no reasoning possible anyway)
     if it % EVAL_EVERY_ITERS == 0:
@@ -1474,12 +1651,8 @@ for it in tqdm(range(10_000), desc="PPO iters"):
 
         if wandb:
             wandb.log(all_eval_logs, step=global_step)
-        
-        # Clean up after evaluation
-        if DEVICE == "cuda":
-            torch.cuda.empty_cache()
-            gc.collect()
-            torch.cuda.empty_cache()
+
+    
 
     # Save checkpoints
     if it % SAVE_EVERY_ITERS == 0:
