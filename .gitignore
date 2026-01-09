@@ -1,0 +1,3 @@
+unsloth_compiled_cache/*
+selfplay_rollouts_ppo.jsonl
+__pycache__/
