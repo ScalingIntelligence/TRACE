@@ -103,7 +103,7 @@ class Config:
     
     # Game settings
     NUM_ROUNDS = 5
-    GAMES_PER_ITER = 8
+    GAMES_PER_ITER = 256
     
     # PPO hyperparameters
     PPO_EPOCHS = 2
@@ -116,14 +116,17 @@ class Config:
     # Generation settings
     MAX_GEN_TOKENS = 8
     TEMPERATURE = 0.7
-    MAX_TOKENS_MATH_EVAL = 3072
+    MAX_TOKENS_MATH_EVAL = 7000
     
     # Checkpointing and evaluation
-    SAVE_EVERY_ITERS = 20
-    EVAL_EVERY_ITERS = 20
+    SAVE_EVERY_ITERS = 5
+    EVAL_EVERY_ITERS = 5
     EVAL_GAMES = 25
     MATH_EVAL_SAMPLES = 50
-    MATH_EVAL_EVERY_ITERS = 20
+    MATH_EVAL_EVERY_ITERS = 5
+
+    USE_ROLE_BASELINE = True
+    ROLE_BASELINE_EMA_GAMMA = 0.95
     
     # Math evaluation datasets
     MATH_EVAL_DATASETS = ["math", "amc", "aime"]

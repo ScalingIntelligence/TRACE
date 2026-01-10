@@ -27,6 +27,7 @@ from model import PolicyWithValueHead
 from inference import init_inference_backend, HFLocalBackend
 from ppo import (
     JSONLLogger,
+    EMA,
     collect_games,
     pad_to_device,
     build_prompt_plus_action,
@@ -141,6 +142,10 @@ def main():
     global_step = 0
     math_eval_data_path = Path(__file__).resolve().parent / "data"
 
+    role_baseline_ema = None
+    if Config.USE_ROLE_BASELINE:
+        role_baseline_ema = {0: EMA(Config.ROLE_BASELINE_EMA_GAMMA), 1: EMA(Config.ROLE_BASELINE_EMA_GAMMA)}
+
     for it in tqdm(range(10_000), desc="PPO iters"):
         t_collect0 = time.time()
 
@@ -162,6 +167,7 @@ def main():
             logger=rollout_logger,
             use_constrained_decoding=use_constrained_decoding,
             device=device,
+            role_baseline_ema = role_baseline_ema,
         )
         t_collect1 = time.time()
 

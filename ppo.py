@@ -28,6 +28,24 @@ class JSONLLogger:
         self._fh.write(json.dumps(payload, ensure_ascii=True) + "\n")
         self._fh.flush()
 
+class EMA:
+    """Exponential Moving Average for role basline (ie extra reward for 
+    going second if going second is disadvantage)"""
+    def __init__(self, gamma: float = 0.95):
+        self.gamma = gamma
+        self.value = 0.0
+        self.initialized = False
+
+    def update(self, new_value: float):
+        if not self.initialized:
+            self.value = new_value
+            self.initialized = True
+        else:
+            self.value = self.gamma * self.value + (1 - self.gamma) * new_value
+
+    def get(self) -> float:
+        return self.value if self.initialized else 0.0
+
 
 # =========================
 # Trajectory storage
@@ -124,6 +142,7 @@ def collect_games(
     logger: JSONLLogger,
     use_constrained_decoding: bool,
     device: str,
+    role_baseline_ema : dict = None,
 ) -> Tuple[List[StepSample], Dict[str, float]]:
     """Collect self-play game trajectories."""
     rng = random.Random(int(seed))
@@ -207,11 +226,17 @@ def collect_games(
             })
 
             for pm, act, pid, completion in episode_steps[i]:
+                player_reward = float(env.rewards[pid])
+                if role_baseline_ema is not None:
+                    baseline = role_baseline_ema[pid].get()
+                    role_baseline_ema[pid].update(player_reward)
+                    player_reward -= baseline
+
                 samples.append(StepSample(
                     prompt_msgs=pm,
                     action_str=act,
                     player_id=pid,
-                    ret=float(env.rewards[pid]),
+                    ret=player_reward,
                     completion_text=completion,
                     game_id=game_ids[i],
                 ))
@@ -267,6 +292,8 @@ def collect_games(
             invalid_games += 1 if env.invalid_player is not None else 0
             p0_wins += 1 if env.rewards.get(0, 0.0) > 0 else 0
 
+            
+
             logger.log({
                 "type": "game_end",
                 "game_id": game_id,
@@ -276,12 +303,19 @@ def collect_games(
                 "timestamp": time.time(),
             })
 
+           
             for pm, act, pid, completion in episode_steps:
+                player_reward = float(env.rewards[pid])
+                if role_baseline_ema is not None:
+                    baseline = role_baseline_ema[pid].get()
+                    role_baseline_ema[pid].update(player_reward)
+                    player_reward -= baseline
+
                 samples.append(StepSample(
                     prompt_msgs=pm,
                     action_str=act,
                     player_id=pid,
-                    ret=float(env.rewards[pid]),
+                    ret=float(player_reward),
                     completion_text=completion,
                     game_id=game_id,
                 ))
