@@ -64,3 +64,7 @@ logs/
 
 # Data (uncomment if you don't want to track data)
 # data/
+unsloth_compiled_cache/
+results.json
+game_logs.txt
+__pycache__/
