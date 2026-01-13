@@ -11,16 +11,24 @@ from tqdm import tqdm
 from unsloth import FastLanguageModel
 from datasets import load_from_disk
 
-import sys
-_HARNESS_PATH = Path(__file__).resolve().parent / "evals" / "benchmarks" / "math-evaluation-harness"
-sys.path.insert(0, str(_HARNESS_PATH))
 
-from grader import math_equal
-from parser import extract_answer, strip_string, parse_ground_truth
-
-from kuhn_poker import KuhnPoker, extract_action
-from inference import InferenceBackend, messages_for_poker, messages_for_math, build_prompt_text, generate_completion
+from kuhn_poker import KuhnPoker, extract_action as extract_action_kuhn
+from liars_dice import LiarsDice, extract_action as extract_action_liars
+from inference import InferenceBackend, messages_for_game, messages_for_math, build_prompt_text, generate_completion
 from config import Config
+
+
+def create_env(game: str, num_rounds: int, num_dice: int):
+    """Create game environment based on game type."""
+    if game == "liars_dice":
+        return LiarsDice(num_dice=num_dice)
+    return KuhnPoker(num_rounds=num_rounds)
+
+def do_extract_action(completion: str, legal_actions, game: str):
+    """Extract action based on game type."""
+    if game == "liars_dice":
+        return extract_action_liars(completion, legal_actions)
+    return extract_action_kuhn(completion, legal_actions)
 
 
 # =========================
@@ -69,6 +77,12 @@ def evaluate_math(
     device: str = "cuda",
 ) -> Dict[str, float]:
     """Evaluate model on the math benchmark (grading using harness)"""
+    import sys
+    _HARNESS_PATH = Path(__file__).resolve().parent / "evals" / "benchmarks" / "math-evaluation-harness"
+    sys.path.insert(0, str(_HARNESS_PATH))
+
+    from grader import math_equal
+    from parser import extract_answer, strip_string, parse_ground_truth
 
     # Loading the dataset.
     dataset_path = data_path / dataset_name
@@ -182,15 +196,18 @@ def evaluate_vs_random(
     seed: int,
     use_constrained_decoding: bool,
     device: str,
+    game: str = "kuhn_poker",
+    num_dice: int = 5,
 ) -> Dict[str, float]:
+
     """Evaluate current model against random opponent."""
     rng = random.Random(int(seed))
     half = max(1, num_games // 2)
 
-    envs: List[KuhnPoker] = []
+    envs = []
     current_is_p0: List[bool] = []
     for i in range(num_games):
-        env = KuhnPoker(num_rounds=num_rounds)
+        env = create_env(game, num_rounds, num_dice)
         env.reset(rng.randint(0, 2**31 - 1))
         envs.append(env)
         current_is_p0.append(i < half)
@@ -214,14 +231,14 @@ def evaluate_vs_random(
                 continue
             obs = env.observe(pid)
             legal = env.legal_actions()
-            msgs = messages_for_poker(pid, obs)
+            msgs = messages_for_game(pid, obs, game)
             policy_idxs.append(i)
             prompts.append(build_prompt_text(tokenizer, msgs))
             meta.append((i, pid, legal, obs))
 
         if prompts:
             if backend.supports_batch():
-                completions = backend.generate(prompts, temperature=temperature, max_new_tokens=max_new_tokens)
+                completions = backend.generate(prompts, temperature=temperature, max_new_tokens=max_new_tokens, game=game)
             else:
                 completions = [
                     generate_completion(
@@ -239,7 +256,7 @@ def evaluate_vs_random(
 
             for j, (i, pid, legal, _obs) in enumerate(meta):
                 completion = completions[j]
-                act = extract_action(completion, legal)
+                act = do_extract_action(completion, legal, game)
                 if act is None:
                     act = rng.choice(legal)
                 envs[i].step(act)
@@ -289,6 +306,8 @@ def evaluate_vs_base(
     hf_hub: Path,
     use_constrained_decoding: bool,
     device: str,
+    game: str = "kuhn_poker",
+    num_dice: int = 5,
 ) -> Dict[str, float]:
     """
     Evaluate current trained model against the base (untrained) model.
@@ -318,10 +337,10 @@ def evaluate_vs_base(
     base_model.eval()
 
     half = max(1, num_games // 2)
-    envs: List[KuhnPoker] = []
+    envs = []
     current_is_p0: List[bool] = []
     for i in range(num_games):
-        env = KuhnPoker(num_rounds=num_rounds)
+        env = create_env(game, num_rounds, num_dice)
         env.reset(rng.randint(0, 2**31 - 1))
         envs.append(env)
         current_is_p0.append(i < half)
@@ -344,13 +363,13 @@ def evaluate_vs_base(
                 continue
             obs = env.observe(pid)
             legal = env.legal_actions()
-            msgs = messages_for_poker(pid, obs)
+            msgs = messages_for_game(pid, obs, game)
             current_prompts.append(build_prompt_text(tokenizer, msgs))
             current_meta.append((i, pid, legal, obs))
 
         if current_prompts:
             if backend.supports_batch():
-                completions = backend.generate(current_prompts, temperature=temperature, max_new_tokens=max_new_tokens)
+                completions = backend.generate(current_prompts, temperature=temperature, max_new_tokens=max_new_tokens, game=game)
             else:
                 completions = [
                     generate_completion(
@@ -362,12 +381,13 @@ def evaluate_vs_base(
                         max_new_tokens=max_new_tokens,
                         use_constrained_decoding=use_constrained_decoding,
                         device=device,
+                        game=game,
                     )
                     for (_, pid, _legal, obs) in current_meta
                 ]
             for j, (i, pid, legal, _obs) in enumerate(current_meta):
                 completion = completions[j]
-                act = extract_action(completion, legal)
+                act = do_extract_action(completion, legal, game)
                 if act is None:
                     act = rng.choice(legal)
                 envs[i].step(act)
@@ -397,12 +417,13 @@ def evaluate_vs_base(
                     max_new_tokens=max_new_tokens,
                     use_constrained_decoding=use_constrained_decoding,
                     device=device,
+                    game=game,
                 )
                 for (_, pid, _legal, obs) in base_meta
             ]
             for j, (i, pid, legal, _obs) in enumerate(base_meta):
                 completion = completions[j]
-                act = extract_action(completion, legal)
+                act = do_extract_action(completion, legal, game)
                 if act is None:
                     act = rng.choice(legal)
                 envs[i].step(act)

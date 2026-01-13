@@ -22,7 +22,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 # Import our refactored modules
-from config import parse_args, setup_environment, Config
+from config import parse_args, setup_environment, Config, get_max_gen_tokens
 from model import PolicyWithValueHead
 from inference import init_inference_backend, HFLocalBackend
 from ppo import (
@@ -55,6 +55,9 @@ def main():
     # Parse arguments
     args = parse_args()
     use_constrained_decoding = bool(args.use_constrained_decoding)
+    game = args.game
+    num_dice = Config.NUM_DICE
+    max_gen_tokens = get_max_gen_tokens(game)
     
     # Setup environment
     env_config = setup_environment(args)
@@ -66,6 +69,8 @@ def main():
     print(f"[Setup] Device: {device}")
     print(f"[Setup] Output directory: {output_dir_path}")
     print(f"[Setup] Use constrained decoding: {use_constrained_decoding}")
+    print(f"[Setup] Game: {game}")
+    print(f"[Setup] Max generation tokens: {max_gen_tokens}")
     
     # =========================
     # Load model + LoRA
@@ -107,12 +112,13 @@ def main():
     inference_backend = init_inference_backend(ac.lm, tokenizer, use_constrained_decoding, device)
     vllm_adapter_dir = output_dir_path / "vllm_adapter_latest"
     
+
     # =========================
     # wandb init
     # =========================
     if wandb:
         if not os.getenv("WANDB_NAME"):
-            os.environ["WANDB_NAME"] = f"qwen3-4b-kuhn-spiral-ppo-{int(time.time())}"
+            os.environ["WANDB_NAME"] = f"qwen3-4b-{game}-spiral-ppo-{int(time.time())}"
         wandb.login(key=os.getenv("WANDB_API_KEY", ""), relogin=True)
         wandb.init(
             entity="forge_scaling_intelligence_lab",
@@ -162,12 +168,14 @@ def main():
             num_games=Config.GAMES_PER_ITER,
             num_rounds=Config.NUM_ROUNDS,
             temperature=Config.TEMPERATURE,
-            max_new_tokens=Config.MAX_GEN_TOKENS,
+            max_new_tokens=max_gen_tokens,
             seed=it,
             logger=rollout_logger,
             use_constrained_decoding=use_constrained_decoding,
             device=device,
             role_baseline_ema = role_baseline_ema,
+            game=game,
+            num_dice=num_dice,
         )
         t_collect1 = time.time()
 
@@ -327,10 +335,12 @@ def main():
                 num_games=Config.EVAL_GAMES,
                 num_rounds=Config.NUM_ROUNDS,
                 temperature=0.0,  # deterministic
-                max_new_tokens=Config.MAX_GEN_TOKENS,
+                max_new_tokens=max_gen_tokens,
                 seed=10_000 + it,
                 use_constrained_decoding=use_constrained_decoding,
                 device=device,
+                game = game,
+                num_dice=num_dice,
             )
             t_eval_random1 = time.time()
             win_rate_random = eval_logs_random.get("eval/win_rate_vs_random", 0.0)
@@ -346,11 +356,13 @@ def main():
                 num_games=Config.EVAL_GAMES,
                 num_rounds=Config.NUM_ROUNDS,
                 temperature=0.0,  # deterministic
-                max_new_tokens=Config.MAX_GEN_TOKENS,
+                max_new_tokens=max_gen_tokens,
                 seed=20_000 + it,
                 hf_hub=hf_hub,
                 use_constrained_decoding=use_constrained_decoding,
                 device=device,
+                game=game,
+                num_dice=num_dice,
             )
             t_eval_base1 = time.time()
             win_rate_base = eval_logs_base.get("eval/win_rate_vs_base", 0.0)
@@ -416,7 +428,7 @@ def main():
             print(f"[checkpoint] Saved checkpoint to {ckpt_dir}")
 
     # Final save
-    final_dir = output_dir_path / "spiral_kuhn_ppo_model"
+    final_dir = output_dir_path / f"spiral_{game}_ppo_model"
     final_dir.mkdir(parents=True, exist_ok=True)
     ac.lm.save_pretrained(str(final_dir))
     tokenizer.save_pretrained(str(final_dir))

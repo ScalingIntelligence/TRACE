@@ -1,0 +1,215 @@
+{
+  "metadata": {
+    "timestamp": "2026-01-10T03:00:20.995314",
+    "num_games_per_matchup": 500,
+    "num_rounds_per_game": 1,
+    "temperature": 0.7,
+    "max_new_tokens": 8,
+    "models_tested": [
+      "qwen-4b",
+      "qwen-4b-instruct",
+      "qwen-8b",
+      "qwen-14b"
+    ]
+  },
+  "matchups": {
+    "qwen-4b_vs_qwen-4b-instruct": {
+      "first_player": "qwen-4b",
+      "second_player": "qwen-4b-instruct",
+      "first_player_wins": 254,
+      "second_player_wins": 246,
+      "draws": 0,
+      "first_player_win_rate": 0.508,
+      "second_player_win_rate": 0.492,
+      "draw_rate": 0.0,
+      "first_player_invalid_count": 0,
+      "second_player_invalid_count": 0
+    },
+    "qwen-4b_vs_qwen-8b": {
+      "first_player": "qwen-4b",
+      "second_player": "qwen-8b",
+      "first_player_wins": 254,
+      "second_player_wins": 246,
+      "draws": 0,
+      "first_player_win_rate": 0.508,
+      "second_player_win_rate": 0.492,
+      "draw_rate": 0.0,
+      "first_player_invalid_count": 0,
+      "second_player_invalid_count": 0
+    },
+    "qwen-4b_vs_qwen-14b": {
+      "first_player": "qwen-4b",
+      "second_player": "qwen-14b",
+      "first_player_wins": 259,
+      "second_player_wins": 241,
+      "draws": 0,
+      "first_player_win_rate": 0.518,
+      "second_player_win_rate": 0.482,
+      "draw_rate": 0.0,
+      "first_player_invalid_count": 0,
+      "second_player_invalid_count": 80
+    },
+    "qwen-4b-instruct_vs_qwen-4b": {
+      "first_player": "qwen-4b-instruct",
+      "second_player": "qwen-4b",
+      "first_player_wins": 256,
+      "second_player_wins": 244,
+      "draws": 0,
+      "first_player_win_rate": 0.512,
+      "second_player_win_rate": 0.488,
+      "draw_rate": 0.0,
+      "first_player_invalid_count": 0,
+      "second_player_invalid_count": 0
+    },
+    "qwen-4b-instruct_vs_qwen-8b": {
+      "first_player": "qwen-4b-instruct",
+      "second_player": "qwen-8b",
+      "first_player_wins": 241,
+      "second_player_wins": 259,
+      "draws": 0,
+      "first_player_win_rate": 0.482,
+      "second_player_win_rate": 0.518,
+      "draw_rate": 0.0,
+      "first_player_invalid_count": 0,
+      "second_player_invalid_count": 0
+    },
+    "qwen-4b-instruct_vs_qwen-14b": {
+      "first_player": "qwen-4b-instruct",
+      "second_player": "qwen-14b",
+      "first_player_wins": 251,
+      "second_player_wins": 249,
+      "draws": 0,
+      "first_player_win_rate": 0.502,
+      "second_player_win_rate": 0.498,
+      "draw_rate": 0.0,
+      "first_player_invalid_count": 0,
+      "second_player_invalid_count": 85
+    },
+    "qwen-8b_vs_qwen-4b": {
+      "first_player": "qwen-8b",
+      "second_player": "qwen-4b",
+      "first_player_wins": 250,
+      "second_player_wins": 250,
+      "draws": 0,
+      "first_player_win_rate": 0.5,
+      "second_player_win_rate": 0.5,
+      "draw_rate": 0.0,
+      "first_player_invalid_count": 0,
+      "second_player_invalid_count": 0
+    },
+    "qwen-8b_vs_qwen-4b-instruct": {
+      "first_player": "qwen-8b",
+      "second_player": "qwen-4b-instruct",
+      "first_player_wins": 264,
+      "second_player_wins": 236,
+      "draws": 0,
+      "first_player_win_rate": 0.528,
+      "second_player_win_rate": 0.472,
+      "draw_rate": 0.0,
+      "first_player_invalid_count": 0,
+      "second_player_invalid_count": 0
+    },
+    "qwen-8b_vs_qwen-14b": {
+      "first_player": "qwen-8b",
+      "second_player": "qwen-14b",
+      "first_player_wins": 249,
+      "second_player_wins": 251,
+      "draws": 0,
+      "first_player_win_rate": 0.498,
+      "second_player_win_rate": 0.502,
+      "draw_rate": 0.0,
+      "first_player_invalid_count": 0,
+      "second_player_invalid_count": 78
+    },
+    "qwen-14b_vs_qwen-4b": {
+      "first_player": "qwen-14b",
+      "second_player": "qwen-4b",
+      "first_player_wins": 260,
+      "second_player_wins": 240,
+      "draws": 0,
+      "first_player_win_rate": 0.52,
+      "second_player_win_rate": 0.48,
+      "draw_rate": 0.0,
+      "first_player_invalid_count": 63,
+      "second_player_invalid_count": 0
+    },
+    "qwen-14b_vs_qwen-4b-instruct": {
+      "first_player": "qwen-14b",
+      "second_player": "qwen-4b-instruct",
+      "first_player_wins": 243,
+      "second_player_wins": 257,
+      "draws": 0,
+      "first_player_win_rate": 0.486,
+      "second_player_win_rate": 0.514,
+      "draw_rate": 0.0,
+      "first_player_invalid_count": 69,
+      "second_player_invalid_count": 0
+    },
+    "qwen-14b_vs_qwen-8b": {
+      "first_player": "qwen-14b",
+      "second_player": "qwen-8b",
+      "first_player_wins": 234,
+      "second_player_wins": 266,
+      "draws": 0,
+      "first_player_win_rate": 0.468,
+      "second_player_win_rate": 0.532,
+      "draw_rate": 0.0,
+      "first_player_invalid_count": 71,
+      "second_player_invalid_count": 0
+    }
+  },
+  "summary": {
+    "qwen-4b": {
+      "total_wins": 1501,
+      "total_losses": 1499,
+      "total_draws": 0,
+      "total_games": 3000,
+      "overall_win_rate": 0.5003333333333333,
+      "wins_as_first": 767,
+      "games_as_first": 1500,
+      "win_rate_as_first": 0.5113333333333333,
+      "wins_as_second": 734,
+      "games_as_second": 1500,
+      "win_rate_as_second": 0.48933333333333334
+    },
+    "qwen-4b-instruct": {
+      "total_wins": 1487,
+      "total_losses": 1513,
+      "total_draws": 0,
+      "total_games": 3000,
+      "overall_win_rate": 0.49566666666666664,
+      "wins_as_first": 748,
+      "games_as_first": 1500,
+      "win_rate_as_first": 0.49866666666666665,
+      "wins_as_second": 739,
+      "games_as_second": 1500,
+      "win_rate_as_second": 0.49266666666666664
+    },
+    "qwen-8b": {
+      "total_wins": 1534,
+      "total_losses": 1466,
+      "total_draws": 0,
+      "total_games": 3000,
+      "overall_win_rate": 0.5113333333333333,
+      "wins_as_first": 763,
+      "games_as_first": 1500,
+      "win_rate_as_first": 0.5086666666666667,
+      "wins_as_second": 771,
+      "games_as_second": 1500,
+      "win_rate_as_second": 0.514
+    },
+    "qwen-14b": {
+      "total_wins": 1478,
+      "total_losses": 1522,
+      "total_draws": 0,
+      "total_games": 3000,
+      "overall_win_rate": 0.49266666666666664,
+      "wins_as_first": 737,
+      "games_as_first": 1500,
+      "win_rate_as_first": 0.49133333333333334,
+      "wins_as_second": 741,
+      "games_as_second": 1500,
+      "win_rate_as_second": 0.494
+    }
+  }
+}

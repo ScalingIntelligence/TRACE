@@ -25,6 +25,14 @@ def parse_args():
         default=False,
         help="If True, use constrained decoding to force action-only outputs. If False, use normal generation. Default: True"
     )
+
+    parser.add_argument(
+        "--game",
+        type=str,
+        default="kuhn_poker",
+        choices=["kuhn_poker", "liars_dice"],
+        help="Game to train on: kuhn_poker or liars_dice"
+    )
     return parser.parse_args()
 
 
@@ -103,11 +111,12 @@ class Config:
     
     # Game settings
     NUM_ROUNDS = 5
+    NUM_DICE = 5
     GAMES_PER_ITER = 256
     
     # PPO hyperparameters
     PPO_EPOCHS = 2
-    MINI_BATCH_SIZE = 16
+    MINI_BATCH_SIZE = 32
     STATS_CHUNK_SIZE = 2
     LR = 1e-6
     CLIP_EPS = 0.2
@@ -115,6 +124,7 @@ class Config:
     
     # Generation settings
     MAX_GEN_TOKENS = 8
+    MAX_GEN_TOKENS_LIARS_DICE = 16
     TEMPERATURE = 0.7
     MAX_TOKENS_MATH_EVAL = 7000
     
@@ -132,10 +142,18 @@ class Config:
     MATH_EVAL_DATASETS = ["math", "amc", "aime"]
     
     # Prompt templates
-    SYSTEM_PROMPT = (
+    SYSTEM_PROMPT_KUHN = (
         "You are playing Kuhn Poker.\n"
         "Respond with EXACTLY ONE action token and NOTHING ELSE.\n"
         "Valid outputs: [check] or [bet] or [call] or [fold].\n"
+        "Do not add any whitespace, punctuation, explanation, or extra text.\n"
+    )
+
+    SYSTEM_PROMPT_LIARS_DICE = (
+        "You are playing Liar's Dice.\n"
+        "Respond with EXACTLY ONE action and NOTHING ELSE.\n"
+        "Valid outputs: [bid: quantity, face] or [call]\n"
+        "Examples: [bid: 3, 4] or [call]\n"
         "Do not add any whitespace, punctuation, explanation, or extra text.\n"
     )
     
@@ -148,9 +166,25 @@ class Config:
 # =========================
 # Action constants
 # =========================
-ACTION_STRS = ["[check]", "[bet]", "[call]", "[fold]"]
+ACTION_STRS_KUHN = ["[check]", "[bet]", "[call]", "[fold]"]
+
+CURRENT_GAME = "kuhn_poker"
+ACTION_STRS = ACTION_STRS_KUHN
+
+def get_system_prompt(game: str) -> str:
+    """Get the system prompt for a game."""
+    if game == "liars_dice":
+        return Config.SYSTEM_PROMPT_LIARS_DICE
+    return Config.SYSTEM_PROMPT_KUHN
 
 
+def get_max_gen_tokens(game: str) -> int:
+    """Get max generation tokens for a game."""
+    if game == "liars_dice":
+        return Config.MAX_GEN_TOKENS_LIARS_DICE
+    return Config.MAX_GEN_TOKENS
+
+    
 def autocast_ctx(device):
     """Return appropriate autocast context for the device."""
     if device == "cuda":

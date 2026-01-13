@@ -5,11 +5,14 @@
 ### 1. Start vLLM Server (Optional, for faster generation)
 
 ```bash
-export HF_HOME=/matx/u/$USER/.cache/huggingface
+
+
+export HF_HOME=/matx/u/$USER/.cache/huggingface #matx
+export HF_HOME=/home/ubuntu/.cache/huggingface #pi
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
 vllm serve Qwen/Qwen3-4B-Instruct-2507 \
   --host 0.0.0.0 \
-  --port 8000 \
+  --port 8010 \
   --dtype bfloat16 \
   --max-model-len 768 \
   --enable-lora \
@@ -25,7 +28,10 @@ export CUDA_VISIBLE_DEVICES=1,2,3
 export VLLM_BASE_URL="http://localhost:8000"
 export VLLM_MODEL="Qwen/Qwen3-4B-Instruct-2507"
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
-python train_ppo.py --root /matx/u/$USER --use_constrained_decoding True
+python train_ppo.py --root /matx/u/$USER --use_constrained_decoding True #matx
+
+python train_ppo.py --root /home/ubuntu/Alex --use_constrained_decoding True #pi
+python train_ppo.py --game liars_dice --root /home/ubuntu #pi liars dice
 
 # Without vLLM (local generation)
 python train_ppo.py --root /matx/u/$USER --use_constrained_decoding True

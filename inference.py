@@ -10,17 +10,18 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from transformers import StoppingCriteria, StoppingCriteriaList
 
-from config import ACTION_STRS, Config
-from kuhn_poker import extract_action
+from config import ACTION_STRS_KUHN, Config, get_system_prompt
+
 
 
 # =========================
 # Prompt building
 # =========================
-def messages_for_poker(player_id: int, observation: str) -> list:
-    """Build messages for Kuhn Poker game."""
+def messages_for_game(player_id: int, observation: str, game: str) -> list:
+    """Build messages for a game."""
+    system_prompt = get_system_prompt(game)
     return [
-        {"role": "system", "content": Config.SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": observation},
     ]
 
@@ -61,7 +62,7 @@ def build_prompt_text(tokenizer, msgs: list) -> str:
 def encode_action_candidates(tokenizer) -> List[List[int]]:
     """Encode action strings to token IDs."""
     cands = []
-    for s in ACTION_STRS:
+    for s in ACTION_STRS_KUHN:
         ids = tokenizer(s, add_special_tokens=False, return_tensors="pt")["input_ids"][0].tolist()
         cands.append(ids)
     return cands
@@ -131,12 +132,13 @@ def generate_completion(
     max_new_tokens: int,
     use_constrained_decoding: bool,
     device: str,
+    game: str = "kuhn_poker",
 ) -> str:
     """
     HF local generation. If use_constrained_decoding is True, constrained to output exactly one action string.
     Returns the action token string (e.g. "[bet]") when possible.
     """
-    msgs = messages_for_poker(player_id, observation)
+    msgs = messages_for_game(player_id, observation, game)
     input_ids = tokenizer.apply_chat_template(
         msgs, 
         add_generation_prompt=True, 
@@ -162,12 +164,13 @@ def generate_completion(
         "eos_token_id": tokenizer.eos_token_id,
     }
 
-    if use_constrained_decoding:
+    if use_constrained_decoding and game == "kuhn_poker":
         action_token_ids = encode_action_candidates(tokenizer)
         stopper = StopOnAnyAction(prompt_len=prompt_len, action_token_ids=action_token_ids)
         prefix_allowed = make_prefix_allowed_fn(tokenizer, prompt_len=prompt_len, action_token_ids=action_token_ids)
         generate_kwargs["stopping_criteria"] = StoppingCriteriaList([stopper])
         generate_kwargs["prefix_allowed_tokens_fn"] = prefix_allowed
+
 
     out_ids = model.generate(**generate_kwargs)
 
@@ -175,8 +178,7 @@ def generate_completion(
         model.train()
 
     txt = tokenizer.decode(out_ids[0][prompt_len:], skip_special_tokens=True)
-    act = extract_action(txt, ACTION_STRS)
-    return act if act is not None else txt
+    return txt
 
 
 # =========================
@@ -229,7 +231,7 @@ class HFLocalBackend(InferenceBackend):
     def generate(self, prompts: List[str], temperature: float, max_new_tokens: int) -> List[str]:
         raise RuntimeError("HFLocalBackend.generate should not be called with string prompts.")
 
-    def generate_one(self, player_id: int, observation: str, temperature: float, max_new_tokens: int) -> str:
+    def generate_one(self, player_id: int, observation: str, temperature: float, max_new_tokens: int, game: str = "kuhn_poker") -> str:
         return generate_completion(
             self.model, 
             self.tokenizer, 
@@ -239,6 +241,7 @@ class HFLocalBackend(InferenceBackend):
             max_new_tokens,
             self.use_constrained_decoding,
             self.device,
+            game=game,
         )
 
 
@@ -357,7 +360,7 @@ class VLLMServerBackend(InferenceBackend):
             )
             self._ok = False
 
-    def generate(self, prompts: List[str], temperature: float, max_new_tokens: int, mode: str = "poker") -> List[str]:
+    def generate(self, prompts: List[str], temperature: float, max_new_tokens: int, mode: str = "game", game: str = "kuhn_poker") -> List[str]:
         if not self._ok:
             raise RuntimeError("vLLM server backend is not available")
 
@@ -372,13 +375,17 @@ class VLLMServerBackend(InferenceBackend):
             "stream": False,
         }
         
-        if mode == "poker":
+        if mode == "game" and game == "kuhn_poker":
             payload["stop"] = ["[check]", "[bet]", "[call]", "[fold]"]
             payload["include_stop_str_in_output"] = True
             if self.use_constrained_decoding:
                 payload["extra_body"] = {
-                    "guided_choice": ACTION_STRS,
+                    "guided_choice": ACTION_STRS_KUHN,
                 }
+        elif mode == "game" and game == "liars_dice":
+            # For Liar's Dice, stop on ] to capture full action
+            payload["stop"] = ["]"]
+            payload["include_stop_str_in_output"] = True
 
         r = self._post_json("/completions", payload)
         if r.status_code != 200:

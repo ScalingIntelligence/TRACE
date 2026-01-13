@@ -11,10 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from kuhn_poker import KuhnPoker, extract_action
-from inference import InferenceBackend, HFLocalBackend, messages_for_poker, build_prompt_text, generate_completion
-
-
+from kuhn_poker import KuhnPoker, extract_action as extract_action_kuhn
+from liars_dice import LiarsDice, extract_action as extract_action_liars
+from inference import InferenceBackend, HFLocalBackend, messages_for_game, build_prompt_text, generate_completion
 # =========================
 # Logging helper
 # =========================
@@ -45,6 +44,18 @@ class EMA:
 
     def get(self) -> float:
         return self.value if self.initialized else 0.0
+
+def create_env(game: str, num_rounds: int, num_dice: int):
+    """Create game environment based on game type."""
+    if game == "liars_dice":
+        return LiarsDice(num_dice=num_dice)
+    return KuhnPoker(num_rounds=num_rounds)
+
+def do_extract_action(completion: str, legal_actions: List[str], game: str):
+    """Extract action based on game type."""
+    if game == "liars_dice":
+        return extract_action_liars(completion, legal_actions)
+    return extract_action_kuhn(completion, legal_actions)
 
 
 # =========================
@@ -142,8 +153,11 @@ def collect_games(
     logger: JSONLLogger,
     use_constrained_decoding: bool,
     device: str,
-    role_baseline_ema : dict = None,
+    role_baseline_ema: dict = None,
+    game: str = "kuhn_poker",
+    num_dice: int = 5,
 ) -> Tuple[List[StepSample], Dict[str, float]]:
+
     """Collect self-play game trajectories."""
     rng = random.Random(int(seed))
     samples: List[StepSample] = []
@@ -160,7 +174,7 @@ def collect_games(
 
         for g in range(num_games):
             game_id = seed * 1_000_000 + g
-            env = KuhnPoker(num_rounds=num_rounds)
+            env = create_env(game, num_rounds, num_dice)
             env.reset(rng.randint(0, 2**31 - 1))
             envs.append(env)
             game_ids.append(game_id)
@@ -179,18 +193,18 @@ def collect_games(
                 pid = env.current_player
                 obs = env.observe(pid)
                 legal = env.legal_actions()
-                msgs = messages_for_poker(pid, obs)
+                msgs = messages_for_game(pid, obs, game)
                 prompts.append(build_prompt_text(tokenizer, msgs))
                 meta.append((i, pid, obs, legal, msgs))
 
             t0 = time.time()
-            completions = backend.generate(prompts, temperature=temperature, max_new_tokens=max_new_tokens)
+            completions = backend.generate(prompts, temperature=temperature, max_new_tokens=max_new_tokens, game=game)
             t1 = time.time()
             per_item_dt = (t1 - t0) / max(1, len(active))
 
             for j, (i, pid, obs, legal, msgs) in enumerate(meta):
                 completion = completions[j]
-                act = extract_action(completion, legal)
+                act = do_extract_action(completion, legal, game)
                 if act is None:
                     act = rng.choice(legal)
 
@@ -218,6 +232,7 @@ def collect_games(
 
             logger.log({
                 "type": "game_end",
+                "game": game,
                 "game_id": game_ids[i],
                 "turns": turn_idxs[i],
                 "rewards": env.rewards,
@@ -243,7 +258,7 @@ def collect_games(
     else:
         for g in range(num_games):
             game_id = seed * 1_000_000 + g
-            env = KuhnPoker(num_rounds=num_rounds)
+            env = create_env(game, num_rounds, num_dice)
             env.reset(rng.randint(0, 2**31 - 1))
 
             episode_steps: List[Tuple[list, str, int, str]] = []
@@ -267,11 +282,11 @@ def collect_games(
                 )
                 t1 = time.time()
 
-                act = extract_action(completion, legal)
+                act = do_extract_action(completion, legal, game)
                 if act is None:
                     act = rng.choice(legal)
 
-                episode_steps.append((messages_for_poker(pid, obs), act, pid, completion))
+                episode_steps.append((messages_for_game(pid, obs, game), act, pid, completion))
                 env.step(act)
 
                 turn_idx += 1
