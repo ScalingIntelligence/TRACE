@@ -10,9 +10,10 @@
 export HF_HOME=/matx/u/$USER/.cache/huggingface #matx
 export HF_HOME=/home/ubuntu/.cache/huggingface #pi
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+export VLLM_RPC_TIMEOUT=1200
 vllm serve Qwen/Qwen3-4B-Instruct-2507 \
   --host 0.0.0.0 \
-  --port 8010 \
+  --port 8011 \
   --dtype bfloat16 \
   --max-model-len 768 \
   --enable-lora \

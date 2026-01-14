@@ -112,13 +112,13 @@ class Config:
     # Game settings
     NUM_ROUNDS = 5
     NUM_DICE = 5
-    GAMES_PER_ITER = 256
+    GAMES_PER_ITER = 64
     
     # PPO hyperparameters
-    PPO_EPOCHS = 2
+    PPO_EPOCHS = 1
     MINI_BATCH_SIZE = 32
     STATS_CHUNK_SIZE = 2
-    LR = 1e-6
+    LR = 1e-7
     CLIP_EPS = 0.2
     VF_COEF = 0.5
     
@@ -133,7 +133,7 @@ class Config:
     EVAL_EVERY_ITERS = 5
     EVAL_GAMES = 25
     MATH_EVAL_SAMPLES = 50
-    MATH_EVAL_EVERY_ITERS = 5
+    MATH_EVAL_EVERY_ITERS = 10000
 
     USE_ROLE_BASELINE = True
     ROLE_BASELINE_EMA_GAMMA = 0.95

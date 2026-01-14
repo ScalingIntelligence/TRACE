@@ -34,7 +34,7 @@ from ppo import (
     logprob_action_tokens,
     values_from_hidden,
 )
-from evaluation import evaluate_vs_random, evaluate_vs_base, evaluate_math
+from evaluation import evaluate_vs_base, evaluate_math
 
 # Optional tracking libs
 try:
@@ -159,6 +159,52 @@ def main():
         inference_backend.sync_policy(ac.lm, vllm_adapter_dir)
         if not inference_backend.is_enabled():
             inference_backend = HFLocalBackend(ac.lm, tokenizer, use_constrained_decoding, device)
+
+                # Periodic eval (deterministic)
+        if it % Config.EVAL_EVERY_ITERS == 0:
+            ac.eval()
+
+            inference_backend.sync_policy(ac.lm, vllm_adapter_dir)
+            if not inference_backend.is_enabled():
+                inference_backend = HFLocalBackend(ac.lm, tokenizer, use_constrained_decoding, device)
+
+            
+            print(f"[eval {it}] Starting eval vs base model ({Config.EVAL_GAMES} games)")
+            t_eval_base0 = time.time()
+            eval_logs_base = evaluate_vs_base(
+                current_model=ac.lm,
+                base_model_adapter_dir=base_model_adapter_dir,
+                tokenizer=tokenizer,
+                backend=inference_backend,
+                num_games=Config.EVAL_GAMES,
+                num_rounds=Config.NUM_ROUNDS,
+                temperature=0.0,  # deterministic
+                max_new_tokens=max_gen_tokens,
+                seed=20_000 + it,
+                hf_hub=hf_hub,
+                use_constrained_decoding=use_constrained_decoding,
+                device=device,
+                game=game,
+                num_dice=num_dice,
+            )
+            t_eval_base1 = time.time()
+            win_rate_base = eval_logs_base.get("eval/win_rate_vs_base", 0.0)
+            print(f"[eval {it}] vs base: win_rate={win_rate_base:.3f} ({t_eval_base1-t_eval_base0:.1f}s)")
+
+            all_eval_logs = {
+                **eval_logs_base,
+                "eval/time_vs_base_sec": t_eval_base1 - t_eval_base0,
+                "eval/improvement_vs_base": win_rate_base - 0.5,
+            }
+
+            print(f"[eval {it}] Summary: vs_base={win_rate_base:.3f}")
+            if win_rate_base > 0.5:
+                print(f"[eval {it}] ✓ Model is better than base model!")
+
+
+            if wandb:
+                wandb.log(all_eval_logs, step=global_step)
+
 
         # Collect rollouts
         batch, env_metrics = collect_games(
@@ -317,74 +363,6 @@ def main():
 
         if wandb:
             wandb.log(logs, step=global_step)
-
-        # Periodic eval (deterministic)
-        if it % Config.EVAL_EVERY_ITERS == 0:
-            ac.eval()
-
-            inference_backend.sync_policy(ac.lm, vllm_adapter_dir)
-            if not inference_backend.is_enabled():
-                inference_backend = HFLocalBackend(ac.lm, tokenizer, use_constrained_decoding, device)
-
-            print(f"[eval {it}] Starting eval vs random ({Config.EVAL_GAMES} games)")
-            t_eval_random0 = time.time()
-            eval_logs_random = evaluate_vs_random(
-                current_model=ac.lm,
-                tokenizer=tokenizer,
-                backend=inference_backend,
-                num_games=Config.EVAL_GAMES,
-                num_rounds=Config.NUM_ROUNDS,
-                temperature=0.0,  # deterministic
-                max_new_tokens=max_gen_tokens,
-                seed=10_000 + it,
-                use_constrained_decoding=use_constrained_decoding,
-                device=device,
-                game = game,
-                num_dice=num_dice,
-            )
-            t_eval_random1 = time.time()
-            win_rate_random = eval_logs_random.get("eval/win_rate_vs_random", 0.0)
-            print(f"[eval {it}] vs random: win_rate={win_rate_random:.3f} ({t_eval_random1-t_eval_random0:.1f}s)")
-
-            print(f"[eval {it}] Starting eval vs base model ({Config.EVAL_GAMES} games)")
-            t_eval_base0 = time.time()
-            eval_logs_base = evaluate_vs_base(
-                current_model=ac.lm,
-                base_model_adapter_dir=base_model_adapter_dir,
-                tokenizer=tokenizer,
-                backend=inference_backend,
-                num_games=Config.EVAL_GAMES,
-                num_rounds=Config.NUM_ROUNDS,
-                temperature=0.0,  # deterministic
-                max_new_tokens=max_gen_tokens,
-                seed=20_000 + it,
-                hf_hub=hf_hub,
-                use_constrained_decoding=use_constrained_decoding,
-                device=device,
-                game=game,
-                num_dice=num_dice,
-            )
-            t_eval_base1 = time.time()
-            win_rate_base = eval_logs_base.get("eval/win_rate_vs_base", 0.0)
-            print(f"[eval {it}] vs base: win_rate={win_rate_base:.3f} ({t_eval_base1-t_eval_base0:.1f}s)")
-
-            all_eval_logs = {
-                **eval_logs_random,
-                **eval_logs_base,
-                "eval/time_vs_random_sec": t_eval_random1 - t_eval_random0,
-                "eval/time_vs_base_sec": t_eval_base1 - t_eval_base0,
-                "eval/improvement_vs_base": win_rate_base - 0.5,
-                "eval/improvement_vs_random": win_rate_random - 0.5,
-            }
-
-            print(f"[eval {it}] Summary: vs_random={win_rate_random:.3f}, vs_base={win_rate_base:.3f}")
-            if win_rate_base > 0.5:
-                print(f"[eval {it}] ✓ Model is better than base model!")
-            if win_rate_random > 0.5:
-                print(f"[eval {it}] ✓ Model is better than random!")
-
-            if wandb:
-                wandb.log(all_eval_logs, step=global_step)
 
         # Math evaluation
         if it % Config.MATH_EVAL_EVERY_ITERS == 0 and it > 0:
