@@ -9,10 +9,9 @@ import torch
 import torch.nn.functional as F
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from kuhn_poker import KuhnPoker, extract_action as extract_action_kuhn
-from liars_dice import LiarsDice, extract_action as extract_action_liars
+from game_registry import GameSpec
 from inference import InferenceBackend, HFLocalBackend, messages_for_game, build_prompt_text, generate_completion
 # =========================
 # Logging helper
@@ -44,18 +43,6 @@ class EMA:
 
     def get(self) -> float:
         return self.value if self.initialized else 0.0
-
-def create_env(game: str, num_rounds: int, num_dice: int):
-    """Create game environment based on game type."""
-    if game == "liars_dice":
-        return LiarsDice(num_dice=num_dice)
-    return KuhnPoker(num_rounds=num_rounds)
-
-def do_extract_action(completion: str, legal_actions: List[str], game: str):
-    """Extract action based on game type."""
-    if game == "liars_dice":
-        return extract_action_liars(completion, legal_actions)
-    return extract_action_kuhn(completion, legal_actions)
 
 
 # =========================
@@ -142,39 +129,39 @@ def values_from_hidden(last_hidden: torch.Tensor, value_head, prompt_lens: List[
 # Self-play collector
 # =========================
 def collect_games(
+    *,
     model,
     tokenizer,
     backend: InferenceBackend,
     num_games: int,
-    num_rounds: int,
     temperature: float,
     max_new_tokens: int,
     seed: int,
     logger: JSONLLogger,
     use_constrained_decoding: bool,
     device: str,
+    game_spec: GameSpec,
+    env_kwargs: Optional[Dict[str, Any]] = None,
     role_baseline_ema: dict = None,
-    game: str = "kuhn_poker",
-    num_dice: int = 5,
 ) -> Tuple[List[StepSample], Dict[str, float]]:
-
     """Collect self-play game trajectories."""
     rng = random.Random(int(seed))
     samples: List[StepSample] = []
+    env_kwargs = env_kwargs or {}
 
     invalid_games = 0
     total_turns = 0
     p0_wins = 0
 
     if backend.supports_batch():
-        envs: List[KuhnPoker] = []
+        envs = []
         game_ids: List[int] = []
         episode_steps: List[List[Tuple[list, str, int, str]]] = []
         turn_idxs = [0 for _ in range(num_games)]
 
         for g in range(num_games):
             game_id = seed * 1_000_000 + g
-            env = create_env(game, num_rounds, num_dice)
+            env = game_spec.make_env(**env_kwargs)
             env.reset(rng.randint(0, 2**31 - 1))
             envs.append(env)
             game_ids.append(game_id)
@@ -193,18 +180,24 @@ def collect_games(
                 pid = env.current_player
                 obs = env.observe(pid)
                 legal = env.legal_actions()
-                msgs = messages_for_game(pid, obs, game)
+                msgs = messages_for_game(pid, obs, game_spec)
                 prompts.append(build_prompt_text(tokenizer, msgs))
                 meta.append((i, pid, obs, legal, msgs))
 
             t0 = time.time()
-            completions = backend.generate(prompts, temperature=temperature, max_new_tokens=max_new_tokens, game=game)
+            completions = backend.generate(
+                prompts,
+                temperature=temperature,
+                max_new_tokens=max_new_tokens,
+                game_spec=game_spec,
+                use_guided_choice=use_constrained_decoding,
+            )
             t1 = time.time()
             per_item_dt = (t1 - t0) / max(1, len(active))
 
             for j, (i, pid, obs, legal, msgs) in enumerate(meta):
                 completion = completions[j]
-                act = do_extract_action(completion, legal, game)
+                act = game_spec.extract_action(completion, legal)
                 if act is None:
                     act = rng.choice(legal)
 
@@ -232,7 +225,7 @@ def collect_games(
 
             logger.log({
                 "type": "game_end",
-                "game": game,
+                "game": game_spec.name,
                 "game_id": game_ids[i],
                 "turns": turn_idxs[i],
                 "rewards": env.rewards,
@@ -258,7 +251,7 @@ def collect_games(
     else:
         for g in range(num_games):
             game_id = seed * 1_000_000 + g
-            env = create_env(game, num_rounds, num_dice)
+            env = game_spec.make_env(**env_kwargs)
             env.reset(rng.randint(0, 2**31 - 1))
 
             episode_steps: List[Tuple[list, str, int, str]] = []
@@ -279,14 +272,15 @@ def collect_games(
                     max_new_tokens=max_new_tokens,
                     use_constrained_decoding=use_constrained_decoding,
                     device=device,
+                    game_spec=game_spec,
                 )
                 t1 = time.time()
 
-                act = do_extract_action(completion, legal, game)
+                act = game_spec.extract_action(completion, legal)
                 if act is None:
                     act = rng.choice(legal)
 
-                episode_steps.append((messages_for_game(pid, obs, game), act, pid, completion))
+                episode_steps.append((messages_for_game(pid, obs, game_spec), act, pid, completion))
                 env.step(act)
 
                 turn_idx += 1
@@ -341,4 +335,3 @@ def collect_games(
         "env/win_rate_p0": p0_wins / max(1, num_games),
     }
     return samples, metrics
-

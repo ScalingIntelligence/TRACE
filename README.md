@@ -33,6 +33,7 @@ python train_ppo.py --root /matx/u/$USER --use_constrained_decoding True #matx
 
 python train_ppo.py --root /home/ubuntu/Alex --use_constrained_decoding True #pi
 python train_ppo.py --game liars_dice --root /home/ubuntu #pi liars dice
+python train_ppo.py --game openspiel_tictactoe --use_constrained_decoding True --root /home/ubuntu #pi OpenSpiel example
 
 # Without vLLM (local generation)
 python train_ppo.py --root /matx/u/$USER --use_constrained_decoding True
@@ -40,3 +41,7 @@ python train_ppo.py --root /matx/u/$USER --use_constrained_decoding True
 
 All model weights and outputs will be saved to `/matx/u/$USER/` (3T drive).
 
+## Add a new OpenSpiel game (simple)
+1) Open `openspiel_wrapper.py` and add a new `OpenSpielGameConfig` entry to `OPENSPIEL_GAME_CONFIGS` with your alias, the `openspiel_name` passed to `pyspiel.load_game`, and a short system prompt.  
+2) (Optional) Provide a stable `action_map` or `allowed_action_ids` if the default `[action_N]` mapping is not what you want.  
+3) Run training with `python train_ppo.py --game <your_alias> --use_constrained_decoding True --root /home/ubuntu` (adjust root/path as needed).

@@ -30,8 +30,7 @@ def parse_args():
         "--game",
         type=str,
         default="kuhn_poker",
-        choices=["kuhn_poker", "liars_dice"],
-        help="Game to train on: kuhn_poker or liars_dice"
+        help="Game to train on (e.g., kuhn_poker, liars_dice, or an OpenSpiel-backed game registered in openspiel_wrapper.py)",
     )
     return parser.parse_args()
 
@@ -190,4 +189,3 @@ def autocast_ctx(device):
     if device == "cuda":
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     return torch.no_grad()
-

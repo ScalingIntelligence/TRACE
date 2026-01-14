@@ -6,29 +6,15 @@ import gc
 import random
 import torch
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from tqdm import tqdm
 from unsloth import FastLanguageModel
 from datasets import load_from_disk
 
 
-from kuhn_poker import KuhnPoker, extract_action as extract_action_kuhn
-from liars_dice import LiarsDice, extract_action as extract_action_liars
+from game_registry import GameSpec
 from inference import InferenceBackend, messages_for_game, messages_for_math, build_prompt_text, generate_completion
 from config import Config
-
-
-def create_env(game: str, num_rounds: int, num_dice: int):
-    """Create game environment based on game type."""
-    if game == "liars_dice":
-        return LiarsDice(num_dice=num_dice)
-    return KuhnPoker(num_rounds=num_rounds)
-
-def do_extract_action(completion: str, legal_actions, game: str):
-    """Extract action based on game type."""
-    if game == "liars_dice":
-        return extract_action_liars(completion, legal_actions)
-    return extract_action_kuhn(completion, legal_actions)
 
 
 # =========================
@@ -191,15 +177,14 @@ def evaluate_vs_base(
     tokenizer,
     backend: InferenceBackend,
     num_games: int,
-    num_rounds: int,
     temperature: float,
     max_new_tokens: int,
     seed: int,
     hf_hub: Path,
     use_constrained_decoding: bool,
     device: str,
-    game: str = "kuhn_poker",
-    num_dice: int = 5,
+    game_spec: GameSpec,
+    env_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, float]:
     """
     Evaluate current trained model against the base (untrained) model.
@@ -231,8 +216,9 @@ def evaluate_vs_base(
     half = max(1, num_games // 2)
     envs = []
     current_is_p0: List[bool] = []
+    env_kwargs = env_kwargs or {}
     for i in range(num_games):
-        env = create_env(game, num_rounds, num_dice)
+        env = game_spec.make_env(**env_kwargs)
         env.reset(rng.randint(0, 2**31 - 1))
         envs.append(env)
         current_is_p0.append(i < half)
@@ -255,13 +241,19 @@ def evaluate_vs_base(
                 continue
             obs = env.observe(pid)
             legal = env.legal_actions()
-            msgs = messages_for_game(pid, obs, game)
+            msgs = messages_for_game(pid, obs, game_spec)
             current_prompts.append(build_prompt_text(tokenizer, msgs))
             current_meta.append((i, pid, legal, obs))
 
         if current_prompts:
             if backend.supports_batch():
-                completions = backend.generate(current_prompts, temperature=temperature, max_new_tokens=max_new_tokens, game=game)
+                completions = backend.generate(
+                    current_prompts,
+                    temperature=temperature,
+                    max_new_tokens=max_new_tokens,
+                    game_spec=game_spec,
+                    use_guided_choice=use_constrained_decoding,
+                )
             else:
                 completions = [
                     generate_completion(
@@ -273,13 +265,13 @@ def evaluate_vs_base(
                         max_new_tokens=max_new_tokens,
                         use_constrained_decoding=use_constrained_decoding,
                         device=device,
-                        game=game,
+                        game_spec=game_spec,
                     )
                     for (_, pid, _legal, obs) in current_meta
                 ]
             for j, (i, pid, legal, _obs) in enumerate(current_meta):
                 completion = completions[j]
-                act = do_extract_action(completion, legal, game)
+                act = game_spec.extract_action(completion, legal)
                 if act is None:
                     act = rng.choice(legal)
                 envs[i].step(act)
@@ -309,13 +301,13 @@ def evaluate_vs_base(
                     max_new_tokens=max_new_tokens,
                     use_constrained_decoding=use_constrained_decoding,
                     device=device,
-                    game=game,
+                    game_spec=game_spec,
                 )
                 for (_, pid, _legal, obs) in base_meta
             ]
             for j, (i, pid, legal, _obs) in enumerate(base_meta):
                 completion = completions[j]
-                act = do_extract_action(completion, legal, game)
+                act = game_spec.extract_action(completion, legal)
                 if act is None:
                     act = rng.choice(legal)
                 envs[i].step(act)
@@ -341,4 +333,3 @@ def evaluate_vs_base(
         "eval/invalid_game_rate_vs_base": invalids / max(1, num_games),
         "eval/turns_per_game_mean_vs_base": total_turns / max(1, num_games),
     }
-

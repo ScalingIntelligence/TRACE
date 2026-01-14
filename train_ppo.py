@@ -22,7 +22,8 @@ from pathlib import Path
 from tqdm import tqdm
 
 # Import our refactored modules
-from config import parse_args, setup_environment, Config, get_max_gen_tokens
+from config import parse_args, setup_environment, Config
+from game_registry import get_game_spec, list_game_names
 from model import PolicyWithValueHead
 from inference import init_inference_backend, HFLocalBackend
 from ppo import (
@@ -57,7 +58,18 @@ def main():
     use_constrained_decoding = bool(args.use_constrained_decoding)
     game = args.game
     num_dice = Config.NUM_DICE
-    max_gen_tokens = get_max_gen_tokens(game)
+    try:
+        game_spec = get_game_spec(game)
+    except KeyError as e:
+        available = ", ".join(list_game_names())
+        raise RuntimeError(f"{e}. Available games: {available}") from e
+
+    max_gen_tokens = game_spec.max_gen_tokens
+    env_kwargs = {}
+    if game_spec.name == "kuhn_poker":
+        env_kwargs["num_rounds"] = Config.NUM_ROUNDS
+    elif game_spec.name == "liars_dice":
+        env_kwargs["num_dice"] = num_dice
     
     # Setup environment
     env_config = setup_environment(args)
@@ -69,8 +81,12 @@ def main():
     print(f"[Setup] Device: {device}")
     print(f"[Setup] Output directory: {output_dir_path}")
     print(f"[Setup] Use constrained decoding: {use_constrained_decoding}")
-    print(f"[Setup] Game: {game}")
+    print(f"[Setup] Game: {game_spec.name}")
     print(f"[Setup] Max generation tokens: {max_gen_tokens}")
+    if game_spec.action_space:
+        print(f"[Setup] Action space size: {len(game_spec.action_space)}")
+    if env_kwargs:
+        print(f"[Setup] Env kwargs: {env_kwargs}")
     
     # =========================
     # Load model + LoRA
@@ -177,15 +193,14 @@ def main():
                 tokenizer=tokenizer,
                 backend=inference_backend,
                 num_games=Config.EVAL_GAMES,
-                num_rounds=Config.NUM_ROUNDS,
                 temperature=0.0,  # deterministic
                 max_new_tokens=max_gen_tokens,
                 seed=20_000 + it,
                 hf_hub=hf_hub,
                 use_constrained_decoding=use_constrained_decoding,
                 device=device,
-                game=game,
-                num_dice=num_dice,
+                game_spec=game_spec,
+                env_kwargs=env_kwargs,
             )
             t_eval_base1 = time.time()
             win_rate_base = eval_logs_base.get("eval/win_rate_vs_base", 0.0)
@@ -212,7 +227,6 @@ def main():
             tokenizer=tokenizer,
             backend=inference_backend,
             num_games=Config.GAMES_PER_ITER,
-            num_rounds=Config.NUM_ROUNDS,
             temperature=Config.TEMPERATURE,
             max_new_tokens=max_gen_tokens,
             seed=it,
@@ -220,8 +234,8 @@ def main():
             use_constrained_decoding=use_constrained_decoding,
             device=device,
             role_baseline_ema = role_baseline_ema,
-            game=game,
-            num_dice=num_dice,
+            game_spec=game_spec,
+            env_kwargs=env_kwargs,
         )
         t_collect1 = time.time()
 

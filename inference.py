@@ -10,16 +10,17 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from transformers import StoppingCriteria, StoppingCriteriaList
 
-from config import ACTION_STRS_KUHN, Config, get_system_prompt
+from config import Config
+from game_registry import GameSpec
 
 
 
 # =========================
 # Prompt building
 # =========================
-def messages_for_game(player_id: int, observation: str, game: str) -> list:
+def messages_for_game(player_id: int, observation: str, game_spec: GameSpec) -> list:
     """Build messages for a game."""
-    system_prompt = get_system_prompt(game)
+    system_prompt = game_spec.system_prompt or "You are playing a 2-player game. Respond with exactly one action."
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": observation},
@@ -59,10 +60,10 @@ def build_prompt_text(tokenizer, msgs: list) -> str:
 # =========================
 # Constrained decoding helpers
 # =========================
-def encode_action_candidates(tokenizer) -> List[List[int]]:
+def encode_action_candidates(tokenizer, action_space: List[str]) -> List[List[int]]:
     """Encode action strings to token IDs."""
     cands = []
-    for s in ACTION_STRS_KUHN:
+    for s in action_space:
         ids = tokenizer(s, add_special_tokens=False, return_tensors="pt")["input_ids"][0].tolist()
         cands.append(ids)
     return cands
@@ -132,13 +133,21 @@ def generate_completion(
     max_new_tokens: int,
     use_constrained_decoding: bool,
     device: str,
-    game: str = "kuhn_poker",
+    game_spec: Optional[GameSpec] = None,
 ) -> str:
     """
     HF local generation. If use_constrained_decoding is True, constrained to output exactly one action string.
     Returns the action token string (e.g. "[bet]") when possible.
     """
-    msgs = messages_for_game(player_id, observation, game)
+    game_spec = game_spec or GameSpec(
+        name="default",
+        make_env=lambda: None,  # type: ignore
+        extract_action=lambda _t, _l: None,
+        action_space=[],
+        system_prompt="You are playing a 2-player game. Respond with one action.",
+        max_gen_tokens=max_new_tokens,
+    )
+    msgs = messages_for_game(player_id, observation, game_spec)
     input_ids = tokenizer.apply_chat_template(
         msgs, 
         add_generation_prompt=True, 
@@ -164,8 +173,9 @@ def generate_completion(
         "eos_token_id": tokenizer.eos_token_id,
     }
 
-    if use_constrained_decoding and game == "kuhn_poker":
-        action_token_ids = encode_action_candidates(tokenizer)
+    should_constrain = bool(use_constrained_decoding and game_spec.action_space)
+    if should_constrain:
+        action_token_ids = encode_action_candidates(tokenizer, game_spec.action_space)
         stopper = StopOnAnyAction(prompt_len=prompt_len, action_token_ids=action_token_ids)
         prefix_allowed = make_prefix_allowed_fn(tokenizer, prompt_len=prompt_len, action_token_ids=action_token_ids)
         generate_kwargs["stopping_criteria"] = StoppingCriteriaList([stopper])
@@ -207,7 +217,15 @@ class InferenceBackend:
     def sync_policy(self, policy_model: nn.Module, adapter_dir: Path) -> None:
         return None
 
-    def generate(self, prompts: List[str], temperature: float, max_new_tokens: int) -> List[str]:
+    def generate(
+        self,
+        prompts: List[str],
+        temperature: float,
+        max_new_tokens: int,
+        game_spec: Optional[GameSpec] = None,
+        use_guided_choice: bool = False,
+        mode: str = "game",
+    ) -> List[str]:
         raise NotImplementedError
 
 
@@ -228,10 +246,25 @@ class HFLocalBackend(InferenceBackend):
         # HF constrained decoding is easiest per-sample (fine for your current small GAMES_PER_ITER)
         return False
 
-    def generate(self, prompts: List[str], temperature: float, max_new_tokens: int) -> List[str]:
+    def generate(
+        self,
+        prompts: List[str],
+        temperature: float,
+        max_new_tokens: int,
+        game_spec: Optional[GameSpec] = None,
+        use_guided_choice: bool = False,
+        mode: str = "game",
+    ) -> List[str]:
         raise RuntimeError("HFLocalBackend.generate should not be called with string prompts.")
 
-    def generate_one(self, player_id: int, observation: str, temperature: float, max_new_tokens: int, game: str = "kuhn_poker") -> str:
+    def generate_one(
+        self,
+        player_id: int,
+        observation: str,
+        temperature: float,
+        max_new_tokens: int,
+        game_spec: Optional[GameSpec] = None,
+    ) -> str:
         return generate_completion(
             self.model, 
             self.tokenizer, 
@@ -241,7 +274,7 @@ class HFLocalBackend(InferenceBackend):
             max_new_tokens,
             self.use_constrained_decoding,
             self.device,
-            game=game,
+            game_spec=game_spec,
         )
 
 
@@ -360,7 +393,15 @@ class VLLMServerBackend(InferenceBackend):
             )
             self._ok = False
 
-    def generate(self, prompts: List[str], temperature: float, max_new_tokens: int, mode: str = "game", game: str = "kuhn_poker") -> List[str]:
+    def generate(
+        self,
+        prompts: List[str],
+        temperature: float,
+        max_new_tokens: int,
+        game_spec: Optional[GameSpec] = None,
+        use_guided_choice: bool = False,
+        mode: str = "game",
+    ) -> List[str]:
         if not self._ok:
             raise RuntimeError("vLLM server backend is not available")
 
@@ -375,17 +416,18 @@ class VLLMServerBackend(InferenceBackend):
             "stream": False,
         }
         
-        if mode == "game" and game == "kuhn_poker":
-            payload["stop"] = ["[check]", "[bet]", "[call]", "[fold]"]
-            payload["include_stop_str_in_output"] = True
-            if self.use_constrained_decoding:
-                payload["extra_body"] = {
-                    "guided_choice": ACTION_STRS_KUHN,
-                }
-        elif mode == "game" and game == "liars_dice":
-            # For Liar's Dice, stop on ] to capture full action
-            payload["stop"] = ["]"]
-            payload["include_stop_str_in_output"] = True
+        if mode == "game" and game_spec is not None:
+            stop = game_spec.stop_sequences if game_spec.stop_sequences else None
+            guided_choice = None
+            if game_spec.action_space and (use_guided_choice or self.use_constrained_decoding):
+                guided_choice = game_spec.action_space
+
+            if stop:
+                payload["stop"] = stop
+                payload["include_stop_str_in_output"] = True
+            if guided_choice:
+                payload.setdefault("extra_body", {})
+                payload["extra_body"]["guided_choice"] = guided_choice
 
         r = self._post_json("/completions", payload)
         if r.status_code != 200:
@@ -430,4 +472,3 @@ def init_inference_backend(model, tokenizer, use_constrained_decoding: bool, dev
             norm_url = normalize_vllm_openai_base_url(vllm_base_url)
             print(f"[vLLM] Server at {norm_url} not reachable; falling back to local HF generation.")
     return HFLocalBackend(model, tokenizer, use_constrained_decoding, device)
-
