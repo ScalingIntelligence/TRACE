@@ -1,1 +1,1 @@
-python compare_models.py --model-a Qwen/Qwen3-4B-Instruct-2507 --model-b Qwen/Qwen3-30B-A3B-Instruct-2507 --envs all --inference-backend vllm --vllm-address-1 http://0.0.0.0:8040 --vllm-address-2 http://0.0.0.0:8050 --trials 200 --max-workers 200
+python compare_models.py --model-a Qwen/Qwen3-4B-Instruct-2507 --model-b Qwen/Qwen3-4B-Instruct-2507  --inference-backend vllm --vllm-address-1 http://0.0.0.0:8040 --vllm-address-2 http://0.0.0.0:8050 --trials 200 --max-workers 200 --envs all

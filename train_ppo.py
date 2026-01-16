@@ -127,6 +127,9 @@ def main():
     # Initialize inference backend
     inference_backend = init_inference_backend(ac.lm, tokenizer, use_constrained_decoding, device)
     vllm_adapter_dir = output_dir_path / "vllm_adapter_latest"
+    if hasattr(inference_backend, "sync_base_adapter"):
+        inference_backend.sync_base_adapter(base_model_adapter_dir)
+
     
 
     # =========================
@@ -177,7 +180,7 @@ def main():
             inference_backend = HFLocalBackend(ac.lm, tokenizer, use_constrained_decoding, device)
 
                 # Periodic eval (deterministic)
-        if it % Config.EVAL_EVERY_ITERS == 0:
+        if it % Config.EVAL_EVERY_ITERS == 0 and it > 0:
             ac.eval()
 
             inference_backend.sync_policy(ac.lm, vllm_adapter_dir)
@@ -370,7 +373,7 @@ def main():
         print(
             f"[iter {it}] step={global_step} "
             f"avg_return={avg_return:.3f} win_p0={env_metrics['env/win_rate_p0']:.3f} "
-            f"invalid={env_metrics['env/invalid_game_rate']:.3f} "
+            f"invalid={env_metrics['env/invalid_move_rate']:.3f} "
             f"KL={logs['ppo/approx_kl']:.4f} clip={logs['ppo/clip_frac']:.3f} "
             f"collect={logs['time/collect_sec']:.1f}s train={logs['time/train_sec']:.1f}s"
         )

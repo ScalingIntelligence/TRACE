@@ -3,6 +3,7 @@
 Evaluation functions for poker agents and math benchmarks.
 """
 import gc
+import time
 import random
 import torch
 from pathlib import Path
@@ -192,26 +193,37 @@ def evaluate_vs_base(
     """
     rng = random.Random(int(seed))
 
-    base_model, _ = FastLanguageModel.from_pretrained(
-        model_name=Config.MODEL_NAME,
-        max_seq_length=Config.MAX_SEQ_LENGTH,
-        dtype=None,
-        load_in_4bit=True,
-        offload_embedding=True,
-        cache_dir=str(hf_hub),
+    use_vllm_for_base = (
+        backend.is_enabled() and backend.supports_batch()
+        and hasattr(backend, "has_base_adapter")
+        and backend.has_base_adapter()
     )
-    base_model = FastLanguageModel.get_peft_model(
-        base_model,
-        r=Config.LORA_RANK,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        lora_alpha=Config.LORA_ALPHA,
-        use_gradient_checkpointing="unsloth",
-        random_state=3407,
-    )
-    base_model.load_adapter(str(base_model_adapter_dir), adapter_name="base")
-    base_model.set_adapter("base")
-    base_model = base_model.to(device)
-    base_model.eval()
+    if not use_vllm_for_base:
+        print("Loading base model via HF", time.time())
+        base_model, _ = FastLanguageModel.from_pretrained(
+            model_name=Config.MODEL_NAME,
+            max_seq_length=Config.MAX_SEQ_LENGTH,
+            dtype=None,
+            load_in_4bit=True,
+            offload_embedding=False,
+            cache_dir=str(hf_hub),
+        )
+        base_model = FastLanguageModel.get_peft_model(
+            base_model,
+            r=Config.LORA_RANK,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            lora_alpha=Config.LORA_ALPHA,
+            use_gradient_checkpointing="unsloth",
+            random_state=3407,
+        )
+        base_model.load_adapter(str(base_model_adapter_dir), adapter_name="base")
+        base_model.set_adapter("base")
+        base_model = base_model.to(device)
+        base_model.eval()
+    else:
+        base_model = None
+        print("[eval] Using vLLM for base model", time.time())
+    
 
     half = max(1, num_games // 2)
     envs = []
@@ -224,11 +236,13 @@ def evaluate_vs_base(
         current_is_p0.append(i < half)
 
     turn_counts = [0 for _ in range(num_games)]
-
+    current_extraction_failures = 0
+    current_total_moves = 0
     while True:
         active = [i for i, e in enumerate(envs) if not e.done]
         if not active:
             break
+
 
         current_prompts: List[str] = []
         current_meta: List[Tuple[int, int, List[str], str]] = []
@@ -244,7 +258,8 @@ def evaluate_vs_base(
             msgs = messages_for_game(pid, obs, game_spec)
             current_prompts.append(build_prompt_text(tokenizer, msgs))
             current_meta.append((i, pid, legal, obs))
-
+            if len(current_prompts) >= Config.EVAL_BATCH_SIZE:
+                break
         if current_prompts:
             if backend.supports_batch():
                 completions = backend.generate(
@@ -272,7 +287,9 @@ def evaluate_vs_base(
             for j, (i, pid, legal, _obs) in enumerate(current_meta):
                 completion = completions[j]
                 act = game_spec.extract_action(completion, legal)
+                current_total_moves += 1
                 if act is None:
+                    current_extraction_failures += 1
                     act = rng.choice(legal)
                 envs[i].step(act)
                 turn_counts[i] += 1
@@ -291,20 +308,33 @@ def evaluate_vs_base(
             base_meta.append((i, pid, legal, obs))
 
         if base_meta:
-            completions = [
-                generate_completion(
-                    base_model, 
-                    tokenizer, 
-                    pid, 
-                    obs, 
-                    temperature=temperature, 
+            if use_vllm_for_base:
+                base_prompts = [
+                     build_prompt_text(tokenizer, messages_for_game(pid, obs, game_spec))
+                    for (_, pid, _, obs) in base_meta
+                ]
+                completions = backend.generate(
+                    base_prompts,
+                    temperature=temperature,
                     max_new_tokens=max_new_tokens,
-                    use_constrained_decoding=use_constrained_decoding,
-                    device=device,
                     game_spec=game_spec,
+                    adapter_name=backend.base_lora_name,
                 )
-                for (_, pid, _legal, obs) in base_meta
-            ]
+            else:
+                completions = [
+                    generate_completion(
+                        base_model, 
+                        tokenizer, 
+                        pid, 
+                        obs, 
+                        temperature=temperature, 
+                        max_new_tokens=max_new_tokens,
+                        use_constrained_decoding=use_constrained_decoding,
+                        device=device,
+                        game_spec=game_spec,
+                    )
+                    for (_, pid, _legal, obs) in base_meta
+                ]
             for j, (i, pid, legal, _obs) in enumerate(base_meta):
                 completion = completions[j]
                 act = game_spec.extract_action(completion, legal)
@@ -321,7 +351,8 @@ def evaluate_vs_base(
         current_won = (env.rewards[0] > 0) if current_is_p0[i] else (env.rewards[1] > 0)
         wins_current += 1 if current_won else 0
 
-    del base_model
+    if base_model is not None:
+        del base_model
     if device == "cuda":
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
@@ -330,6 +361,6 @@ def evaluate_vs_base(
 
     return {
         "eval/win_rate_vs_base": wins_current / max(1, num_games),
-        "eval/invalid_game_rate_vs_base": invalids / max(1, num_games),
+        "eval/invalid_game_rate_vs_base":current_extraction_failures / max(1, current_total_moves),  # ADD THIS
         "eval/turns_per_game_mean_vs_base": total_turns / max(1, num_games),
     }

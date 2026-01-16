@@ -12,12 +12,14 @@ Each config maps an OpenSpiel game name (pyspiel.load_game) to:
 - a simple text observation built from the OpenSpiel state.
 """
 
+from pickletools import int4
 import random
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from game_registry import GameEnv, GameSpec
+from config import Config
 
 
 @dataclass
@@ -33,7 +35,8 @@ class OpenSpielGameConfig:
     # Optionally restrict the usable action ids to this subset.
     allowed_action_ids: Optional[List[int]] = None
     # Max new tokens to sample for one action completion.
-    max_gen_tokens: int = 8
+
+    max_gen_tokens = Config.MAX_GEN_TOKENS
     # Which observation string to expose ("observation" or "information").
     observation_type: str = "observation"
     # Append legal actions to the observation text.
@@ -143,6 +146,8 @@ class OpenSpielEnv(GameEnv):
         else:
             base = self.state.observation_string(player_id)
 
+        base = f"You are Player {player_id}.\n\n{base}"
+
         if self.cfg.include_legal_actions:
             legal = ", ".join(self.legal_actions())
             base = f"{base}\nLegal actions now: {legal}"
@@ -205,10 +210,55 @@ OPENSPIEL_GAME_CONFIGS: Dict[str, OpenSpielGameConfig] = {
         name="openspiel_tictactoe",
         openspiel_name="tic_tac_toe",
         system_prompt=(
-            "You are playing Tic-Tac-Toe. Respond with EXACTLY ONE action token and nothing else. "
+            "You are playing Tic-Tac-Toe. Respond including an action token and nothing else. "
             "Use the legal action tokens shown in your observation verbatim."
         ),
-        max_gen_tokens=4,
+        max_gen_tokens=Config.MAX_GEN_TOKENS,
+    ),
+        "openspiel_breakthrough": OpenSpielGameConfig(
+        name="openspiel_breakthrough",
+        openspiel_name="breakthrough(rows=4,columns=4)",
+        system_prompt=(
+            "You are playing Breakthrough on a 4x4 board.\n"
+            "\n"
+            "RULES:\n"
+            "- You control pieces shown as 'b' (black, moves down) or 'w' (white, moves up).\n"
+            "- Goal: Get ANY one of your pieces to the opponent's back row.\n"
+            "- Movement: Pieces move forward one square (straight or diagonal).\n"
+            "- Capture: You can capture opponent pieces by moving diagonally into them.\n"
+            "- You cannot move straight into an opponent's piece, only diagonally.\n"
+            "\n"
+            "ACTIONS:\n"
+            "- Format: 'a2a3' means move from column a, row 2 to column a, row 3.\n"
+            "- A '*' at the end (like 'a2b3*') indicates a capture.\n"
+            "\n"
+            "Choose one legal action from the list provided.\n"
+        ),
+        max_gen_tokens=Config.MAX_GEN_TOKENS,
+    ),
+    "openspiel_dots_and_boxes": OpenSpielGameConfig(
+    name="openspiel_dots_and_boxes",
+    openspiel_name="dots_and_boxes(num_rows=4,num_cols=4)",
+    system_prompt=(
+        "You are playing Dots and Boxes on a 4x4 grid.\n"
+        "\n"
+        "RULES:\n"
+        "- The board is a grid of dots. Players take turns drawing lines between adjacent dots.\n"
+        "- When you complete the 4th side of a box, you score 1 point and get another turn.\n"
+        "- The game ends when all lines are drawn. Player with the most boxes wins.\n"
+        "\n"
+        "STRATEGY:\n"
+        "- Avoid completing the 3rd side of a box (giving opponent an easy score).\n"
+        "- Try to force opponent into giving you chains of boxes.\n"
+        "\n"
+        "ACTIONS:\n"
+        "- P1(h,row,col): Draw a horizontal line at position (row, col).\n"
+        "- P1(v,row,col): Draw a vertical line at position (row, col).\n"
+        "- 'h' = horizontal, 'v' = vertical.\n"
+        "\n"
+        "Choose one legal action from the list provided.\n"
+    ),
+    max_gen_tokens=Config.MAX_GEN_TOKENS,
     ),
 }
 

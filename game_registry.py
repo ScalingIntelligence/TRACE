@@ -81,7 +81,7 @@ def _register_builtin_games() -> None:
             make_env=make_kuhn,
             extract_action=extract_action_kuhn,
             action_space=ACTION_STRS_KUHN,
-            stop_sequences=ACTION_STRS_KUHN,
+            stop_sequences=[] if Config.ENABLE_THINKING else ACTION_STRS_KUHN,
             system_prompt=Config.SYSTEM_PROMPT_KUHN,
             max_gen_tokens=Config.MAX_GEN_TOKENS,
         )
@@ -93,7 +93,7 @@ def _register_builtin_games() -> None:
             make_env=make_liars_dice,
             extract_action=extract_action_liars,
             action_space=[],
-            stop_sequences=["]"],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["]"],
             system_prompt=Config.SYSTEM_PROMPT_LIARS_DICE,
             max_gen_tokens=Config.MAX_GEN_TOKENS_LIARS_DICE,
         )

@@ -104,56 +104,57 @@ class Config:
     
     # Model settings
     MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
-    MAX_SEQ_LENGTH = 768
+    MAX_SEQ_LENGTH = 9000
     LORA_RANK = 4
     LORA_ALPHA = 8
     
     # Game settings
     NUM_ROUNDS = 5
     NUM_DICE = 5
-    GAMES_PER_ITER = 64
+    GAMES_PER_ITER = 128
     
     # PPO hyperparameters
     PPO_EPOCHS = 1
-    MINI_BATCH_SIZE = 32
+    MINI_BATCH_SIZE = 64
     STATS_CHUNK_SIZE = 2
     LR = 1e-7
     CLIP_EPS = 0.2
     VF_COEF = 0.5
     
     # Generation settings
-    MAX_GEN_TOKENS = 8
-    MAX_GEN_TOKENS_LIARS_DICE = 16
+    ENABLE_THINKING = True
+    MAX_GEN_TOKENS = 8192 if ENABLE_THINKING else 8
+    MAX_GEN_TOKENS_LIARS_DICE = 8192 if ENABLE_THINKING else 16
     TEMPERATURE = 0.7
     MAX_TOKENS_MATH_EVAL = 7000
     
     # Checkpointing and evaluation
     SAVE_EVERY_ITERS = 5
-    EVAL_EVERY_ITERS = 5
-    EVAL_GAMES = 25
+    EVAL_EVERY_ITERS = 20
+    EVAL_GAMES = 100
     MATH_EVAL_SAMPLES = 50
-    MATH_EVAL_EVERY_ITERS = 10000
+    MATH_EVAL_EVERY_ITERS = 10
 
     USE_ROLE_BASELINE = True
     ROLE_BASELINE_EMA_GAMMA = 0.95
     
+    EVAL_BATCH_SIZE = 8
     # Math evaluation datasets
     MATH_EVAL_DATASETS = ["math", "amc", "aime"]
     
     # Prompt templates
     SYSTEM_PROMPT_KUHN = (
         "You are playing Kuhn Poker.\n"
-        "Respond with EXACTLY ONE action token and NOTHING ELSE.\n"
-        "Valid outputs: [check] or [bet] or [call] or [fold].\n"
-        "Do not add any whitespace, punctuation, explanation, or extra text.\n"
+        + ("" if ENABLE_THINKING else "Respond with EXACTLY ONE action token and NOTHING ELSE.\n")
+        + "Valid actions: [check] or [bet] or [call] or [fold].\n"
+        + ("" if ENABLE_THINKING else "Do not add any whitespace, punctuation, explanation, or extra text.\n")
     )
-
     SYSTEM_PROMPT_LIARS_DICE = (
-        "You are playing Liar's Dice.\n"
-        "Respond with EXACTLY ONE action and NOTHING ELSE.\n"
-        "Valid outputs: [bid: quantity, face] or [call]\n"
-        "Examples: [bid: 3, 4] or [call]\n"
-        "Do not add any whitespace, punctuation, explanation, or extra text.\n"
+    "You are playing Liar's Dice.\n"
+    + ("" if ENABLE_THINKING else "Respond with EXACTLY ONE action and NOTHING ELSE.\n")
+    + "Valid actions: [bid: quantity, face] or [call]\n"
+    + "Examples: [bid: 3, 4] or [call]\n"
+    + ("" if ENABLE_THINKING else "Do not add any whitespace, punctuation, explanation, or extra text.\n")
     )
     
     MATH_SYSTEM_PROMPT = (

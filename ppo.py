@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from config import Config
+
 from game_registry import GameSpec
 from inference import InferenceBackend, HFLocalBackend, messages_for_game, build_prompt_text, generate_completion
 # =========================
@@ -80,7 +82,7 @@ def build_prompt_plus_action(tokenizer, prompt_msgs: list, action_str: str) -> T
         prompt_msgs, 
         add_generation_prompt=True, 
         return_tensors="pt",
-        enable_thinking=False
+        enable_thinking=Config.ENABLE_THINKING
     )[0]
     action_ids = tokenizer(action_str, add_special_tokens=False, return_tensors="pt")["input_ids"][0]
     return torch.cat([prompt_ids, action_ids], dim=0), int(prompt_ids.shape[0]), int(action_ids.shape[0])
@@ -152,6 +154,7 @@ def collect_games(
     invalid_games = 0
     total_turns = 0
     p0_wins = 0
+    extraction_failures = 0
 
     if backend.supports_batch():
         envs = []
@@ -198,7 +201,9 @@ def collect_games(
             for j, (i, pid, obs, legal, msgs) in enumerate(meta):
                 completion = completions[j]
                 act = game_spec.extract_action(completion, legal)
+                illegal_move = (act is None)
                 if act is None:
+                    extraction_failures += 1
                     act = rng.choice(legal)
 
                 episode_steps[i].append((msgs, act, pid, completion))
@@ -215,6 +220,7 @@ def collect_games(
                     "legal_actions": legal,
                     "action": act,
                     "completion": completion,
+                    "illegal_move": illegal_move,
                     "duration_generate_sec": per_item_dt,
                     "timestamp": time.time(),
                 })
@@ -278,6 +284,7 @@ def collect_games(
 
                 act = game_spec.extract_action(completion, legal)
                 if act is None:
+                    extraction_failures += 1
                     act = rng.choice(legal)
 
                 episode_steps.append((messages_for_game(pid, obs, game_spec), act, pid, completion))
@@ -330,7 +337,7 @@ def collect_games(
                 ))
 
     metrics = {
-        "env/invalid_game_rate": invalid_games / max(1, num_games),
+        "env/invalid_move_rate": extraction_failures / max(1, total_turns),
         "env/turns_per_game_mean": total_turns / max(1, num_games),
         "env/win_rate_p0": p0_wins / max(1, num_games),
     }

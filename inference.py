@@ -45,14 +45,14 @@ def build_prompt_text(tokenizer, msgs: list) -> str:
             msgs, 
             tokenize=False, 
             add_generation_prompt=True,
-            enable_thinking=False
+            enable_thinking=Config.ENABLE_THINKING
         )
     except TypeError:
         ids = tokenizer.apply_chat_template(
             msgs, 
             add_generation_prompt=True, 
             return_tensors="pt",
-            enable_thinking=False
+            enable_thinking=Config.ENABLE_THINKING
         )[0]
         return tokenizer.decode(ids, skip_special_tokens=False)
 
@@ -152,7 +152,7 @@ def generate_completion(
         msgs, 
         add_generation_prompt=True, 
         return_tensors="pt",
-        enable_thinking=False
+        enable_thinking=Config.ENABLE_THINKING
     ).to(device)
 
     prompt_len = int(input_ids.shape[-1])
@@ -290,6 +290,7 @@ class VLLMServerBackend(InferenceBackend):
         api_key: Optional[str] = None,
         timeout_s: float = 120.0,
         lora_name: str = "ppo_policy",
+        base_lora_name: str = "base_policy",
         allow_lora_reload: bool = True,
         use_constrained_decoding: bool = False,
     ):
@@ -301,6 +302,9 @@ class VLLMServerBackend(InferenceBackend):
         self.timeout_s = float(timeout_s)
         self.session = requests.Session()
         self.headers: Dict[str, str] = {}
+        self.base_lora_name = base_lora_name
+        self._base_adapter_loaded = False
+
         if api_key:
             self.headers["Authorization"] = f"Bearer {api_key}"
 
@@ -393,6 +397,29 @@ class VLLMServerBackend(InferenceBackend):
             )
             self._ok = False
 
+    def sync_base_adapter(self, adapter_dir: Path) -> bool:
+        """ Load the base adapter to vLLM a single time at the start """
+        if not self._ok or not self.allow_lora_reload:
+            return False
+        if self._base_adapter_loaded:
+            return True
+        try:
+            self._post_json("/unload_lora_adapter", {"lora_name": self.base_lora_name})
+            r = self._post_json(
+                "/load_lora_adapter",
+                {"lora_name": self.base_lora_name, "lora_path": str(adapter_dir)},
+            )
+            r.raise_for_status()
+            self._base_adapter_loaded = True
+            print(f"[vLLM] Loaded base adapter '{self.base_lora_name}'")
+            return True
+        except Exception as e:
+            print(f"[vLLM] Failed to load base adapter: {e}")
+            return False
+
+    def has_base_adapter(self) -> bool:
+        return self._base_adapter_loaded
+
     def generate(
         self,
         prompts: List[str],
@@ -401,13 +428,15 @@ class VLLMServerBackend(InferenceBackend):
         game_spec: Optional[GameSpec] = None,
         use_guided_choice: bool = False,
         mode: str = "game",
+        adapter_name: Optional[str] = None,
     ) -> List[str]:
         if not self._ok:
             raise RuntimeError("vLLM server backend is not available")
 
+        model_to_use = adapter_name if adapter_name else self._active_model_for_generation
         # HARD action-only via guided decoding (guided_choice) if constrained decoding is enabled
         payload = {
-            "model": self._active_model_for_generation,
+            "model": model_to_use,
             "prompt": prompts,
             "max_tokens": int(max_new_tokens),
             "temperature": float(temperature),
