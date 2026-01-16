@@ -15,19 +15,24 @@ def extract_action(text: str, legal_actions: List[str]):
     if not text:
         return None
 
-    if _CALL_RE.search(text):
-        if "[call]" in legal_actions:
-            return "[call]"
-        return None
+    candidates = []  # List of (position, action_string)
 
-    match = _BID_RE.search(text)
-    if match:
-        quantity = int(match.group(1))
-        face = int(match.group(2))
-        normalized = f"[bid: {quantity}, {face}]"
-        if normalized in legal_actions:
-            return normalized
-    
+    # Find all bids
+    for match in _BID_RE.finditer(text):
+        quantity, face = match.groups()
+        action = f"[bid: {quantity}, {face}]"
+        candidates.append((match.start(), action))
+
+    # Find all calls
+    for match in _CALL_RE.finditer(text):
+        candidates.append((match.start(), "[call]"))
+
+    # Sort by position (latest first) and return the last legal one
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    for _, action in candidates:
+        if action in legal_actions:
+            return action
+
     return None
 
 class LiarsDice:

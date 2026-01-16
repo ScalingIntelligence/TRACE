@@ -189,15 +189,26 @@ class OpenSpielEnv(GameEnv):
 
 
 def _extract_openspiel_action(text: str, legal_actions: List[str]) -> Optional[str]:
-    """Return the first legal action token present in the text."""
+    """Return the last legal action token present in the text."""
     if not text:
         return None
     lower = text.lower()
+
+    # Find all legal actions with their last position in text
+    candidates = []
     for a in legal_actions:
-        if a.lower() in lower:
-            return a
-    # Fallback: pick the first integer that matches a legal token.
-    for num in re.findall(r"-?\d+", lower):
+        pos = lower.rfind(a.lower())  # rfind = last occurrence
+        if pos != -1:
+            candidates.append((pos, a))
+    
+    if candidates:
+        # Return the one that appears latest in text
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1]
+    
+    # Fallback: last integer match
+    nums = re.findall(r"-?\d+", lower)
+    for num in reversed(nums):  # Check from last to first
         if num in legal_actions:
             return num
     return None

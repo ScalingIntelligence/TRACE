@@ -18,14 +18,19 @@ _CARD_RANK = {"J": 0, "Q": 1, "K": 2}
 
 def extract_action(text: str, legal_actions: List[str]) -> Optional[str]:
     """
-    Take the FIRST legal action found.
+    Take the last legal action found.
     With strict decoding, the completion should be exactly one action anyway.
     """
-    matches = _ACTION_RE.findall(text or "")
-    for m in matches:
-        a = f"[{m.lower()}]"
-        if a in legal_actions:
-            return a
+    candidates = []
+    for match in _ACTION_RE.finditer(text or ""):
+        action = f"[{match.group(1).lower()}]"
+        candidates.append((match.start(), action))
+    
+    # Sort by position (latest first)
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    for _, action in candidates:
+        if action in legal_actions:
+            return action
     return None
 
 
