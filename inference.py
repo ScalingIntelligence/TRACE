@@ -217,6 +217,7 @@ class InferenceBackend:
     def sync_policy(self, policy_model: nn.Module, adapter_dir: Path) -> None:
         return None
 
+
     def generate(
         self,
         prompts: List[str],
@@ -473,31 +474,142 @@ class VLLMServerBackend(InferenceBackend):
                 out[idx] = ch.get("text", "")
         return out
 
+class MultiVLLMBackend(InferenceBackend):
+    """ Balances inference across more than 1 vLLM server. """
+    name = "multi_vllm"
+
+    def __init__(self, backends: List[VLLMServerBackend]):
+        self.backends = [b for b in backends if b.is_enabled()]
+        if not self.backends:
+            raise RuntimeError("No vLLM servers are enabled")
+        
+    def is_enabled(self) -> bool:
+        return len(self.backends) > 0
+        
+    def supports_batch(self) -> bool:
+        return True
+
+    def has_base_adapter(self) -> bool:
+        return all(b.has_base_adapter() for b in self.backends)
+    
+    @property
+    def base_lora_name(self) -> str:
+        """Return base_lora_name from first backend."""
+        return self.backends[0].base_lora_name
+
+        
+    def sync_policy(self, policy_model: nn.Module, adapter_dir: Path) -> None:
+        """ Sync policy to each backend """
+        for backend in self.backends:
+            backend.sync_policy(policy_model, adapter_dir)
+    
+    def sync_base_adapter(self, adapter_dir: Path) -> bool:
+        """ Sync base adapter to each backend """
+
+        results = [backend.sync_base_adapter(adapter_dir) for backend in self.backends]
+        return all(results)
+
+
+    def generate(
+        self,
+        prompts: List[str],
+        temperature: float,
+        max_new_tokens: int,
+        game_spec = None,
+        use_guided_choice: bool = False,
+        mode: str = "game",
+        adapter_name: Optional[str] = None,
+    ) -> List[str]:
+        """ Split prompts across backends and generate in parallel. """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        n_backends = len(self.backends)
+        n_prompts = len(prompts)
+
+        chunk_size = (n_prompts + n_backends - 1) // n_backends
+        chunks = []
+        for i in range(n_backends):
+            start = i * chunk_size
+            end = min(start + chunk_size, n_prompts)
+            if start < end:
+                chunks.append((i, prompts[start:end]))
+        
+        results = {}
+
+        def generate_chunk(idx, backend, chunk):
+            return idx, backend.generate(
+                    chunk,
+                    temperature=temperature,
+                    max_new_tokens=max_new_tokens,
+                    game_spec=game_spec,
+                    use_guided_choice=use_guided_choice,
+                    mode=mode,
+                    adapter_name=adapter_name,
+                )
+        
+        with ThreadPoolExecutor(max_workers=n_backends) as executor:
+            futures= [
+                executor.submit(generate_chunk, idx, self.backends[idx % len(self.backends)], chunk)
+                for idx, chunk in chunks
+            ]
+            for future in as_completed(futures):
+                idx, completions = future.result()
+                results[idx] = completions
+        #have to flatten back results
+        output = []
+        for i in range(len(chunks)):
+            output.extend(results[i])
+        
+        return output
 
 # =========================
 # Backend initialization
 # =========================
 def init_inference_backend(model, tokenizer, use_constrained_decoding: bool, device: str) -> InferenceBackend:
     """Pick the fastest available inference backend."""
+    
+    vllm_base_urls = os.getenv("VLLM_BASE_URLS", "").strip()
     vllm_base_url = os.getenv("VLLM_BASE_URL", "").strip()
-    if vllm_base_url:
-        backend = VLLMServerBackend(
-            base_url=vllm_base_url,
-            model_name=os.getenv("VLLM_MODEL", "Qwen/Qwen3-4B-Instruct-2507"),
-            api_key=os.getenv("VLLM_API_KEY", "") or None,
-            timeout_s=float(os.getenv("VLLM_TIMEOUT_S", "120")),
-            lora_name=os.getenv("VLLM_LORA_NAME", "ppo_policy"),
-            allow_lora_reload=os.getenv("VLLM_ALLOW_LORA_RELOAD", "1") == "1",
-            use_constrained_decoding=use_constrained_decoding,
-        )
-        if backend.is_enabled():
-            print(f"[vLLM] Using OpenAI-compatible server backend at {backend.base_url} (model={backend.model_name}).")
-            return backend
-        # Check if server was reachable but missing LoRA endpoints
-        if hasattr(backend, '_server_reachable_but_no_lora') and backend._server_reachable_but_no_lora:
-            # Error message already printed in VLLMServerBackend.__init__
-            pass
+    
+    if vllm_base_urls:
+        urls = [u.strip() for u in vllm_base_urls.split(",")]
+    elif vllm_base_url:
+        urls = [vllm_base_url]
+    else:
+        urls = []
+    
+    if urls:
+        model_name = os.getenv("VLLM_MODEL", "Qwen/Qwen3-4B-Instruct-2507")
+        api_key = os.getenv("VLLM_API_KEY", "") or None
+        timeout_s = float(os.getenv("VLLM_TIMEOUT_S", "1200"))
+        lora_name = os.getenv("VLLM_LORA_NAME", "ppo_policy")
+        allow_lora_reload = os.getenv("VLLM_ALLOW_LORA_RELOAD", "1") == "1"
+
+        backends = []
+        for url in urls:
+            backend = VLLMServerBackend(
+                base_url=url,
+                model_name=model_name,
+                api_key=api_key,
+                timeout_s=timeout_s,
+                lora_name=lora_name,
+                allow_lora_reload=allow_lora_reload,
+                use_constrained_decoding=use_constrained_decoding,
+            )
+
+            if backend.is_enabled():
+                print(f"[vLLM] Connected to server at {backend.base_url}")
+                backends.append(backend)
+            else:
+                print(f"[vLLM] Server at {url} not reachable, skipping")
+
+        if len(backends) > 1:
+            print(f"[vLLM] Using {len(backends)} servers for parallel inference")
+            return MultiVLLMBackend(backends) 
+        elif len(backends) == 1:
+            print(f"[vLLM] Using single server at {backends[0].base_url}")
+            return backends[0]
         else:
-            norm_url = normalize_vllm_openai_base_url(vllm_base_url)
-            print(f"[vLLM] Server at {norm_url} not reachable; falling back to local HF generation.")
+            print("[vLLM] No servers reachable, falling back to local HF generation")
+    
     return HFLocalBackend(model, tokenizer, use_constrained_decoding, device)

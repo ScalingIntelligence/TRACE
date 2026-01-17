@@ -111,12 +111,12 @@ class Config:
     # Game settings
     NUM_ROUNDS = 5
     NUM_DICE = 5
-    GAMES_PER_ITER = 128
+    GAMES_PER_ITER = 512
     
     # PPO hyperparameters
     PPO_EPOCHS = 1
     MINI_BATCH_SIZE = 64
-    STATS_CHUNK_SIZE = 2
+    STATS_CHUNK_SIZE = 4
     LR = 1e-7
     CLIP_EPS = 0.2
     VF_COEF = 0.5
@@ -129,9 +129,9 @@ class Config:
     MAX_TOKENS_MATH_EVAL = 7000
     
     # Checkpointing and evaluation
-    SAVE_EVERY_ITERS = 5
-    EVAL_EVERY_ITERS = 20
-    EVAL_GAMES = 100
+    SAVE_EVERY_ITERS = 30
+    EVAL_EVERY_ITERS = 10
+    EVAL_GAMES = 200
     MATH_EVAL_SAMPLES = 50
     MATH_EVAL_EVERY_ITERS = 10
 

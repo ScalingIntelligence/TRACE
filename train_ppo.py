@@ -281,8 +281,7 @@ def main():
                 old_v_cpu[mb_idx] = mb_old_v.detach().cpu()
 
                 del mb_ids, mb_attn, logits, last_h, mb_old_logp, mb_old_v
-                if device == "cuda":
-                    torch.cuda.empty_cache()
+
 
         adv_cpu = (returns_cpu - old_v_cpu)
         adv_cpu = (adv_cpu - adv_cpu.mean()) / (adv_cpu.std(unbiased=False) + 1e-8)
@@ -344,8 +343,7 @@ def main():
                 ratio_mean_acc += float(ratio_mean.item())
 
                 del mb_ids, mb_attn, logits, last_h, new_logp, new_v, ratio, unclipped, clipped, loss
-                if device == "cuda":
-                    torch.cuda.empty_cache()
+
 
         t_train1 = time.time()
 
