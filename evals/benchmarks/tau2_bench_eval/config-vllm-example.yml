@@ -1,0 +1,51 @@
+# τ²-bench Evaluation with vLLM Example Configuration
+# This configuration uses a local model via vLLM for both agent and user simulator
+
+# Domain Configuration
+domain: airline                                                          # Domain to evaluate
+
+# Agent Configuration
+# Use vllm:// prefix to indicate vLLM model
+agent_llm: vllm://hazyresearch/qwen-3b-ot3-6k-qwq-r1-complete-rr2       # Local model via vLLM
+agent: null
+
+# User Simulator Configuration
+# Option 1: Use same vLLM model for user (fully offline)
+user_llm: vllm://hazyresearch/qwen-3b-ot3-6k-qwq-r1-complete-rr2        # Same local model
+
+# Option 2: Use OpenAI for user (recommended for better quality)
+# user_llm: gpt-4o-mini                                                  # Use GPT-4o-mini for user
+
+user: null
+
+# Task Configuration
+num_trials: 1                                                            # Single trial per task
+num_tasks: 5                                                             # Run only 5 tasks for quick test
+task_ids: null
+
+# Execution Configuration
+max_concurrency: 1                                                       # Lower concurrency for local models
+seed: 42
+
+# Output Configuration
+output_dir: outputs
+save_to: qwen-3b-airline-test                                           # Custom prefix for results
+
+# Advanced Options
+verbose: true                                                            # Enable verbose output
+
+# vLLM Configuration
+vllm:
+  base_url: http://localhost:8000/v1                                    # vLLM server URL
+  api_key: null                                                          # No API key needed for local
+
+# Before running:
+# 1. Start vLLM server with tool calling support:
+#    vllm serve hazyresearch/qwen-3b-ot3-6k-qwq-r1-complete-rr2 \
+#      --port 8000 \
+#      --enable-auto-tool-choice \
+#      --tool-call-parser hermes \
+#      --max-model-len 32768
+#
+# 2. Run evaluation:
+#    python main.py --config config-vllm-example.yml

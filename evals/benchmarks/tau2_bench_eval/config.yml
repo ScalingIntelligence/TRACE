@@ -1,0 +1,36 @@
+# τ²-bench Evaluation Harness Configuration
+
+# Domain Configuration
+domain: airline                           # Domain (airline, retail, telecom, telecom-workflow, mock)
+
+# Agent Configuration
+agent_llm: gpt-4o                        # LLM for the agent
+agent: null                              # Custom agent class (default: llm_agent)
+
+# User Simulator Configuration
+user_llm: gpt-4o                         # LLM for user simulator
+user: null                               # Custom user class (default: llm_user)
+
+# Task Configuration
+num_trials: 1                            # Number of trials per task
+num_tasks: null                          # Number of tasks to run (null = all tasks)
+task_ids: null                           # Specific task IDs to run (e.g., [1, 2, 3]) or null
+
+# Execution Configuration
+max_concurrency: 10                      # Number of concurrent simulations
+seed: 300                                 # Random seed (null = random)
+
+# Output Configuration
+output_dir: outputs                      # Directory for results (relative to tau2_bench_eval/)
+save_to: airline_test                    # Custom filename prefix for results (null = auto-generated)
+
+# Advanced Options
+verbose: false                           # Enable verbose output
+
+# vLLM Configuration (only used when agent_llm or user_llm provider is vllm/hf/huggingface)
+# To use vLLM, set the llm names to use a vllm:// prefix
+# Example: agent_llm: "vllm://hazyresearch/qwen-3b-ot3-6k-qwq-r1-complete-rr2"
+vllm:
+  # Server configuration
+  base_url: null                         # URL of running vLLM server (e.g., "http://localhost:8000/v1")
+  api_key: null                          # Optional API key for vLLM server

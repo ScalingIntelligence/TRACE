@@ -35,7 +35,7 @@ from ppo import (
     logprob_action_tokens,
     values_from_hidden,
 )
-from evaluation import evaluate_vs_base, evaluate_math
+from evaluation import evaluate_vs_base, evaluate_math, evaluate_tau2_bench
 
 # Optional tracking libs
 try:
@@ -222,6 +222,38 @@ def main():
 
             if wandb:
                 wandb.log(all_eval_logs, step=global_step)
+
+
+        # Periodic tau2-bench evaluation (sharded across vLLM servers)
+        if Config.TAU2_EVAL_EVERY_ITERS and it % Config.TAU2_EVAL_EVERY_ITERS == 0 and it > 0:
+            ac.eval()
+
+            inference_backend.sync_policy(ac.lm, vllm_adapter_dir)
+            if not inference_backend.is_enabled():
+                inference_backend = HFLocalBackend(ac.lm, tokenizer, use_constrained_decoding, device)
+
+            print(f"[eval {it}] Starting tau2-bench evaluation...")
+            t_tau2_0 = time.time()
+            tau2_logs = evaluate_tau2_bench(
+                backend=inference_backend,
+                output_dir=output_dir_path,
+                iteration=it,
+                domains=list(Config.TAU2_EVAL_DOMAINS),
+                num_tasks=Config.TAU2_EVAL_NUM_TASKS,
+                num_trials=Config.TAU2_EVAL_NUM_TRIALS,
+                max_concurrency_per_shard=Config.TAU2_EVAL_MAX_CONCURRENCY_PER_SHARD,
+                seed=Config.TAU2_EVAL_SEED,
+                verbose=False,
+            )
+            t_tau2_1 = time.time()
+
+            if tau2_logs:
+                tau2_logs["eval_tau2/time_total_sec"] = t_tau2_1 - t_tau2_0
+                print(f"[eval {it}] tau2-bench done ({t_tau2_1 - t_tau2_0:.1f}s)")
+                if wandb:
+                    wandb.log(tau2_logs, step=global_step)
+            else:
+                print(f"[eval {it}] tau2-bench skipped ({t_tau2_1 - t_tau2_0:.1f}s)")
 
 
         # Collect rollouts

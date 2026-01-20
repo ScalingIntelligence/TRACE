@@ -135,6 +135,14 @@ class Config:
     MATH_EVAL_SAMPLES = 50
     MATH_EVAL_EVERY_ITERS = 10
 
+    # tau2-bench evaluation (set TAU2_EVAL_EVERY_ITERS = 0 to disable)
+    TAU2_EVAL_EVERY_ITERS = 10
+    TAU2_EVAL_DOMAINS = ["airline"]  # airline, retail, telecom, mock
+    TAU2_EVAL_NUM_TASKS = 8          # Total tasks per domain
+    TAU2_EVAL_NUM_TRIALS = 1
+    TAU2_EVAL_MAX_CONCURRENCY_PER_SHARD = 1
+    TAU2_EVAL_SEED = 42
+
     USE_ROLE_BASELINE = True
     ROLE_BASELINE_EMA_GAMMA = 0.95
     

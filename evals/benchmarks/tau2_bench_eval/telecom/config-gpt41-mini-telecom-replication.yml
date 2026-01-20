@@ -1,0 +1,36 @@
+# τ²-bench Telecom Domain Replication
+# Target: Replicate Figure 3 (page 7) results
+# Expected: gpt-4.1 = 34% pass^1 on telecom domain
+# User simulator: gpt-4.1 (kept constant as per paper)
+
+# Domain Configuration
+domain: telecom                                    # Telecom dual-control domain (hardest domain)
+
+# Agent Configuration (MODEL UNDER TEST)
+agent_llm: gpt-4.1-mini-2025-04-14                    # GPT-4.1 agent (expected ~34% pass rate)
+agent: null                                        # Custom agent class (default: llm_agent)
+
+# User Simulator Configuration (KEPT CONSTANT AS PER PAPER)
+user_llm: gpt-4.1-2025-04-14                      # User simulator fixed at GPT-4.1
+user: null                                         # Custom user class (default: llm_user)
+
+# Task Configuration
+num_trials: 1                                      # Number of trials per task (pass^1 = single trial)
+num_tasks: null                                    # Run ALL telecom tasks (null = all tasks)
+task_ids: null                                     # Run all tasks, not specific ones
+
+# Execution Configuration
+max_concurrency: 10                                # Number of concurrent simulations
+seed: 300                                          # Fixed seed for reproducibility
+
+# Output Configuration
+output_dir: outputs                                # Directory for results
+save_to: gpt41_mini_telecomreplication                # Results file prefix
+
+# Advanced Options
+verbose: false                                     # Set to true for debugging
+
+# vLLM Configuration (not needed for OpenAI models)
+vllm:
+  base_url: null
+  api_key: null

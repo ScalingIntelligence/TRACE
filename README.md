@@ -20,7 +20,10 @@ vllm serve Qwen/Qwen3-4B-Instruct-2507 \
   --max-model-len 15000 \
   --enable-lora \
   --max-loras 2 \
-  --gpu-memory-utilization 0.8
+  --gpu-memory-utilization 0.8 \
+  --enable-auto-tool-choice \
+  --tool-call-parser hermes
+
 ```
 
 ### 2. Start Training
@@ -46,3 +49,15 @@ All model weights and outputs will be saved to `/matx/u/$USER/` (3T drive).
 1) Open `openspiel_wrapper.py` and add a new `OpenSpielGameConfig` entry to `OPENSPIEL_GAME_CONFIGS` with your alias, the `openspiel_name` passed to `pyspiel.load_game`, and a short system prompt.  
 2) (Optional) Provide a stable `action_map` or `allowed_action_ids` if the default `[action_N]` mapping is not what you want.  
 3) Run training with `python train_ppo.py --game <your_alias> --use_constrained_decoding True --root /home/ubuntu` (adjust root/path as needed).
+
+## tau2-bench evaluation during training
+You can optionally run eval on tau2-bench at a fixed iteration interval.
+
+1) Install tau2-bench (provides the `tau2` CLI) and its dependencies using `pip install -e evals/benchmarks/tau2_bench_eval/ from repo root`
+2) Download tau2 data files:
+   `python evals/benchmarks/tau2_bench_eval/setup_data.py`
+3) Enable the periodic eval by setting `Config.TAU2_EVAL_EVERY_ITERS` in `config.py` to a positive integer.
+
+Currently, the eval setup is:
+- `agent_llm` is the currently-trained LoRA adapter served by vLLM (`ppo_policy` by default).
+- `user_llm` is the base `Qwen/Qwen3-4B-Instruct-2507` model served by vLLM.

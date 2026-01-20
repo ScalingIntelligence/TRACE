@@ -1,0 +1,23 @@
+[project]
+name = "tau2-bench-eval"
+version = "0.1.0"
+description = "Evaluation harness for τ²-bench"
+requires-python = ">=3.10"
+dependencies = [
+    "tau2 @ git+https://github.com/sierra-research/tau2-bench.git",
+    "pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []
+py-modules = ["main"]
+
+[tool.setuptools.package-data]
+"*" = []
+
+[project.scripts]
+tau2-eval = "main:main"
