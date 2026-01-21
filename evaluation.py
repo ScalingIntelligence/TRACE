@@ -379,10 +379,11 @@ def _tau2_harness_dir() -> Path:
     return Path(__file__).resolve().parent / "evals" / "benchmarks" / "tau2_bench_eval"
 
 
-def _load_tau2_task_ids(tasks_path: Path) -> List[int]:
+def _load_tau2_task_ids(tasks_path: Path) -> List[Any]:
     """Load tau2 task ids from a tasks.json file.
 
     The upstream tau2-bench JSON schema may evolve; we try a few common layouts.
+    Supports both integer IDs (airline, retail) and string IDs (telecom).
     """
     with open(tasks_path, "r") as f:
         data = json.load(f)
@@ -391,32 +392,38 @@ def _load_tau2_task_ids(tasks_path: Path) -> List[int]:
     if not isinstance(tasks, list):
         raise ValueError(f"Unexpected tasks.json format: {type(data)}")
 
-    ids: List[int] = []
-    for idx, t in enumerate(tasks, start=1):
+    ids: List[Any] = []
+    for idx, t in enumerate(tasks):
         if isinstance(t, dict):
             for k in ("task_id", "taskId", "id", "task"):  # best-effort
                 if k in t:
                     v = t.get(k)
-                    if isinstance(v, int):
-                        ids.append(int(v))
-                        break
-                    if isinstance(v, str) and v.strip().isdigit():
-                        ids.append(int(v.strip()))
+                    if v is not None:
+                        # Accept both int and string IDs
+                        if isinstance(v, int):
+                            ids.append(v)
+                        elif isinstance(v, str):
+                            # Try to convert to int if numeric, otherwise keep as string
+                            if v.strip().isdigit():
+                                ids.append(int(v.strip()))
+                            else:
+                                ids.append(v.strip())
                         break
             else:
+                # Fallback to index only if no ID field found
                 ids.append(idx)
         else:
             ids.append(idx)
 
-    # Keep deterministic order
-    ids = sorted(set(ids))
+    # Keep deterministic order (works for both int and string)
+    ids = sorted(set(ids), key=lambda x: (isinstance(x, str), str(x)))
     return ids
 
 
-def _split_round_robin(items: List[int], n_shards: int) -> List[List[int]]:
+def _split_round_robin(items: List[Any], n_shards: int) -> List[List[Any]]:
     if n_shards <= 1:
         return [list(items)]
-    shards: List[List[int]] = [[] for _ in range(n_shards)]
+    shards: List[List[Any]] = [[] for _ in range(n_shards)]
     for i, x in enumerate(items):
         shards[i % n_shards].append(x)
     return shards
@@ -457,6 +464,14 @@ def _parse_tau2_success_from_file(path: Path) -> Optional[Dict[str, float]]:
             if not isinstance(r, dict):
                 continue
             total += 1
+
+            reward_info = r.get('reward_info')
+            if reward_info and isinstance(reward_info, dict):
+                reward = reward_info.get('reward', 0)
+                success += 1 if reward > 0 else 0
+                continue
+            
+            
             for k in ("success", "is_success", "task_success", "passed", "solved"):
                 if k in r:
                     v = r.get(k)
@@ -643,11 +658,24 @@ def evaluate_tau2_bench(
 
         # Wait for shards
         failed = []
-        for p, f, save_to in procs:
-            rc = p.wait()
-            f.close()
-            if rc != 0:
-                failed.append((save_to, rc))
+        running = {save_to: (p, f) for p, f, save_to in procs}
+
+        while running:
+            still_running = []
+            for save_to, (p, f) in list(running.items()):
+                rc = p.poll()
+                if rc is not None:
+                    f.close()
+                    if rc != 0:
+                        failed.append((save_to, rc))
+                    print(f"[tau2_eval] {save_to} completed with status {rc}")
+                    del running[save_to]
+                else:
+                    still_running.append(save_to)
+
+            if running:
+                elapsed = time.time() - t0
+                time.sleep(5)
 
         t1 = time.time()
         logs[f"eval_tau2/{domain}_time_sec"] = float(t1 - t0)
@@ -657,9 +685,9 @@ def evaluate_tau2_bench(
             continue
 
         # Collect and parse results
-        simulations_dir = tau2_data_dir / "tau2" / "simulations"
+        simulations_dir = tau2_data_dir / "simulations"
         if not simulations_dir.exists():
-            simulations_dir = harness_dir / "data" / "simulations"
+            simulations_dir = harness_dir / "tau2" / "simulations" 
         total = 0.0
         success = 0.0
         copied = 0

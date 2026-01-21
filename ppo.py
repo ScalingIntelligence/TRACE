@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from tqdm import tqdm
 from config import Config
 
 from game_registry import GameSpec
