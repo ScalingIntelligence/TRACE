@@ -110,19 +110,57 @@ def main():
     )
     FastLanguageModel.for_training(model)
 
+    start_iter = 0
+    if args.resume:
+        import safetensors.torch
+        from peft import set_peft_model_state_dict
+
+        resume_path = Path(args.resume)
+        print(f"[Resume] Loading checkpoint from {resume_path}")
+
+        adapter_path = resume_path / "policy" / "adapter_model.safetensors"
+
+        if adapter_path.exists():
+            adapter_state = safetensors.torch.load_file(str(adapter_path))
+            set_peft_model_state_dict(model, adapter_state)
+            print(f"[Resume] Loaded LoRA adapter from {adapter_path}")
+        else:
+            raise FileNotFoundError(f"Adapter not found at {adapter_path}")
+        
+        start_iter = int(resume_path.name.split("_")[-1]) + 1
+        print(f"[Resume] Will start from iteration {start_iter}")
+
+    
+
+    
+
+
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = model.to(device)
     ac = PolicyWithValueHead(model, device=device).to(device)
+
+    if args.resume:
+        value_head_path = Path(args.resume) / "value_head.pt"
+        if value_head_path.exists():
+            ac.value_head.load_state_dict(torch.load(value_head_path, map_location=device))
+            print(f"[Resume] Loaded value head from {value_head_path}")
+        else:
+            print(f"[Resume] Warning: value_head.pt not found, starting with fresh value head")
+
+    
     
     print(f"[Model] Model loaded and wrapped with value head")
 
-    # Save initial base model adapter state for evaluation
+        # Save initial base model adapter state for evaluation (only if starting fresh)
     base_model_adapter_dir = output_dir_path / "base_model_adapter"
-    base_model_adapter_dir.mkdir(parents=True, exist_ok=True)
-    ac.lm.save_pretrained(str(base_model_adapter_dir))
-    print(f"[Base Model] Saved initial adapter state to {base_model_adapter_dir}")
+    if not args.resume:
+        base_model_adapter_dir.mkdir(parents=True, exist_ok=True)
+        ac.lm.save_pretrained(str(base_model_adapter_dir))
+        print(f"[Base Model] Saved initial adapter state to {base_model_adapter_dir}")
+    else:
+        print(f"[Resume] Using existing base model adapter from {base_model_adapter_dir}")
 
     # Initialize inference backend
     inference_backend = init_inference_backend(ac.lm, tokenizer, use_constrained_decoding, device)
@@ -164,14 +202,15 @@ def main():
     # =========================
     # Main PPO loop
     # =========================
-    global_step = 0
+    global_step = start_iter * 25 if args.resume else 0
+
     math_eval_data_path = Path(__file__).resolve().parent / "data"
 
     role_baseline_ema = None
     if Config.USE_ROLE_BASELINE:
         role_baseline_ema = {0: EMA(Config.ROLE_BASELINE_EMA_GAMMA), 1: EMA(Config.ROLE_BASELINE_EMA_GAMMA)}
 
-    for it in tqdm(range(10_000), desc="PPO iters"):
+    for it in tqdm(range(start_iter, 10_000), desc="PPO iters", initial=start_iter, total=10_000):
         t_collect0 = time.time()
 
         # Sync policy to inference backend

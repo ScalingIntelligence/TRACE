@@ -1,5 +1,6 @@
 """
 Core game logic for running model-vs-model evaluations.
+Supports both local HuggingFace generation and vLLM server backends.
 """
 
 import sys
@@ -12,11 +13,12 @@ sys.path.insert(0, str(GAMES_PATH))
 import os
 import random
 import torch
+import requests
 from typing import Dict, Tuple, Optional, List
 from tqdm import tqdm
 
 # Import from local eval_config (experiments/model_vs_model/eval_config.py)
-from eval_config import AVAILABLE_MODELS, SYSTEM_PROMPT, DEFAULT_MAX_SEQ_LENGTH
+from eval_config import AVAILABLE_MODELS, SYSTEM_PROMPT, DEFAULT_MAX_SEQ_LENGTH, ENABLE_THINKING
 
 # This will now correctly import from games/kuhn_poker.py which uses games/config.py
 from kuhn_poker import KuhnPoker
@@ -39,13 +41,72 @@ def extract_action(text: str, legal_actions: List[str]) -> Optional[str]:
     # Remove thinking tags if present
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     
-    matches = _FLEXIBLE_ACTION_RE.findall(text)
-    for m in matches:
-        a = f"[{m.lower()}]"
+    matches = list(_FLEXIBLE_ACTION_RE.finditer(text))
+    # Check from last to first
+    for match in reversed(matches):
+        a = f"[{match.group(1).lower()}]"
         if a in legal_actions:
             return a
     return None
 
+# =========================
+# vLLM Server Backend
+# =========================
+class VLLMBackend:
+    """Backend for calling vLLM OpenAI-compatible server."""
+    
+    def __init__(self, base_url: str, model_name: str, timeout: float = 300.0):
+        self.base_url = base_url.rstrip("/")
+        if not self.base_url.endswith("/v1"):
+            self.base_url = self.base_url + "/v1"
+        self.model_name = model_name
+        self.timeout = timeout
+        self.session = requests.Session()
+    
+    def generate(
+        self,
+        messages: List[Dict],
+        temperature: float,
+        max_new_tokens: int,
+    ) -> str:
+        """Generate completion using vLLM server."""
+        payload = {
+            "model": self.model_name,
+            "messages": messages,
+            "max_tokens": max_new_tokens,
+            "temperature": temperature,
+        }
+        
+        r = self.session.post(
+            f"{self.base_url}/chat/completions",
+            json=payload,
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        
+        return r.json()["choices"][0]["message"]["content"]
+    
+    def is_available(self) -> bool:
+        """Check if server is reachable."""
+        try:
+            r = self.session.get(f"{self.base_url}/models", timeout=10)
+            return r.status_code == 200
+        except Exception:
+            return False
+
+
+def load_vllm_backend(base_url: str, model_name: str) -> VLLMBackend:
+    """Create a vLLM backend and verify it's available."""
+    backend = VLLMBackend(base_url, model_name)
+    if not backend.is_available():
+        raise RuntimeError(f"vLLM server at {base_url} is not reachable")
+    print(f"[vLLM] Connected to server at {base_url} with model {model_name}")
+    return backend
+
+
+# =========================
+# Local HuggingFace Backend
+# =========================
 from unsloth import FastLanguageModel
 
 
@@ -119,6 +180,7 @@ def generate_action(
         messages,
         tokenize=False,
         add_generation_prompt=True,
+        enable_thinking=True,
     )
     
     # Don't force device - let model handle it (needed for offloaded embeddings)
@@ -146,6 +208,34 @@ def generate_action(
     return action, raw_output
 
 
+def generate_action_vllm(
+    backend: VLLMBackend,
+    player_id: int,
+    observation: str,
+    legal_actions: List[str],
+    temperature: float,
+    max_new_tokens: int,
+) -> Tuple[Optional[str], str]:
+    """
+    Generate an action using vLLM server.
+    
+    Returns:
+        Tuple of (action, raw_output) where action is None if invalid.
+    """
+    messages = _build_messages(player_id, observation)
+    
+    raw_output = backend.generate(
+        messages=messages,
+        temperature=temperature,
+        max_new_tokens=max_new_tokens,
+    )
+    
+    # Extract action from output
+    action = extract_action(raw_output, legal_actions)
+    
+    return action, raw_output
+
+
 def play_game(
     model_p0,
     tokenizer_p0,
@@ -158,9 +248,13 @@ def play_game(
     verbose: bool = False,
     model_p0_name: str = "P0",
     model_p1_name: str = "P1",
+    use_vllm: bool = False,
 ) -> Dict:
     """
     Play a single game of Kuhn Poker between two models.
+    
+    If use_vllm=True, model_p0 and model_p1 should be VLLMBackend instances,
+    and tokenizer_p0/tokenizer_p1 are ignored.
     
     Returns:
         Dict with game results including winner, rewards, and game log.
@@ -183,15 +277,25 @@ def play_game(
         observation = game.observe(player)
         legal_actions = game.legal_actions()
         
-        action, raw_output = generate_action(
-            model=models[player],
-            tokenizer=tokenizers[player],
-            player_id=player,
-            observation=observation,
-            legal_actions=legal_actions,
-            temperature=temperature,
-            max_new_tokens=max_new_tokens,
-        )
+        if use_vllm:
+            action, raw_output = generate_action_vllm(
+                backend=models[player],
+                player_id=player,
+                observation=observation,
+                legal_actions=legal_actions,
+                temperature=temperature,
+                max_new_tokens=max_new_tokens,
+            )
+        else:
+            action, raw_output = generate_action(
+                model=models[player],
+                tokenizer=tokenizers[player],
+                player_id=player,
+                observation=observation,
+                legal_actions=legal_actions,
+                temperature=temperature,
+                max_new_tokens=max_new_tokens,
+            )
         
         if verbose:
             # Truncate long outputs for display

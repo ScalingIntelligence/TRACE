@@ -2,10 +2,20 @@
 """
 Run all model-vs-model evaluations for Kuhn Poker.
 
-Usage:
+Usage (local HuggingFace):
     python run_evaluation.py
     python run_evaluation.py --num_games 50 --models qwen-4b qwen-8b
     python run_evaluation.py --output results.json
+
+Usage (vLLM - much faster):
+    # First start vLLM servers in separate terminals:
+    # Terminal 1: CUDA_VISIBLE_DEVICES=0 vllm serve Qwen/Qwen3-4B-Instruct-2507 --port 8000 --max-model-len 10000
+    # Terminal 2: CUDA_VISIBLE_DEVICES=1 vllm serve Qwen/Qwen3-30B-A3B-Instruct --port 8001 --max-model-len 10000
+    
+    # Then run evaluation:
+    python run_evaluation.py --models qwen-4b-instruct qwen-30b-instruct \\
+        --vllm_urls qwen-4b-instruct=http://localhost:8000 qwen-30b-instruct=http://localhost:8001 \\
+        --num_games 50
 """
 
 import argparse
@@ -23,7 +33,7 @@ from eval_config import (
     DEFAULT_TEMPERATURE,
     DEFAULT_MAX_NEW_TOKENS,
 )
-from game_runner import load_model, play_game
+from game_runner import load_model, play_game, load_vllm_backend, VLLMBackend
 
 
 def run_matchup_with_progress(
@@ -40,10 +50,13 @@ def run_matchup_with_progress(
     start_seed: int = 0,
     print_interval: int = 10,
     verbose: bool = False,
+    use_vllm: bool = False,
 ) -> Dict:
     """
     Run multiple games between two models with progress printing.
     Model P0 always goes first.
+    
+    If use_vllm=True, model_p0 and model_p1 should be VLLMBackend instances.
     """
     wins = {0: 0, 1: 0}
     draws = 0
@@ -67,6 +80,7 @@ def run_matchup_with_progress(
             verbose=verbose,
             model_p0_name=model_p0_name,
             model_p1_name=model_p1_name,
+            use_vllm=use_vllm,
         )
         
         if result["winner"] is not None:
@@ -111,11 +125,16 @@ def run_all_matchups(
     output_path: Optional[str] = None,
     print_interval: int = 10,
     verbose: bool = False,
+    vllm_urls: Optional[Dict[str, str]] = None,
 ) -> Dict:
     """
     Run all ordered pairwise matchups between the specified models.
     Each (A, B) pair is tested separately from (B, A).
+    
+    If vllm_urls is provided, it should be a dict mapping model names to vLLM server URLs.
     """
+    use_vllm = vllm_urls is not None and len(vllm_urls) > 0
+    
     results = {
         "metadata": {
             "timestamp": datetime.now().isoformat(),
@@ -124,6 +143,7 @@ def run_all_matchups(
             "temperature": temperature,
             "max_new_tokens": max_new_tokens,
             "models_tested": models_to_test,
+            "backend": "vllm" if use_vllm else "local_hf",
         },
         "matchups": {},
         "summary": {},
@@ -131,13 +151,23 @@ def run_all_matchups(
     
     # Load all models first
     print("=" * 60)
-    print("Loading models...")
+    if use_vllm:
+        print("Connecting to vLLM servers...")
+    else:
+        print("Loading models locally...")
     print("=" * 60)
     
     loaded_models = {}
     for model_name in models_to_test:
-        model, tokenizer = load_model(model_name)
-        loaded_models[model_name] = (model, tokenizer)
+        if use_vllm and model_name in vllm_urls:
+            url = vllm_urls[model_name]
+            # Get the actual HF model name for vLLM
+            hf_model_name = AVAILABLE_MODELS.get(model_name, model_name)
+            backend = load_vllm_backend(url, hf_model_name)
+            loaded_models[model_name] = (backend, None)  # No tokenizer needed for vLLM
+        else:
+            model, tokenizer = load_model(model_name)
+            loaded_models[model_name] = (model, tokenizer)
     
     print(f"\nLoaded {len(loaded_models)} models: {list(loaded_models.keys())}")
     
@@ -169,6 +199,7 @@ def run_all_matchups(
             start_seed=idx * num_games,
             print_interval=print_interval,
             verbose=verbose,
+            use_vllm=use_vllm,
         )
         
         matchup_key = f"{model_first}_vs_{model_second}"
@@ -323,6 +354,12 @@ def main():
         action="store_true",
         help="Print detailed game logs",
     )
+    parser.add_argument(
+        "--vllm_urls",
+        nargs="+",
+        default=None,
+        help="vLLM server URLs in format 'model_name=url'. E.g., --vllm_urls qwen-4b-instruct=http://localhost:8000 qwen-30b-instruct=http://localhost:8001",
+    )
     
     args = parser.parse_args()
     
@@ -339,6 +376,17 @@ def main():
         print("Error: Need at least 2 models to run matchups")
         return
     
+    # Parse vLLM URLs if provided
+    vllm_urls = None
+    if args.vllm_urls:
+        vllm_urls = {}
+        for item in args.vllm_urls:
+            if "=" in item:
+                model_name, url = item.split("=", 1)
+                vllm_urls[model_name] = url
+            else:
+                print(f"Warning: Invalid vllm_url format '{item}', expected 'model_name=url'")
+    
     print("=" * 60)
     print("Kuhn Poker Model-vs-Model Evaluation")
     print("=" * 60)
@@ -346,6 +394,9 @@ def main():
     print(f"Games per matchup: {args.num_games}")
     print(f"Rounds per game: {args.num_rounds}")
     print(f"Temperature: {args.temperature}")
+    print(f"Backend: {'vLLM' if vllm_urls else 'Local HuggingFace'}")
+    if vllm_urls:
+        print(f"vLLM URLs: {vllm_urls}")
     print(f"Total matchups: {len(models_to_test) * (len(models_to_test) - 1)}")
     print()
     
@@ -358,6 +409,7 @@ def main():
         output_path=args.output,
         print_interval=args.print_interval,
         verbose=args.verbose,
+        vllm_urls=vllm_urls,
     )
 
 

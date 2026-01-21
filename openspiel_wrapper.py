@@ -36,7 +36,7 @@ class OpenSpielGameConfig:
     allowed_action_ids: Optional[List[int]] = None
     # Max new tokens to sample for one action completion.
 
-    max_gen_tokens = Config.MAX_GEN_TOKENS
+    max_gen_tokens: int = Config.MAX_GEN_TOKENS
     # Which observation string to expose ("observation" or "information").
     observation_type: str = "observation"
     # Append legal actions to the observation text.

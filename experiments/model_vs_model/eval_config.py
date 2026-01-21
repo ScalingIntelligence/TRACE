@@ -10,6 +10,7 @@ AVAILABLE_MODELS = {
     "qwen-4b-instruct": "Qwen/Qwen3-4B-Instruct-2507",
     "qwen-8b": "Qwen/Qwen3-8B",
     "qwen-14b": "Qwen/Qwen3-14B",
+    "qwen-30b-instruct": "Qwen/Qwen3-30B-A3B-Instruct-2507",
 }
 
 
@@ -17,8 +18,8 @@ AVAILABLE_MODELS = {
 DEFAULT_NUM_GAMES = 100
 DEFAULT_NUM_ROUNDS = 1
 DEFAULT_TEMPERATURE = 0.7  # same as inference
-DEFAULT_MAX_NEW_TOKENS = 10000
-DEFAULT_MAX_SEQ_LENGTH = 10000
+DEFAULT_MAX_NEW_TOKENS = 8000
+DEFAULT_MAX_SEQ_LENGTH = 8000
 
 
 # Thinking mode enabled - models can reason before answering

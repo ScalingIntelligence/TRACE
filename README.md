@@ -13,11 +13,11 @@ export HF_HOME=/home/ubuntu/.cache/huggingface #pi
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
 export VLLM_RPC_TIMEOUT=2000
 export CUDA_VISIBLE_DEVICES=0 # then 1, then 2
-vllm serve Qwen/Qwen3-4B-Instruct-2507 \
+vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507 \
   --host 0.0.0.0 \
-  --port 8036 \
+  --port 8041 \
   --dtype bfloat16 \
-  --max-model-len 15000 \
+  --max-model-len 10000 \
   --enable-lora \
   --max-loras 2 \
   --gpu-memory-utilization 0.8 \
@@ -25,13 +25,15 @@ vllm serve Qwen/Qwen3-4B-Instruct-2507 \
   --tool-call-parser hermes
 
 ```
+#Qwen/Qwen3-30B-A3B-Instruct-2507
+
 
 ### 2. Start Training
 
 ```bash
 # With vLLM server
 export CUDA_VISIBLE_DEVICES=3
-export VLLM_BASE_URLS="http://localhost:8034,http://localhost:8035,http://localhost:8036"
+export VLLM_BASE_URLS="http://localhost:8075,http://localhost:8076,http://localhost:8077"
 export VLLM_MODEL="Qwen/Qwen3-4B-Instruct-2507"
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
 export VLLM_TIMEOUT_S=2000

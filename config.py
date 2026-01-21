@@ -32,6 +32,13 @@ def parse_args():
         default="kuhn_poker",
         help="Game to train on (e.g., kuhn_poker, liars_dice, or an OpenSpiel-backed game registered in openspiel_wrapper.py)",
     )
+
+    parser.add_argument(
+    "--resume",
+    type=str,
+    default=None,
+    help="Path to checkpoint directory to resume from (e.g., /path/to/ppo_ckpt_iter_210)"
+    )
     return parser.parse_args()
 
 
@@ -116,8 +123,8 @@ class Config:
     # PPO hyperparameters
     PPO_EPOCHS = 1
     MINI_BATCH_SIZE = 64
-    STATS_CHUNK_SIZE = 4
-    LR = 1e-7
+    STATS_CHUNK_SIZE = 32
+    LR = 1e-6
     CLIP_EPS = 0.2
     VF_COEF = 0.5
     
