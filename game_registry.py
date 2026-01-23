@@ -6,7 +6,8 @@ from typing import Any, Callable, Dict, List, Optional, Protocol
 from config import ACTION_STRS_KUHN, Config
 from kuhn_poker import KuhnPoker, extract_action as extract_action_kuhn
 from liars_dice import LiarsDice, extract_action as extract_action_liars
-
+from liars_dice_memory import LiarsDiceMemory, extract_action as extract_action_memory
+from pathlib import Path
 
 class GameEnv(Protocol):
     """Minimal interface expected by the PPO + self-play loop."""
@@ -75,6 +76,15 @@ def _register_builtin_games() -> None:
     def make_liars_dice(num_dice: int = Config.NUM_DICE) -> LiarsDice:
         return LiarsDice(num_dice=num_dice)
 
+    def make_liars_dice_memory(num_dice: int = Config.NUM_DICE) -> LiarsDiceMemory:
+        # Use absolute path so it works from any directory
+        games_dir = Path(__file__).resolve().parent
+        return LiarsDiceMemory(
+            num_dice=num_dice,
+            history_source=games_dir / "selfplay_rollouts_ppo_database.jsonl",
+            num_history_games=200,
+        )
+
     register_game(
         GameSpec(
             name="kuhn_poker",
@@ -96,6 +106,18 @@ def _register_builtin_games() -> None:
             stop_sequences=[] if Config.ENABLE_THINKING else ["]"],
             system_prompt=Config.SYSTEM_PROMPT_LIARS_DICE,
             max_gen_tokens=Config.MAX_GEN_TOKENS_LIARS_DICE,
+        )
+    )
+
+    register_game(
+    GameSpec(
+        name="liars_dice_memory",
+        make_env=make_liars_dice_memory,
+        extract_action=extract_action_memory,
+        action_space=[],
+        stop_sequences=[] if Config.ENABLE_THINKING else ["]"],
+        system_prompt=Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY,
+        max_gen_tokens=Config.MAX_GEN_TOKENS_LIARS_DICE,
         )
     )
 

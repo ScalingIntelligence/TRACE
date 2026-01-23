@@ -264,7 +264,7 @@ def main():
 
 
         # Periodic tau2-bench evaluation (sharded across vLLM servers)
-        if Config.TAU2_EVAL_EVERY_ITERS and it % Config.TAU2_EVAL_EVERY_ITERS == 0:
+        if Config.TAU2_EVAL_EVERY_ITERS and it % Config.TAU2_EVAL_EVERY_ITERS == 0 and it > 0:
             ac.eval()
 
             inference_backend.sync_policy(ac.lm, vllm_adapter_dir)

@@ -15,9 +15,9 @@ export VLLM_RPC_TIMEOUT=2000
 export CUDA_VISIBLE_DEVICES=0 # then 1, then 2
 vllm serve Qwen/Qwen3-4B-Instruct-2507 \
   --host 0.0.0.0 \
-  --port 8077 \
+  --port 8082 \
   --dtype bfloat16 \
-  --max-model-len 40000 \
+  --max-model-len 55000 \
   --enable-lora \
   --max-loras 2 \
   --gpu-memory-utilization 0.8 \
@@ -33,13 +33,13 @@ vllm serve Qwen/Qwen3-4B-Instruct-2507 \
 ```bash
 # With vLLM server
 export CUDA_VISIBLE_DEVICES=3
-export VLLM_BASE_URLS="http://localhost:8075,http://localhost:8076,http://localhost:8077"
+export VLLM_BASE_URLS="http://localhost:8080,http://localhost:8081,http://localhost:8082"
 export VLLM_MODEL="Qwen/Qwen3-4B-Instruct-2507"
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
 export VLLM_TIMEOUT_S=2000
 python train_ppo.py --root /matx/u/$USER --use_constrained_decoding True #matx
 
-python train_ppo.py --game liars_dice --root /home/ubuntu/Alex/run3 
+python train_ppo.py --game liars_dice --root /home/ubuntu/Alex/run35 
 #pi liars dice
 
 

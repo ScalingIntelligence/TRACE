@@ -111,20 +111,19 @@ class Config:
     
     # Model settings
     MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
-    MAX_SEQ_LENGTH = 9000
+    MAX_SEQ_LENGTH = 30000
     LORA_RANK = 4
     LORA_ALPHA = 8
     
     # Game settings
     NUM_ROUNDS = 5
     NUM_DICE = 5
-    GAMES_PER_ITER = 512
-    
+    GAMES_PER_ITER = 64
     # PPO hyperparameters
     PPO_EPOCHS = 1
-    MINI_BATCH_SIZE = 64
-    STATS_CHUNK_SIZE = 32
-    LR = 1e-6
+    MINI_BATCH_SIZE = 2
+    STATS_CHUNK_SIZE = 2
+    LR = 5e-8
     CLIP_EPS = 0.2
     VF_COEF = 0.5
     
@@ -136,17 +135,17 @@ class Config:
     MAX_TOKENS_MATH_EVAL = 7000
     
     # Checkpointing and evaluation
-    SAVE_EVERY_ITERS = 30
-    EVAL_EVERY_ITERS = 10
-    EVAL_GAMES = 200
+    SAVE_EVERY_ITERS = 5
+    EVAL_EVERY_ITERS = 5
+    EVAL_GAMES = 100
     MATH_EVAL_SAMPLES = 50
     MATH_EVAL_EVERY_ITERS = 1000
 
     # tau2-bench evaluation (set TAU2_EVAL_EVERY_ITERS = 0 to disable)
-    TAU2_EVAL_EVERY_ITERS = 10
-    TAU2_EVAL_DOMAINS = ["airline", "retail", "telecom"]  # airline, retail, telecom, mock
+    TAU2_EVAL_EVERY_ITERS = 5
+    TAU2_EVAL_DOMAINS = ["airline", "retail"]  # airline, retail, telecom, mock
     TAU2_EVAL_NUM_TASKS = 5000       # Total tasks per domain
-    TAU2_EVAL_NUM_TRIALS = 2
+    TAU2_EVAL_NUM_TRIALS = 1
     TAU2_EVAL_MAX_CONCURRENCY_PER_SHARD = 40
     TAU2_EVAL_SEED = 42
 
@@ -171,6 +170,18 @@ class Config:
     + "Examples: [bid: 3, 4] or [call]\n"
     + ("" if ENABLE_THINKING else "Do not add any whitespace, punctuation, explanation, or extra text.\n")
     )
+
+    SYSTEM_PROMPT_LIARS_DICE_MEMORY = (
+        "You are playing Liar's Dice. We will give you a history of four previous games, and we will "
+        "roll your current dice while doing so.\n"
+        "Your current dice will be revealed as INTERRUPTIONS while you read game histories.\n"
+        "You MUST remember all dice values shown in the interruptions.\n"
+        + ("" if ENABLE_THINKING else "Respond with EXACTLY ONE action and NOTHING ELSE.\n")
+        + "Valid actions: [bid: quantity, face] or [call]\n"
+        + "Examples: [bid: 3, 4] or [call]\n"
+        + ("" if ENABLE_THINKING else "Do not add any whitespace, punctuation, explanation, or extra text.\n")
+    )
+
     
     MATH_SYSTEM_PROMPT = (
         "You are a helpful math assistant. Solve the following problem step by step. "
@@ -190,12 +201,14 @@ def get_system_prompt(game: str) -> str:
     """Get the system prompt for a game."""
     if game == "liars_dice":
         return Config.SYSTEM_PROMPT_LIARS_DICE
+    if game == "liars_dice_memory":
+        return Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY
     return Config.SYSTEM_PROMPT_KUHN
 
 
 def get_max_gen_tokens(game: str) -> int:
     """Get max generation tokens for a game."""
-    if game == "liars_dice":
+    if game in ("liars_dice", "liars_dice_memory"):
         return Config.MAX_GEN_TOKENS_LIARS_DICE
     return Config.MAX_GEN_TOKENS
 

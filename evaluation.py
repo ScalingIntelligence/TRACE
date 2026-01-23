@@ -682,7 +682,7 @@ def evaluate_tau2_bench(
 
         if failed:
             print(f"[tau2_eval] One or more shards failed for domain={domain}: {failed}")
-            continue
+            
 
         # Collect and parse results
         simulations_dir = tau2_data_dir / "simulations"
