@@ -7,7 +7,10 @@ from config import ACTION_STRS_KUHN, Config
 from kuhn_poker import KuhnPoker, extract_action as extract_action_kuhn
 from liars_dice import LiarsDice, extract_action as extract_action_liars
 from liars_dice_memory import LiarsDiceMemory, extract_action as extract_action_memory
+from liars_dice_memory_updated import LiarsDiceMemoryUpdated, extract_action as extract_action_memory_updated
+
 from pathlib import Path
+
 
 class GameEnv(Protocol):
     """Minimal interface expected by the PPO + self-play loop."""
@@ -85,6 +88,9 @@ def _register_builtin_games() -> None:
             num_history_games=200,
         )
 
+    def make_liars_dice_memory_updated(num_dice: int = Config.NUM_DICE) -> LiarsDiceMemoryUpdated:
+        return LiarsDiceMemoryUpdated(num_dice=num_dice, num_fake_games=40)
+
     register_game(
         GameSpec(
             name="kuhn_poker",
@@ -117,6 +123,18 @@ def _register_builtin_games() -> None:
         action_space=[],
         stop_sequences=[] if Config.ENABLE_THINKING else ["]"],
         system_prompt=Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY,
+        max_gen_tokens=Config.MAX_GEN_TOKENS_LIARS_DICE,
+        )
+    )
+
+    register_game(
+    GameSpec(
+        name="liars_dice_memory_updated",
+        make_env=make_liars_dice_memory_updated,
+        extract_action=extract_action_memory_updated,
+        action_space=[],
+        stop_sequences=[] if Config.ENABLE_THINKING else ["]"],
+        system_prompt=Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED,
         max_gen_tokens=Config.MAX_GEN_TOKENS_LIARS_DICE,
         )
     )

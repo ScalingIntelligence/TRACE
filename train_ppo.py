@@ -20,6 +20,7 @@ import torch
 import torch.nn.functional as F
 from pathlib import Path
 from tqdm import tqdm
+from datetime import datetime
 
 # Import our refactored modules
 from config import parse_args, setup_environment, Config
@@ -484,7 +485,7 @@ def main():
 
         # Save checkpoints
         if it % Config.SAVE_EVERY_ITERS == 0:
-            ckpt_dir = output_dir_path / f"ppo_ckpt_iter_{it}"
+            ckpt_dir = output_dir_path / f"ppo_ckpt_iter_{it}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             ac.lm.save_pretrained(str(ckpt_dir / "policy"))
             tokenizer.save_pretrained(str(ckpt_dir / "policy"))

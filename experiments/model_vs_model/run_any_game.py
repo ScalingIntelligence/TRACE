@@ -17,13 +17,14 @@ import argparse
 import random
 import requests
 from typing import Dict, List, Optional, Tuple
+from transformers import AutoTokenizer
 
 from config import Config
 from game_registry import get_game_spec, list_game_names
 
 
 class VLLMBackend:
-    """Backend for calling vLLM OpenAI-compatible server."""
+    """Backend for calling vLLM server using /completions endpoint (like training code)."""
     
     def __init__(self, base_url: str, model_name: str = "default", timeout: float = 300.0):
         self.base_url = base_url.rstrip("/")
@@ -42,22 +43,48 @@ class VLLMBackend:
                     self.model_name = models[0].get("id", model_name)
         except Exception:
             pass
+        
+        # Load tokenizer for prompt formatting (same as training code)
+        print(f"Loading tokenizer from {Config.MODEL_NAME}...")
+        self.tokenizer = AutoTokenizer.from_pretrained(Config.MODEL_NAME)
+    
+    def _format_prompt(self, messages: List[Dict]) -> str:
+        """Format messages using tokenizer's chat template with thinking enabled."""
+        try:
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=Config.ENABLE_THINKING,
+            )
+        except TypeError:
+            # Fallback for tokenizers that don't support enable_thinking
+            ids = self.tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                return_tensors="pt",
+            )[0]
+            return self.tokenizer.decode(ids, skip_special_tokens=False)
     
     def generate(self, messages: List[Dict], temperature: float, max_new_tokens: int) -> str:
+        # Format prompt locally (with thinking enabled), then use /completions
+        prompt = self._format_prompt(messages)
+        
         payload = {
             "model": self.model_name,
-            "messages": messages,
+            "prompt": prompt,
             "max_tokens": max_new_tokens,
             "temperature": temperature,
+            "top_p": 1.0,
         }
         
         r = self.session.post(
-            f"{self.base_url}/chat/completions",
+            f"{self.base_url}/completions",
             json=payload,
             timeout=self.timeout,
         )
         r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
+        return r.json()["choices"][0]["text"]
 
 
 def play_game(
@@ -160,7 +187,7 @@ def main():
                         help="Number of games to play")
     parser.add_argument("--temperature", type=float, default=0.7,
                         help="Sampling temperature")
-    parser.add_argument("--max_tokens", type=int, default=2048,
+    parser.add_argument("--max_tokens", type=int, default=8192,
                         help="Max tokens for generation")
     parser.add_argument("--seed", type=int, default=0,
                         help="Starting seed")

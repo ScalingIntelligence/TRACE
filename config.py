@@ -112,16 +112,16 @@ class Config:
     # Model settings
     MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
     MAX_SEQ_LENGTH = 30000
-    LORA_RANK = 4
+    LORA_RANK = 8
     LORA_ALPHA = 8
     
     # Game settings
     NUM_ROUNDS = 5
     NUM_DICE = 5
-    GAMES_PER_ITER = 64
+    GAMES_PER_ITER = 256
     # PPO hyperparameters
     PPO_EPOCHS = 1
-    MINI_BATCH_SIZE = 2
+    MINI_BATCH_SIZE = 8
     STATS_CHUNK_SIZE = 2
     LR = 5e-8
     CLIP_EPS = 0.2
@@ -135,14 +135,14 @@ class Config:
     MAX_TOKENS_MATH_EVAL = 7000
     
     # Checkpointing and evaluation
-    SAVE_EVERY_ITERS = 5
-    EVAL_EVERY_ITERS = 5
-    EVAL_GAMES = 100
+    SAVE_EVERY_ITERS = 10
+    EVAL_EVERY_ITERS = 10
+    EVAL_GAMES = 50
     MATH_EVAL_SAMPLES = 50
     MATH_EVAL_EVERY_ITERS = 1000
 
     # tau2-bench evaluation (set TAU2_EVAL_EVERY_ITERS = 0 to disable)
-    TAU2_EVAL_EVERY_ITERS = 5
+    TAU2_EVAL_EVERY_ITERS = 10
     TAU2_EVAL_DOMAINS = ["airline", "retail"]  # airline, retail, telecom, mock
     TAU2_EVAL_NUM_TASKS = 5000       # Total tasks per domain
     TAU2_EVAL_NUM_TRIALS = 1
@@ -182,7 +182,15 @@ class Config:
         + ("" if ENABLE_THINKING else "Do not add any whitespace, punctuation, explanation, or extra text.\n")
     )
 
-    
+    SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED = (
+    "You are playing Liar's Dice. The game is presented as a system log with User IDs.\n"
+    "Your dice are revealed one by one in log entries.\n"
+    "You will also see other games occuring at the same time.\n"
+    + "Valid actions: [bid: quantity, face] or [call]\n"
+    + "Examples: [bid: 3, 4] or [call]\n"
+    )
+
+
     MATH_SYSTEM_PROMPT = (
         "You are a helpful math assistant. Solve the following problem step by step. "
         "Put your final answer in \\boxed{}."
@@ -203,12 +211,14 @@ def get_system_prompt(game: str) -> str:
         return Config.SYSTEM_PROMPT_LIARS_DICE
     if game == "liars_dice_memory":
         return Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY
+    if game == "liars_dice_memory_updated": 
+        return Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED
     return Config.SYSTEM_PROMPT_KUHN
 
 
 def get_max_gen_tokens(game: str) -> int:
     """Get max generation tokens for a game."""
-    if game in ("liars_dice", "liars_dice_memory"):
+    if game in ("liars_dice", "liars_dice_memory", "liars_dice_memory_updated"):
         return Config.MAX_GEN_TOKENS_LIARS_DICE
     return Config.MAX_GEN_TOKENS
 
