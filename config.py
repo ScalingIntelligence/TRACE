@@ -121,7 +121,7 @@ class Config:
     GAMES_PER_ITER = 256
     # PPO hyperparameters
     PPO_EPOCHS = 1
-    MINI_BATCH_SIZE = 8
+    MINI_BATCH_SIZE = 2
     STATS_CHUNK_SIZE = 2
     LR = 5e-8
     CLIP_EPS = 0.2

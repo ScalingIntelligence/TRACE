@@ -205,7 +205,6 @@ def collect_games(
                 illegal_move = (act is None)
                 if act is None:
                     extraction_failures += 1
-                    act = rng.choice(legal)
 
                 episode_steps[i].append((msgs, act, pid, completion))
                 envs[i].step(act)
@@ -249,7 +248,8 @@ def collect_games(
 
                 samples.append(StepSample(
                     prompt_msgs=pm,
-                    action_str=act,
+                    # action_str=act,
+                    action_str=act if act is not None else completion[:350] + "\n...\n" + completion[-50:],
                     player_id=pid,
                     ret=player_reward,
                     completion_text=completion,

@@ -70,4 +70,4 @@ unsloth_compiled_cache/
 unsloth_compiled_cache/
 *.jsonl
 
-evals/benchmarks/tau2_bench_eval/data/
+evals/benchmarks/tau2_bench_eval/data/game_evals/environment_testing/results/

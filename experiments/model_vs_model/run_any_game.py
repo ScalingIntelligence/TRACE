@@ -125,8 +125,7 @@ def play_game(
         action = game_spec.extract_action(raw_output, legal_actions)
         
         if action is None:
-            action = random.choice(legal_actions)
-            action_status = "RANDOM"
+            action_status = "INVALID"
         else:
             action_status = "OK"
         

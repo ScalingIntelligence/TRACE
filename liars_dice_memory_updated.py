@@ -11,8 +11,10 @@ import re
 import random
 from typing import List, Optional, Dict
 
-_BID_RE = re.compile(r"\[bid\s*:?\s*(\d+)[,\s]+(\d+)\]", re.IGNORECASE)
-_CALL_RE = re.compile(r"\[call\]", re.IGNORECASE)
+# Pattern to match [dice_numbers][bid: X, Y] or [dice_numbers][call]
+# dice_numbers is like [1,2,3,4,5] or [1, 2, 3, 4, 5]
+_DICE_BID_RE = re.compile(r"\[([\d,\s]+)\]\s*\[bid\s*:?\s*(\d+)[,\s]+(\d+)\]", re.IGNORECASE)
+_DICE_CALL_RE = re.compile(r"\[([\d,\s]+)\]\s*\[call\]", re.IGNORECASE)
 
 
 def extract_action(text: str, legal_actions: List[str]):
@@ -22,13 +24,21 @@ def extract_action(text: str, legal_actions: List[str]):
 
     candidates = []
 
-    for match in _BID_RE.finditer(text):
-        quantity, face = match.groups()
-        action = f"[bid: {quantity}, {face}]"
+    for match in _DICE_BID_RE.finditer(text):
+        dice_str, quantity, face = match.groups()
+        # Parse dice numbers
+        dice_numbers = [int(x.strip()) for x in dice_str.split(',') if x.strip()]
+        dice_numbers_str = '[' + ','.join(map(str, sorted(dice_numbers))) + ']'
+        action = f"{dice_numbers_str}[bid: {quantity}, {face}]"
         candidates.append((match.start(), action))
 
-    for match in _CALL_RE.finditer(text):
-        candidates.append((match.start(), "[call]"))
+    for match in _DICE_CALL_RE.finditer(text):
+        dice_str = match.group(1)
+        # Parse dice numbers
+        dice_numbers = [int(x.strip()) for x in dice_str.split(',') if x.strip()]
+        dice_numbers_str = '[' + ','.join(map(str, sorted(dice_numbers))) + ']'
+        action = f"{dice_numbers_str}[call]"
+        candidates.append((match.start(), action))
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     for _, action in candidates:
@@ -326,13 +336,15 @@ class LiarsDiceMemoryUpdated:
             action = action_info["action"]
             acting_id = self.player_ids[acting_player]
             
-            if action == "[call]":
+            # Parse action to extract dice_numbers and action type
+            match = _DICE_CALL_RE.search(action)
+            if match:
                 lines.append(f"User {acting_id} called.")
             else:
-                # Parse bid
-                match = _BID_RE.search(action)
+                # Try bid format
+                match = _DICE_BID_RE.search(action)
                 if match:
-                    q, f = match.groups()
+                    dice_str, q, f = match.groups()
                     lines.append(f"User {acting_id} bid: {q}x[Face:{f}].")
         
         # Drain remaining fake events (use up to 3x base_events)
@@ -347,8 +359,9 @@ class LiarsDiceMemoryUpdated:
         lines.append(f"- You are only playing a game with your opponent (User ID: {opp_id})")
         lines.append(f"- Each player has {self.num_dice} dice ({self.num_dice * 2} total in play)")
         lines.append("- Bids claim a MINIMUM count of a face value across ALL dice")
-        lines.append("- '[bid: X, Y]': Claim at least X dice show face Y (both players combined)")
-        lines.append("- '[call]': Challenge the last bid")
+        lines.append("- You should preface your action with the dice you have.")
+        lines.append("- '[dice_numbers][bid: X, Y]': Claim at least X dice show face Y (both players combined)")
+        lines.append("- '[dice_numbers][call]': Challenge the last bid")
         lines.append("- If called and bid is WRONG (actual < bid): bidder loses")
         lines.append("- If called and bid is CORRECT (actual >= bid): caller loses")
         lines.append("- New bids must be HIGHER: more quantity OR same quantity with higher face")
@@ -375,21 +388,25 @@ class LiarsDiceMemoryUpdated:
         if self.done:
             return []
 
+        # Get current player's dice and format as [dice_numbers]
+        player_dice = sorted(self.dice[self.current_player])
+        dice_numbers_str = '[' + ','.join(map(str, player_dice)) + ']'
+
         actions = []
         curr_q = self.current_bid_quantity
         curr_f = self.current_bid_face
         total_dice = self.num_dice * 2
 
         if self.last_bidder is not None:
-            actions.append("[call]")
+            actions.append(f"{dice_numbers_str}[call]")
 
         if curr_q > 0 and curr_f < 6:
             for f in range(curr_f + 1, 7):
-                actions.append(f"[bid: {curr_q}, {f}]")
+                actions.append(f"{dice_numbers_str}[bid: {curr_q}, {f}]")
 
         for q in range(curr_q + 1, total_dice + 1):
             for f in range(1, 7):
-                actions.append(f"[bid: {q}, {f}]")
+                actions.append(f"{dice_numbers_str}[bid: {q}, {f}]")
 
         return actions
 
@@ -402,6 +419,43 @@ class LiarsDiceMemoryUpdated:
         if self.done:
             return
 
+        if not action:
+            self._terminate_invalid(self.current_player)
+            return
+
+        # Extract and validate dice_numbers
+        player_dice = sorted(self.dice[self.current_player])
+        dice_numbers = None
+        action_type = None
+        quantity = None
+        face = None
+
+        # Try to match bid format
+        match = _DICE_BID_RE.search(action)
+        if match:
+            dice_str, qty_str, face_str = match.groups()
+            dice_numbers = [int(x.strip()) for x in dice_str.split(',') if x.strip()]
+            quantity = int(qty_str)
+            face = int(face_str)
+            action_type = "bid"
+        else:
+            # Try to match call format
+            match = _DICE_CALL_RE.search(action)
+            if match:
+                dice_str = match.group(1)
+                dice_numbers = [int(x.strip()) for x in dice_str.split(',') if x.strip()]
+                action_type = "call"
+            else:
+                # Invalid format - no dice_numbers prefix
+                self._terminate_invalid(self.current_player)
+                return
+
+        # Validate dice_numbers match player's actual dice
+        if sorted(dice_numbers) != player_dice:
+            self._terminate_invalid(self.current_player)
+            return
+
+        # Check if action is legal (bid quantity/face or call)
         legal = self.legal_actions()
         if action not in legal:
             self._terminate_invalid(self.current_player)
@@ -413,18 +467,15 @@ class LiarsDiceMemoryUpdated:
             "action": action,
         })
 
-        if action == "[call]":
+        if action_type == "call":
             self._resolve_call()
             return
 
-        match = _BID_RE.search(action)
-        if match:
-            quantity = int(match.group(1))
-            face = int(match.group(2))
-            self.current_bid_quantity = quantity
-            self.current_bid_face = face
-            self.last_bidder = self.current_player
-            self.current_player = 1 - self.current_player
+        # action_type == "bid"
+        self.current_bid_quantity = quantity
+        self.current_bid_face = face
+        self.last_bidder = self.current_player
+        self.current_player = 1 - self.current_player
 
     def _resolve_call(self):
         """Resolve a call action."""
