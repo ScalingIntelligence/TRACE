@@ -14,6 +14,7 @@ GAMES_PATH = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(GAMES_PATH))
 
 import argparse
+import json
 import random
 import requests
 from typing import Dict, List, Optional, Tuple
@@ -21,7 +22,13 @@ from transformers import AutoTokenizer
 
 from config import Config
 from game_registry import get_game_spec, list_game_names
+from liars_dice_tools import extract_tool_call
 
+_TOOL_CALL_GAMES = {
+    "liars_dice_tool",
+    "liars_dice_memory_tool",
+    "liars_dice_memory_updated_tool",
+}
 
 class VLLMBackend:
     """Backend for calling vLLM server using /completions endpoint (like training code)."""
@@ -102,9 +109,13 @@ def play_game(
     env.reset(seed)
     
     game_log = []
+    invalid_tool_calls = 0
+    tool_enabled = game_spec.name in _TOOL_CALL_GAMES
     
     if verbose:
         print(f"\n    --- Game (seed={seed}) ---")
+        print(f"\n--- SYSTEM PROMPT ---")
+        print(game_spec.system_prompt)
     
     while not env.done:
         player = env.current_player
@@ -122,12 +133,20 @@ def play_game(
             max_new_tokens=max_new_tokens,
         )
         
+        tool_call = extract_tool_call(raw_output) if tool_enabled else None
         action = game_spec.extract_action(raw_output, legal_actions)
         
         if action is None:
-            action_status = "INVALID"
+            action = random.choice(legal_actions)
+            if tool_enabled:
+                action_status = "INVALID_TOOL" if tool_call is not None else "PARSE_FAIL"
+            else:
+                action_status = "INVALID"
         else:
             action_status = "OK"
+
+        if tool_call is not None and action_status == "INVALID_TOOL":
+            invalid_tool_calls += 1
         
         if verbose:
             print(f"\n{'='*70}")
@@ -141,12 +160,16 @@ def play_game(
                 print(f"... and {len(legal_actions) - 8} more")
             print(f"\n--- MODEL OUTPUT ---")
             print(raw_output)
+            if tool_call is not None:
+                print(f"\n--- TOOL CALL (parsed JSON) ---")
+                print(json.dumps(tool_call, indent=2, sort_keys=True))
             print(f"\n--- EXTRACTED ACTION: {action} ({action_status}) ---")
         
         game_log.append({
             "player": player,
             "legal_actions": legal_actions,
             "raw_output": raw_output,
+            "tool_call": tool_call,
             "action": action,
             "action_status": action_status,
         })
@@ -172,6 +195,7 @@ def play_game(
         "winner": winner,
         "rewards": env.rewards,
         "invalid_player": env.invalid_player,
+        "invalid_tool_calls": invalid_tool_calls,
         "game_log": game_log,
     }
 
@@ -218,6 +242,7 @@ def main():
     wins = {0: 0, 1: 0}
     draws = 0
     invalid_count = 0
+    invalid_tool_calls = 0
     
     for i in range(args.num_games):
         seed = args.seed + i
@@ -237,10 +262,15 @@ def main():
         
         if result["invalid_player"] is not None:
             invalid_count += 1
+        invalid_tool_calls += int(result.get("invalid_tool_calls", 0))
         
         # Progress
         if (i + 1) % 5 == 0 or i == args.num_games - 1:
-            print(f"Game {i+1}/{args.num_games}: P0={wins[0]} ({wins[0]/(i+1):.1%}), P1={wins[1]} ({wins[1]/(i+1):.1%}), Draws={draws}, Invalid={invalid_count}")
+            print(
+                f"Game {i+1}/{args.num_games}: P0={wins[0]} ({wins[0]/(i+1):.1%}), "
+                f"P1={wins[1]} ({wins[1]/(i+1):.1%}), Draws={draws}, "
+                f"Invalid={invalid_count}, InvalidToolCalls={invalid_tool_calls}"
+            )
     
     print("\n" + "=" * 60)
     print("FINAL RESULTS")
@@ -249,6 +279,7 @@ def main():
     print(f"Player 1 wins: {wins[1]} ({wins[1]/args.num_games:.1%})")
     print(f"Draws: {draws} ({draws/args.num_games:.1%})")
     print(f"Invalid moves: {invalid_count}")
+    print(f"Invalid tool calls: {invalid_tool_calls}")
 
 
 if __name__ == "__main__":
