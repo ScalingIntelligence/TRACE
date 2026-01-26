@@ -39,6 +39,13 @@ def parse_args():
     default=None,
     help="Path to checkpoint directory to resume from (e.g., /path/to/ppo_ckpt_iter_210)"
     )
+
+    parser.add_argument(
+        "--rollout_log",
+        type=str,
+        default="selfplay_rollouts_ppo.jsonl",
+        help="Filename for rollout logs"
+    )
     return parser.parse_args()
 
 
@@ -73,12 +80,15 @@ def setup_environment(args):
     os.environ.setdefault("WANDB_DIR", str(wandb_dir))
     os.environ.setdefault("WANDB_PROJECT", "games")
     
+    
     # Setup output directory
     output_dir_path = root / "workplace" / "games" / "outputs"
     output_dir_path.mkdir(parents=True, exist_ok=True)
     
     # Rollout log path
-    rollout_log_path = Path(__file__).resolve().parent / "selfplay_rollouts_ppo.jsonl"
+    gameplay_dir = Path(__file__).resolve().parent / "gameplay_rollouts"
+    gameplay_dir.mkdir(exist_ok=True)
+    rollout_log_path = gameplay_dir / args.rollout_log
     
     # Optional: allocator fragmentation guard
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
@@ -111,19 +121,19 @@ class Config:
     
     # Model settings
     MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
-    MAX_SEQ_LENGTH = 30000
+    MAX_SEQ_LENGTH = 16000
     LORA_RANK = 8
     LORA_ALPHA = 8
     
     # Game settings
     NUM_ROUNDS = 5
     NUM_DICE = 5
-    GAMES_PER_ITER = 256
+    GAMES_PER_ITER = 8
     # PPO hyperparameters
     PPO_EPOCHS = 1
-    MINI_BATCH_SIZE = 2
-    STATS_CHUNK_SIZE = 2
-    LR = 5e-8
+    MINI_BATCH_SIZE = 4
+    STATS_CHUNK_SIZE = 4
+    LR = 2e-7
     CLIP_EPS = 0.2
     VF_COEF = 0.5
     
@@ -135,8 +145,8 @@ class Config:
     MAX_TOKENS_MATH_EVAL = 7000
     
     # Checkpointing and evaluation
-    SAVE_EVERY_ITERS = 10
-    EVAL_EVERY_ITERS = 10
+    SAVE_EVERY_ITERS = 5
+    EVAL_EVERY_ITERS = 10000
     EVAL_GAMES = 50
     MATH_EVAL_SAMPLES = 50
     MATH_EVAL_EVERY_ITERS = 1000
@@ -145,7 +155,7 @@ class Config:
     TAU2_EVAL_EVERY_ITERS = 10
     TAU2_EVAL_DOMAINS = ["airline", "retail"]  # airline, retail, telecom, mock
     TAU2_EVAL_NUM_TASKS = 5000       # Total tasks per domain
-    TAU2_EVAL_NUM_TRIALS = 1
+    TAU2_EVAL_NUM_TRIALS = 4
     TAU2_EVAL_MAX_CONCURRENCY_PER_SHARD = 40
     TAU2_EVAL_SEED = 42
 
@@ -190,6 +200,15 @@ class Config:
     + "Examples: [bid: 3, 4] or [call]\n"
     )
 
+    SYSTEM_PROMPT_MEMORY_RECALL = (
+    "You are doing a memory recall task.\n"
+    "Read the system log and find YOUR dice values (matching your User ID).\n"
+    "Reason through it to get the right answer.\n"
+    "Respond with: [dice: A, B, C, D, E]\n"
+    "Example: [dice: 3, 1, 4, 6, 2]\n"
+    )
+
+
 
     MATH_SYSTEM_PROMPT = (
         "You are a helpful math assistant. Solve the following problem step by step. "
@@ -213,6 +232,8 @@ def get_system_prompt(game: str) -> str:
         return Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY
     if game == "liars_dice_memory_updated": 
         return Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED
+    if game == "memory_recall":
+        return Config.SYSTEM_PROMPT_MEMORY_RECALL
     return Config.SYSTEM_PROMPT_KUHN
 
 

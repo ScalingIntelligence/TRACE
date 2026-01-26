@@ -8,6 +8,7 @@ from kuhn_poker import KuhnPoker, extract_action as extract_action_kuhn
 from liars_dice import LiarsDice, extract_action as extract_action_liars
 from liars_dice_memory import LiarsDiceMemory, extract_action as extract_action_memory
 from liars_dice_memory_updated import LiarsDiceMemoryUpdated, extract_action as extract_action_memory_updated
+from memory_recall_game import MemoryRecallGame, extract_action as extract_action_recall
 
 from pathlib import Path
 
@@ -91,6 +92,11 @@ def _register_builtin_games() -> None:
     def make_liars_dice_memory_updated(num_dice: int = Config.NUM_DICE) -> LiarsDiceMemoryUpdated:
         return LiarsDiceMemoryUpdated(num_dice=num_dice, num_fake_games=40)
 
+    def make_memory_recall(num_dice: int = Config.NUM_DICE) -> MemoryRecallGame:
+        return MemoryRecallGame(num_dice=num_dice, num_fake_games=100)
+
+
+
     register_game(
         GameSpec(
             name="kuhn_poker",
@@ -135,6 +141,18 @@ def _register_builtin_games() -> None:
         action_space=[],
         stop_sequences=[] if Config.ENABLE_THINKING else ["]"],
         system_prompt=Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED,
+        max_gen_tokens=Config.MAX_GEN_TOKENS_LIARS_DICE,
+        )
+    )
+
+    register_game(
+    GameSpec(
+        name="memory_recall",
+        make_env=make_memory_recall,
+        extract_action=extract_action_recall,
+        action_space=[],
+        stop_sequences=[] if Config.ENABLE_THINKING else ["]"],
+        system_prompt=Config.SYSTEM_PROMPT_MEMORY_RECALL,
         max_gen_tokens=Config.MAX_GEN_TOKENS_LIARS_DICE,
         )
     )
