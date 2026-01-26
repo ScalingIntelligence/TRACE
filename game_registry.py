@@ -8,6 +8,11 @@ from kuhn_poker import KuhnPoker, extract_action as extract_action_kuhn
 from liars_dice import LiarsDice, extract_action as extract_action_liars
 from liars_dice_memory import LiarsDiceMemory, extract_action as extract_action_memory
 from liars_dice_memory_updated import LiarsDiceMemoryUpdated, extract_action as extract_action_memory_updated
+from liars_dice_tools import (
+    extract_action_from_tool_call,
+    LIARS_DICE_TOOL_REGISTRY_NO_ID,
+    LIARS_DICE_TOOL_REGISTRY_WITH_ID,
+)
 from memory_recall_game import MemoryRecallGame, extract_action as extract_action_recall
 
 from pathlib import Path
@@ -74,6 +79,12 @@ def list_game_names() -> List[str]:
 
 
 def _register_builtin_games() -> None:
+    def extract_tool_with_id(text: str, legal_actions: List[str]) -> Optional[str]:
+        return extract_action_from_tool_call(text, legal_actions, LIARS_DICE_TOOL_REGISTRY_WITH_ID)
+
+    def extract_tool_no_id(text: str, legal_actions: List[str]) -> Optional[str]:
+        return extract_action_from_tool_call(text, legal_actions, LIARS_DICE_TOOL_REGISTRY_NO_ID)
+
     def make_kuhn(num_rounds: int = Config.NUM_ROUNDS) -> KuhnPoker:
         return KuhnPoker(num_rounds=num_rounds)
 
@@ -142,6 +153,42 @@ def _register_builtin_games() -> None:
         stop_sequences=[] if Config.ENABLE_THINKING else ["]"],
         system_prompt=Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED,
         max_gen_tokens=Config.MAX_GEN_TOKENS_LIARS_DICE,
+        )
+    )
+
+    register_game(
+        GameSpec(
+            name="liars_dice_tool",
+            make_env=make_liars_dice,
+            extract_action=extract_tool_with_id,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=Config.SYSTEM_PROMPT_LIARS_DICE_TOOL,
+            max_gen_tokens=Config.MAX_GEN_TOKENS_LIARS_DICE,
+        )
+    )
+
+    register_game(
+        GameSpec(
+            name="liars_dice_memory_tool",
+            make_env=make_liars_dice_memory,
+            extract_action=extract_tool_no_id,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY_TOOL,
+            max_gen_tokens=Config.MAX_GEN_TOKENS_LIARS_DICE,
+        )
+    )
+
+    register_game(
+        GameSpec(
+            name="liars_dice_memory_updated_tool",
+            make_env=make_liars_dice_memory_updated,
+            extract_action=extract_tool_no_id,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED_TOOL,
+            max_gen_tokens=Config.MAX_GEN_TOKENS_LIARS_DICE,
         )
     )
 

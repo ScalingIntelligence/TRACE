@@ -13,6 +13,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
 from config import Config
+from liars_dice_tools import (
+    action_string_to_tool_call,
+    extract_tool_call_with_text,
+    tool_call_to_json,
+)
 
 from game_registry import GameSpec
 from inference import InferenceBackend, HFLocalBackend, messages_for_game, build_prompt_text, generate_completion
@@ -131,6 +136,30 @@ def values_from_hidden(last_hidden: torch.Tensor, value_head, prompt_lens: List[
 # =========================
 # Self-play collector
 # =========================
+_TOOL_CALL_GAMES = {
+    "liars_dice_tool",
+    "liars_dice_memory_tool",
+    "liars_dice_memory_updated_tool",
+}
+
+
+def _action_text_for_training(
+    game_spec: GameSpec,
+    completion: str,
+    env_action: str,
+    valid_tool_call: bool,
+) -> str:
+    if game_spec.name not in _TOOL_CALL_GAMES:
+        return env_action
+    if valid_tool_call:
+        tool_call = extract_tool_call_with_text(completion)
+        if tool_call is not None:
+            return tool_call[1]
+    tool_call_dict = action_string_to_tool_call(env_action)
+    tool_json = tool_call_to_json(tool_call_dict) if tool_call_dict else None
+    return tool_json or env_action
+
+
 def collect_games(
     *,
     model,
@@ -160,7 +189,7 @@ def collect_games(
     if backend.supports_batch():
         envs = []
         game_ids: List[int] = []
-        episode_steps: List[List[Tuple[list, str, int, str]]] = []
+        episode_steps: List[List[Tuple[list, str, int, str, str]]] = []
         turn_idxs = [0 for _ in range(num_games)]
 
         for g in range(num_games):
@@ -206,7 +235,13 @@ def collect_games(
                 if act is None:
                     extraction_failures += 1
 
-                episode_steps[i].append((msgs, act, pid, completion))
+                action_text = _action_text_for_training(
+                    game_spec,
+                    completion,
+                    act,
+                    valid_tool_call=not illegal_move,
+                )
+                episode_steps[i].append((msgs, act, pid, completion, action_text))
                 envs[i].step(act)
 
                 turn_idxs[i] += 1
@@ -239,7 +274,7 @@ def collect_games(
                 "timestamp": time.time(),
             })
 
-            for pm, act, pid, completion in episode_steps[i]:
+            for pm, act, pid, completion, action_text in episode_steps[i]:
                 player_reward = float(env.rewards[pid])
                 if role_baseline_ema is not None:
                     baseline = role_baseline_ema[pid].get()
@@ -248,8 +283,11 @@ def collect_games(
 
                 samples.append(StepSample(
                     prompt_msgs=pm,
-                    # action_str=act,
-                    action_str=act if act is not None else completion[:350] + "\n...\n" + completion[-50:],
+                    action_str=(
+                        action_text
+                        if action_text is not None
+                        else (act if act is not None else completion[:350] + "\n...\n" + completion[-50:])
+                    ),
                     player_id=pid,
                     ret=player_reward,
                     completion_text=completion,
@@ -261,7 +299,7 @@ def collect_games(
             env = game_spec.make_env(**env_kwargs)
             env.reset(rng.randint(0, 2**31 - 1))
 
-            episode_steps: List[Tuple[list, str, int, str]] = []
+            episode_steps: List[Tuple[list, str, int, str, str]] = []
             turn_idx = 0
 
             while not env.done:
@@ -284,11 +322,18 @@ def collect_games(
                 t1 = time.time()
 
                 act = game_spec.extract_action(completion, legal)
+                illegal_move = (act is None)
                 if act is None:
                     extraction_failures += 1
                     act = rng.choice(legal)
 
-                episode_steps.append((messages_for_game(pid, obs, game_spec), act, pid, completion))
+                action_text = _action_text_for_training(
+                    game_spec,
+                    completion,
+                    act,
+                    valid_tool_call=not illegal_move,
+                )
+                episode_steps.append((messages_for_game(pid, obs, game_spec), act, pid, completion, action_text))
                 env.step(act)
 
                 turn_idx += 1
@@ -321,7 +366,7 @@ def collect_games(
             })
 
            
-            for pm, act, pid, completion in episode_steps:
+            for pm, act, pid, completion, action_text in episode_steps:
                 player_reward = float(env.rewards[pid])
                 if role_baseline_ema is not None:
                     baseline = role_baseline_ema[pid].get()
@@ -330,7 +375,7 @@ def collect_games(
 
                 samples.append(StepSample(
                     prompt_msgs=pm,
-                    action_str=act,
+                    action_str=action_text,
                     player_id=pid,
                     ret=float(player_reward),
                     completion_text=completion,

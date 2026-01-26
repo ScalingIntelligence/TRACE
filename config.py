@@ -7,6 +7,12 @@ import os
 import torch
 from pathlib import Path
 
+from liars_dice_tools import (
+    LIARS_DICE_TOOL_SPECS_NO_ID,
+    LIARS_DICE_TOOL_SPECS_WITH_ID,
+    build_tool_system_prompt,
+)
+
 
 # =========================
 # Parse command-line arguments
@@ -174,11 +180,11 @@ class Config:
         + ("" if ENABLE_THINKING else "Do not add any whitespace, punctuation, explanation, or extra text.\n")
     )
     SYSTEM_PROMPT_LIARS_DICE = (
-    "You are playing Liar's Dice.\n"
-    + ("" if ENABLE_THINKING else "Respond with EXACTLY ONE action and NOTHING ELSE.\n")
-    + "Valid actions: [bid: quantity, face] or [call]\n"
-    + "Examples: [bid: 3, 4] or [call]\n"
-    + ("" if ENABLE_THINKING else "Do not add any whitespace, punctuation, explanation, or extra text.\n")
+        "You are playing Liar's Dice.\n"
+        + ("" if ENABLE_THINKING else "Respond with EXACTLY ONE action and NOTHING ELSE.\n")
+        + "Valid actions: [bid: quantity, face] or [call]\n"
+        + "Examples: [bid: 3, 4] or [call]\n"
+        + ("" if ENABLE_THINKING else "Do not add any whitespace, punctuation, explanation, or extra text.\n")
     )
 
     SYSTEM_PROMPT_LIARS_DICE_MEMORY = (
@@ -193,11 +199,26 @@ class Config:
     )
 
     SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED = (
-    "You are playing Liar's Dice. The game is presented as a system log with User IDs.\n"
-    "Your dice are revealed one by one in log entries.\n"
-    "You will also see other games occuring at the same time.\n"
-    + "Valid actions: [bid: quantity, face] or [call]\n"
-    + "Examples: [bid: 3, 4] or [call]\n"
+        "You are playing Liar's Dice. The game is presented as a system log with User IDs.\n"
+        "Your dice are revealed one by one in log entries.\n"
+        "You will also see other games occuring at the same time.\n"
+        + "Valid actions: [bid: quantity, face] or [call]\n"
+        + "Examples: [bid: 3, 4] or [call]\n"
+    )
+
+    SYSTEM_PROMPT_LIARS_DICE_TOOL = build_tool_system_prompt(
+        SYSTEM_PROMPT_LIARS_DICE,
+        LIARS_DICE_TOOL_SPECS_WITH_ID,
+    )
+
+    SYSTEM_PROMPT_LIARS_DICE_MEMORY_TOOL = build_tool_system_prompt(
+        SYSTEM_PROMPT_LIARS_DICE_MEMORY,
+        LIARS_DICE_TOOL_SPECS_NO_ID,
+    )
+
+    SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED_TOOL = build_tool_system_prompt(
+        SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED,
+        LIARS_DICE_TOOL_SPECS_NO_ID,
     )
 
     SYSTEM_PROMPT_MEMORY_RECALL = (
@@ -228,10 +249,16 @@ def get_system_prompt(game: str) -> str:
     """Get the system prompt for a game."""
     if game == "liars_dice":
         return Config.SYSTEM_PROMPT_LIARS_DICE
+    if game == "liars_dice_tool":
+        return Config.SYSTEM_PROMPT_LIARS_DICE_TOOL
     if game == "liars_dice_memory":
         return Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY
+    if game == "liars_dice_memory_tool":
+        return Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY_TOOL
     if game == "liars_dice_memory_updated": 
         return Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED
+    if game == "liars_dice_memory_updated_tool":
+        return Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED_TOOL
     if game == "memory_recall":
         return Config.SYSTEM_PROMPT_MEMORY_RECALL
     return Config.SYSTEM_PROMPT_KUHN
@@ -239,7 +266,14 @@ def get_system_prompt(game: str) -> str:
 
 def get_max_gen_tokens(game: str) -> int:
     """Get max generation tokens for a game."""
-    if game in ("liars_dice", "liars_dice_memory", "liars_dice_memory_updated"):
+    if game in (
+        "liars_dice",
+        "liars_dice_tool",
+        "liars_dice_memory",
+        "liars_dice_memory_tool",
+        "liars_dice_memory_updated",
+        "liars_dice_memory_updated_tool",
+    ):
         return Config.MAX_GEN_TOKENS_LIARS_DICE
     return Config.MAX_GEN_TOKENS
 
