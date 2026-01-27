@@ -100,35 +100,118 @@ def logprob_action_tokens(
     prompt_lens: List[int],
     action_lens: List[int],
     normalize_by_len: bool = True,
+    chunk_size: int = 512,
 ) -> torch.Tensor:
-    """Compute log probability of action tokens."""
-    logp = F.log_softmax(logits.float(), dim=-1)  # [B,T,V] fp32
-    B, T, _V = logp.shape
-    out = torch.zeros((B,), device=logp.device, dtype=torch.float32)
-    for i in range(B):
-        pL = prompt_lens[i]
-        aL = action_lens[i]
-        s = 0.0
-        for k in range(aL):
-            tok_pos = pL + k
-            if tok_pos <= 0 or tok_pos >= T:
-                continue
-            tok_id = int(input_ids[i, tok_pos].item())
-            s = s + logp[i, tok_pos - 1, tok_id]
-        if normalize_by_len:
-            s = s / max(1, aL)
-        out[i] = s
-    return out
+    """
+    Compute log probability of action tokens (memory-efficient chunked implementation).
+    
+    Processes the sequence in chunks to avoid OOM on long sequences.
+    Only computes log-probs for the action token regions, skipping prompt tokens entirely.
+    
+    Args:
+        logits: Model output logits [B, T, V]
+        input_ids: Input token IDs [B, T]
+        prompt_lens: Length of prompt for each sample
+        action_lens: Length of action for each sample
+        normalize_by_len: Whether to normalize by action length
+        chunk_size: Number of positions to process at once (lower = less memory)
+    
+    Returns:
+        Log probabilities for each sample [B]
+    """
+    B, T, V = logits.shape
+    device = logits.device
+    
+    # Handle edge case
+    if T < 2:
+        return torch.zeros(B, device=device, dtype=torch.float32)
+    
+    # Convert to tensors once
+    prompt_lens_t = torch.tensor(prompt_lens, device=device, dtype=torch.long)
+    action_lens_t = torch.tensor(action_lens, device=device, dtype=torch.long)
+    
+    # Compute action boundaries (in the shifted indexing)
+    # To predict token at input position P, we use logits at position P-1
+    action_start = (prompt_lens_t - 1).clamp(min=0)  # [B]
+    action_end = (action_start + action_lens_t).clamp(max=T - 1)  # [B]
+    
+    # Result accumulator
+    summed = torch.zeros(B, device=device, dtype=torch.float32)
+    
+    # Process in chunks along the sequence dimension
+    # Only process positions that might contain action tokens
+    global_start = int(action_start.min().item())
+    global_end = int(action_end.max().item())
+    
+    for chunk_start in range(global_start, global_end, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, global_end, T - 1)
+        
+        if chunk_end <= chunk_start:
+            continue
+        
+        # Get logits and labels for this chunk only
+        # logits[:, chunk_start:chunk_end, :] predicts tokens at positions chunk_start+1 to chunk_end+1
+        chunk_logits = logits[:, chunk_start:chunk_end, :]  # [B, chunk_len, V]
+        chunk_labels = input_ids[:, chunk_start + 1:chunk_end + 1]  # [B, chunk_len]
+        
+        chunk_len = chunk_end - chunk_start
+        
+        # Compute cross-entropy for this chunk
+        flat_logits = chunk_logits.reshape(-1, V)  # [B * chunk_len, V]
+        flat_labels = chunk_labels.reshape(-1).clamp(0, V - 1)  # [B * chunk_len]
+        
+        chunk_nll = F.cross_entropy(flat_logits, flat_labels, reduction='none')  # [B * chunk_len]
+        chunk_logp = -chunk_nll.view(B, chunk_len)  # [B, chunk_len]
+        
+        # Free memory
+        del chunk_logits, chunk_labels, flat_logits, flat_labels, chunk_nll
+        
+        # Create mask for this chunk: which positions are in the action region?
+        chunk_positions = torch.arange(chunk_start, chunk_end, device=device).unsqueeze(0)  # [1, chunk_len]
+        chunk_mask = (chunk_positions >= action_start.unsqueeze(1)) & \
+                     (chunk_positions < action_end.unsqueeze(1))  # [B, chunk_len]
+        
+        # Accumulate masked log-probs
+        summed += (chunk_logp * chunk_mask.float()).sum(dim=1)
+        
+        del chunk_logp, chunk_mask
+    
+    # Normalize by action length if requested
+    if normalize_by_len:
+        summed = summed / action_lens_t.float().clamp(min=1)
+    
+    return summed
 
 
 def values_from_hidden(last_hidden: torch.Tensor, value_head, prompt_lens: List[int]) -> torch.Tensor:
-    """Extract value predictions from hidden states."""
+    """
+    Extract value predictions from hidden states (vectorized implementation).
+    
+    Gets the hidden state at the last prompt token position for each sample,
+    then passes through the value head.
+    
+    Args:
+        last_hidden: Hidden states from model [B, T, H]
+        value_head: Value head network
+        prompt_lens: Length of prompt for each sample
+    
+    Returns:
+        Value predictions [B]
+    """
     B, T, H = last_hidden.shape
-    hs = []
-    for i in range(B):
-        idx = max(0, min(T - 1, prompt_lens[i] - 1))
-        hs.append(last_hidden[i, idx, :])
-    hs = torch.stack(hs, dim=0)
+    device = last_hidden.device
+    
+    # Convert prompt lengths to tensor and compute indices
+    # We want the hidden state at position (prompt_len - 1) for each sample
+    prompt_lens_t = torch.tensor(prompt_lens, device=device, dtype=torch.long)
+    indices = (prompt_lens_t - 1).clamp(min=0, max=T - 1)  # [B]
+    
+    # Use advanced indexing to gather hidden states
+    # indices: [B] -> need to index last_hidden[i, indices[i], :]
+    batch_indices = torch.arange(B, device=device)  # [B]
+    hs = last_hidden[batch_indices, indices, :]  # [B, H]
+    
+    # Pass through value head
     v = value_head(hs.float()).squeeze(-1)
     return v
 

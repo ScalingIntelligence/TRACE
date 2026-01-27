@@ -162,7 +162,7 @@ class Config:
     
     # Checkpointing and evaluation
     SAVE_EVERY_ITERS = 5
-    EVAL_EVERY_ITERS = 10000
+    EVAL_EVERY_ITERS = 100000
     EVAL_GAMES = 50
     MATH_EVAL_SAMPLES = 50
     MATH_EVAL_EVERY_ITERS = 1000
