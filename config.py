@@ -52,7 +52,17 @@ def parse_args():
         default="selfplay_rollouts_ppo.jsonl",
         help="Filename for rollout logs"
     )
+
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="Qwen/Qwen3-4B-Instruct-2507",
+        help="HuggingFace model name to use for training and inference"
+    )
+
     return parser.parse_args()
+
+
 
 
 # =========================
@@ -134,15 +144,15 @@ class Config:
     # Game settings
     NUM_ROUNDS = 5
     NUM_DICE = 5
-    GAMES_PER_ITER = 8
+    GAMES_PER_ITER = 64
     # PPO hyperparameters
     PPO_EPOCHS = 1
-    MINI_BATCH_SIZE = 4
-    STATS_CHUNK_SIZE = 4
-    LR = 2e-7
+    MINI_BATCH_SIZE = 1
+    STATS_CHUNK_SIZE = 1
+    LR = 1e-7
     CLIP_EPS = 0.2
     VF_COEF = 0.5
-    
+
     # Generation settings
     ENABLE_THINKING = True
     MAX_GEN_TOKENS = 8192 if ENABLE_THINKING else 8

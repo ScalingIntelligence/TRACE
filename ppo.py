@@ -149,16 +149,8 @@ def _action_text_for_training(
     env_action: str,
     valid_tool_call: bool,
 ) -> str:
-    if game_spec.name not in _TOOL_CALL_GAMES:
-        return env_action
-    if valid_tool_call:
-        tool_call = extract_tool_call_with_text(completion)
-        if tool_call is not None:
-            return tool_call[1]
-    tool_call_dict = action_string_to_tool_call(env_action)
-    tool_json = tool_call_to_json(tool_call_dict) if tool_call_dict else None
-    return tool_json or env_action
-
+    # Always return the full completion for PPO
+    return completion
 
 def collect_games(
     *,

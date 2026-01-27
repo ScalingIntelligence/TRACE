@@ -107,7 +107,6 @@ def _register_builtin_games() -> None:
         return MemoryRecallGame(num_dice=num_dice, num_fake_games=100)
 
 
-
     register_game(
         GameSpec(
             name="kuhn_poker",
