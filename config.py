@@ -144,35 +144,35 @@ class Config:
     # Game settings
     NUM_ROUNDS = 5
     NUM_DICE = 5
-    GAMES_PER_ITER = 64
+    GAMES_PER_ITER = 512
     # PPO hyperparameters
     PPO_EPOCHS = 1
-    MINI_BATCH_SIZE = 1
+    MINI_BATCH_SIZE = 4
     STATS_CHUNK_SIZE = 1
-    LR = 1e-7
+    LR = 1e-6
     CLIP_EPS = 0.2
     VF_COEF = 0.5
 
     # Generation settings
     ENABLE_THINKING = True
-    MAX_GEN_TOKENS = 8192 if ENABLE_THINKING else 8
+    MAX_GEN_TOKENS = 2048 if ENABLE_THINKING else 8
     MAX_GEN_TOKENS_LIARS_DICE = 8192 if ENABLE_THINKING else 16
     TEMPERATURE = 0.7
     MAX_TOKENS_MATH_EVAL = 7000
     
     # Checkpointing and evaluation
-    SAVE_EVERY_ITERS = 5
+    SAVE_EVERY_ITERS = 10
     EVAL_EVERY_ITERS = 100000
     EVAL_GAMES = 50
     MATH_EVAL_SAMPLES = 50
     MATH_EVAL_EVERY_ITERS = 1000
 
     # tau2-bench evaluation (set TAU2_EVAL_EVERY_ITERS = 0 to disable)
-    TAU2_EVAL_EVERY_ITERS = 10
+    TAU2_EVAL_EVERY_ITERS = 50
     TAU2_EVAL_DOMAINS = ["airline", "retail"]  # airline, retail, telecom, mock
     TAU2_EVAL_NUM_TASKS = 5000       # Total tasks per domain
     TAU2_EVAL_NUM_TRIALS = 4
-    TAU2_EVAL_MAX_CONCURRENCY_PER_SHARD = 40
+    TAU2_EVAL_MAX_CONCURRENCY_PER_SHARD = 20
     TAU2_EVAL_SEED = 42
 
     USE_ROLE_BASELINE = True

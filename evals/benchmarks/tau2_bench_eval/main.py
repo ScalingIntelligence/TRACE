@@ -15,12 +15,14 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import requests
 import yaml
 
 
@@ -37,25 +39,72 @@ def should_use_vllm(llm_name: str) -> bool:
     return llm_name.startswith("vllm://") or llm_name.startswith("hf://") or llm_name.startswith("huggingface://")
 
 
-def setup_vllm_env(config: Dict[str, Any]) -> None:
-    """Setup environment variables for vLLM if needed."""
+def get_vllm_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Get vLLM configuration (base_url, base_urls, and api_key)."""
     vllm_config = config.get("vllm", {})
-    if not vllm_config:
-        return
+    return {
+        "base_url": vllm_config.get("base_url"),
+        "base_urls": vllm_config.get("base_urls"),  # List of URLs for deterministic multi-server (shared)
+        "agent_base_urls": vllm_config.get("agent_base_urls"),  # Separate URLs for agent
+        "user_base_urls": vllm_config.get("user_base_urls"),  # Separate URLs for user
+        "api_key": vllm_config.get("api_key"),
+    }
 
-    base_url = vllm_config.get("base_url")
-    api_key = vllm_config.get("api_key")
 
-    if base_url:
-        os.environ['OPENAI_API_BASE'] = base_url
-        print(f"Setting OPENAI_API_BASE={base_url}")
+def load_lora_adapter(base_url: str, adapter_name: str, adapter_path: str) -> bool:
+    """
+    Load a LoRA adapter into the vLLM server dynamically.
 
-    if api_key:
-        os.environ['OPENAI_API_KEY'] = api_key
-    elif 'OPENAI_API_KEY' not in os.environ:
-        # LiteLLM requires an API key even for local servers
-        os.environ['OPENAI_API_KEY'] = 'dummy-key'
-        print("Setting OPENAI_API_KEY=dummy-key (required by LiteLLM)")
+    Args:
+        base_url: vLLM server base URL (e.g., http://localhost:8080/v1)
+        adapter_name: Name to register the adapter as
+        adapter_path: Path to the LoRA adapter directory
+
+    Returns:
+        True if successful, False otherwise
+    """
+    # Remove /v1 suffix if present for the load endpoint
+    server_url = base_url.rstrip('/').replace('/v1', '')
+    load_url = f"{server_url}/v1/load_lora_adapter"
+
+    payload = {
+        "lora_name": adapter_name,
+        "lora_path": adapter_path
+    }
+
+    print(f"Loading LoRA adapter '{adapter_name}' from: {adapter_path}")
+
+    try:
+        response = requests.post(load_url, json=payload, timeout=60)
+        if response.status_code == 200:
+            print(f"✓ Successfully loaded LoRA adapter '{adapter_name}'")
+            return True
+        else:
+            # Check if adapter already exists
+            if "already exists" in response.text.lower():
+                print(f"✓ LoRA adapter '{adapter_name}' already loaded")
+                return True
+            print(f"✗ Failed to load LoRA adapter: {response.status_code} - {response.text}")
+            return False
+    except requests.exceptions.RequestException as e:
+        print(f"✗ Error loading LoRA adapter: {e}")
+        return False
+
+
+def check_model_available(base_url: str, model_name: str) -> bool:
+    """Check if a model is available on the vLLM server."""
+    server_url = base_url.rstrip('/').replace('/v1', '')
+    models_url = f"{server_url}/v1/models"
+
+    try:
+        response = requests.get(models_url, timeout=10)
+        if response.status_code == 200:
+            models = response.json().get("data", [])
+            model_ids = [m["id"] for m in models]
+            return model_name in model_ids
+    except requests.exceptions.RequestException:
+        pass
+    return False
 
 
 def convert_vllm_model_name(llm_name: str) -> str:
@@ -84,22 +133,88 @@ def build_tau2_command(config: Dict[str, Any], cli_overrides: Dict[str, Any]) ->
     # Merge config with CLI overrides
     merged = {**config, **cli_overrides}
 
-    # Check if we need vLLM
+    # Get vLLM config
+    vllm_config = get_vllm_config(merged)
+
+    # Check which models use vLLM
     agent_llm = merged.get("agent_llm")
     user_llm = merged.get("user_llm")
+    agent_uses_vllm = should_use_vllm(agent_llm)
+    user_uses_vllm = should_use_vllm(user_llm)
 
-    uses_vllm = should_use_vllm(agent_llm) or should_use_vllm(user_llm)
-    if uses_vllm:
-        setup_vllm_env(merged)
+    # Check for LoRA adapter configuration
+    lora_adapter_path = merged.get("lora_adapter_path")
+    lora_adapter_name = merged.get("lora_adapter_name", "custom_adapter")
 
-        # Convert vLLM model names to OpenAI-compatible format
-        if should_use_vllm(agent_llm):
+    # If LoRA adapter is specified and agent uses vLLM, load the adapter
+    if lora_adapter_path and agent_uses_vllm and vllm_config.get("base_url"):
+        base_url = vllm_config["base_url"]
+
+        # Check if adapter is already loaded
+        if not check_model_available(base_url, lora_adapter_name):
+            # Load the adapter
+            if not load_lora_adapter(base_url, lora_adapter_name, lora_adapter_path):
+                print(f"Warning: Failed to load LoRA adapter, falling back to base model")
+            else:
+                # Use the adapter name as the model
+                agent_llm = f"vllm://{lora_adapter_name}"
+                merged["agent_llm"] = f"openai/{lora_adapter_name}"
+                print(f"Using LoRA adapter as agent: {lora_adapter_name}")
+        else:
+            # Adapter already loaded, use it
+            agent_llm = f"vllm://{lora_adapter_name}"
+            merged["agent_llm"] = f"openai/{lora_adapter_name}"
+            print(f"Using existing LoRA adapter as agent: {lora_adapter_name}")
+
+    # Prepare llm_args for agent and user separately
+    # This allows mixed model evaluation (e.g., vLLM agent + OpenAI user)
+    agent_llm_args = {"temperature": 0.0, **merged.get("agent_llm_args", {})}
+    user_llm_args = {"temperature": 0.0, **merged.get("user_llm_args", {})}
+
+    # Check if using multi-server deterministic mode
+    # Support both shared (base_urls) and separate (agent_base_urls/user_base_urls) configurations
+    use_shared_multi_server = vllm_config.get("base_urls") is not None and len(vllm_config.get("base_urls", [])) > 0
+    use_separate_multi_server = (
+        vllm_config.get("agent_base_urls") is not None and len(vllm_config.get("agent_base_urls", [])) > 0 and
+        vllm_config.get("user_base_urls") is not None and len(vllm_config.get("user_base_urls", [])) > 0
+    )
+    use_multi_server = use_shared_multi_server or use_separate_multi_server
+
+    # Convert vLLM model names and inject api_base into llm_args
+    if agent_uses_vllm:
+        # Only convert if not already converted (for LoRA case)
+        if not merged["agent_llm"].startswith("openai/"):
             merged["agent_llm"] = convert_vllm_model_name(agent_llm)
             print(f"Converted agent LLM: {agent_llm} -> {merged['agent_llm']}")
+        # Only set api_base if NOT using multi-server mode (multi-server routing handled by tau2)
+        if not use_multi_server and vllm_config.get("base_url"):
+            agent_llm_args["api_base"] = vllm_config["base_url"]
+            print(f"Agent will use vLLM at: {vllm_config['base_url']}")
+        # Set API key (use EMPTY for vLLM servers that don't require auth)
+        agent_llm_args["api_key"] = vllm_config.get("api_key") or "EMPTY"
 
-        if should_use_vllm(user_llm):
-            merged["user_llm"] = convert_vllm_model_name(user_llm)
-            print(f"Converted user LLM: {user_llm} -> {merged['user_llm']}")
+    if user_uses_vllm:
+        merged["user_llm"] = convert_vllm_model_name(user_llm)
+        print(f"Converted user LLM: {user_llm} -> {merged['user_llm']}")
+        # Only set api_base if NOT using multi-server mode
+        if not use_multi_server and vllm_config.get("base_url"):
+            user_llm_args["api_base"] = vllm_config["base_url"]
+            print(f"User will use vLLM at: {vllm_config['base_url']}")
+        # Set API key (use EMPTY for vLLM servers that don't require auth)
+        user_llm_args["api_key"] = vllm_config.get("api_key") or "EMPTY"
+
+    if use_separate_multi_server:
+        print(f"Using separate multi-server mode:")
+        print(f"  Agent servers ({len(vllm_config['agent_base_urls'])}):")
+        for i, url in enumerate(vllm_config['agent_base_urls']):
+            print(f"    {i}: {url}")
+        print(f"  User servers ({len(vllm_config['user_base_urls'])}):")
+        for i, url in enumerate(vllm_config['user_base_urls']):
+            print(f"    {i}: {url}")
+    elif use_shared_multi_server:
+        print(f"Using shared multi-server mode with {len(vllm_config['base_urls'])} servers:")
+        for i, url in enumerate(vllm_config['base_urls']):
+            print(f"  Server {i}: {url}")
 
     # Build command
     cmd = ["tau2", "run"]
@@ -113,6 +228,10 @@ def build_tau2_command(config: Dict[str, Any], cli_overrides: Dict[str, Any]) ->
 
     if merged.get("user_llm"):
         cmd.extend(["--user-llm", str(merged["user_llm"])])
+
+    # Add llm_args for agent and user
+    cmd.extend(["--agent-llm-args", json.dumps(agent_llm_args)])
+    cmd.extend(["--user-llm-args", json.dumps(user_llm_args)])
 
     # Optional parameters
     if merged.get("agent"):
@@ -144,7 +263,14 @@ def build_tau2_command(config: Dict[str, Any], cli_overrides: Dict[str, Any]) ->
         cmd.extend(["--save-to", str(merged["save_to"])])
 
     if merged.get("verbose"):
-        cmd.append("--verbose")
+        cmd.extend(["--log-level", "DEBUG"])
+
+    # Add multi-server URLs for deterministic evaluation
+    if use_separate_multi_server:
+        cmd.extend(["--agent-api-base-urls"] + vllm_config["agent_base_urls"])
+        cmd.extend(["--user-api-base-urls"] + vllm_config["user_base_urls"])
+    elif use_shared_multi_server:
+        cmd.extend(["--api-base-urls"] + vllm_config["base_urls"])
 
     return cmd
 

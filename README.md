@@ -63,3 +63,54 @@ You can optionally run eval on tau2-bench at a fixed iteration interval.
 Currently, the eval setup is:
 - `agent_llm` is the currently-trained LoRA adapter served by vLLM (`ppo_policy` by default).
 - `user_llm` is the base `Qwen/Qwen3-4B-Instruct-2507` model served by vLLM.
+
+## OpenBMB ToolBench Evaluation
+
+Evaluate models on [OpenBMB ToolBench](https://github.com/OpenBMB/ToolBench) benchmark (16,000+ real-world APIs).
+
+### Setup
+
+1) Clone OpenBMB ToolBench data (already included at `evals/toolbench/`):
+   ```bash
+   cd evals
+   git clone https://github.com/OpenBMB/ToolBench.git toolbench
+   ```
+
+2) Download full test data from [Google Drive](https://drive.google.com/drive/folders/1TysbSWYpP8EioFu9xPJtpbJZMLLmwAmL) and place in `evals/toolbench/data/test_instruction/`
+
+### Running Evaluation
+
+Make sure a vLLM server is running (see Quick Start above), then:
+
+```bash
+# Evaluate on G1 test set (single-tool scenarios)
+python3 evals/benchmarks/eval_openbmb_toolbench.py \
+    --test-set G1 \
+    --vllm-url http://localhost:8082 \
+    --vllm-model Qwen/Qwen3-4B-Instruct-2507 \
+    --toolbench-dir evals/toolbench \
+    --num-samples 50 \
+    --output-dir evals/toolbench_results
+
+# Evaluate on G2 test set (intra-category multi-tool)
+python3 evals/benchmarks/eval_openbmb_toolbench.py \
+    --test-set G2 \
+    --vllm-url http://localhost:8082 \
+    --num-samples 50
+
+# Evaluate on G3 test set (intra-collection multi-tool)
+python3 evals/benchmarks/eval_openbmb_toolbench.py \
+    --test-set G3 \
+    --vllm-url http://localhost:8082 \
+    --num-samples 50
+```
+
+### Test Sets
+- **G1**: Single-tool scenarios (easiest)
+- **G2**: Intra-category multi-tool scenarios
+- **G3**: Intra-collection multi-tool scenarios (hardest)
+
+### Output
+Results are saved to `--output-dir` (default: `eval_results/openbmb_toolbench/`):
+- `{test_set}_{model}_{timestamp}.json`: Aggregated metrics (precision, recall, F1, pass rate)
+- `{test_set}_{model}_{timestamp}_responses.jsonl`: Detailed per-query responses for analysis

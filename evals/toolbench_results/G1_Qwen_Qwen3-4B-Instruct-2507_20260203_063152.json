@@ -1,0 +1,22 @@
+{
+  "args": {
+    "test_set": "G1",
+    "toolbench_dir": "/home/ubuntu/tarun/games/evals/toolbench",
+    "num_samples": 5,
+    "vllm_url": "http://localhost:8082",
+    "vllm_model": "Qwen/Qwen3-4B-Instruct-2507",
+    "temperature": 0.0,
+    "max_tokens": 1024,
+    "output_dir": "/home/ubuntu/tarun/games/evals/toolbench_results",
+    "response_log": null
+  },
+  "results": {
+    "total": 5,
+    "pass_count": 5,
+    "pass_rate": 1.0,
+    "avg_precision": 1.0,
+    "avg_recall": 1.0,
+    "avg_f1": 1.0
+  },
+  "timestamp": "20260203_063152"
+}

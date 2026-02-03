@@ -14,7 +14,52 @@ from liars_dice_tools import (
     LIARS_DICE_TOOL_REGISTRY_WITH_ID,
 )
 from memory_recall_game import MemoryRecallGame, extract_action as extract_action_recall
-
+from dependency_resolution_game import (
+    DependencyResolutionGame,
+    extract_action as extract_action_dependency,
+    SYSTEM_PROMPT_DEPENDENCY_RESOLUTION,
+)
+from dependency_resolution_hangoo_game import (
+    DependencyResolutionGameHangoo,
+    extract_action as extract_action_dependency_hangoo,
+    SYSTEM_PROMPT_DEPENDENCY_RESOLUTION as SYSTEM_PROMPT_DEPENDENCY_HANGOO,
+)
+from multistep_sequence_game import (
+    MultiStepSequenceGame,
+    extract_action as extract_action_multistep,
+    SYSTEM_PROMPT_MULTISTEP,
+)
+from policy_gated_action_game import (
+    PolicyGatedActionGame,
+    extract_action as extract_action_policy_gated,
+    SYSTEM_PROMPT_POLICY_GATED,
+)
+from policy_verification_game import (
+    PolicyVerificationGame,
+    extract_action as extract_action_policy_verify,
+    SYSTEM_PROMPT_POLICY_VERIFICATION,
+)
+from policy_action_game import (
+    PolicyActionGame,
+    extract_action as extract_action_policy_action,
+    SYSTEM_PROMPT_POLICY_ACTION,
+)
+from conditional_action_game import (
+    ConditionalActionGame,
+    extract_action as extract_action_conditional,
+    SYSTEM_PROMPT_CONDITIONAL_ACTION,
+)
+from tool_chain_game import (
+    ToolChainGame,
+    extract_action as extract_action_tool_chain,
+    SYSTEM_PROMPT_TOOL_CHAIN,
+)
+from progressive_service_agent_env import (
+    ProgressiveServiceAgentEnv,
+    extract_action as extract_action_progressive_service,
+    SYSTEM_PROMPT as SYSTEM_PROMPT_PROGRESSIVE_SERVICE,
+    TaskComplexity,
+)
 from pathlib import Path
 
 
@@ -200,6 +245,231 @@ def _register_builtin_games() -> None:
         stop_sequences=[] if Config.ENABLE_THINKING else ["]"],
         system_prompt=Config.SYSTEM_PROMPT_MEMORY_RECALL,
         max_gen_tokens=Config.MAX_GEN_TOKENS_LIARS_DICE,
+        )
+    )
+
+    def make_dependency_resolution() -> DependencyResolutionGame:
+        return DependencyResolutionGame(
+            min_complexity=1,  # Always use conditionals (consistent difficulty)
+            max_complexity=3,  # Up to conditional formulas
+            max_steps=20,  # Enough room to explore but not infinite
+        )
+
+    register_game(
+        GameSpec(
+            name="dependency_resolution",
+            make_env=make_dependency_resolution,
+            extract_action=extract_action_dependency,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_DEPENDENCY_RESOLUTION,
+            max_gen_tokens=Config.MAX_GEN_TOKENS_LIARS_DICE,
+        )
+    )
+    
+    def make_dependency_resolution_hangoo() -> DependencyResolutionGameHangoo:
+        return DependencyResolutionGameHangoo(
+            min_complexity=1,
+            max_complexity=3,
+            max_steps=20,
+        )
+
+    register_game(
+        GameSpec(
+            name="dependency_resolution_hangoo",
+            make_env=make_dependency_resolution_hangoo,
+            extract_action=extract_action_dependency_hangoo,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_DEPENDENCY_HANGOO,
+            max_gen_tokens=Config.MAX_GEN_TOKENS_LIARS_DICE,
+        )
+    )
+
+    # Multi-step sequence game - tests pure multi-step planning
+    def make_multistep_sequence() -> MultiStepSequenceGame:
+        return MultiStepSequenceGame(max_steps=30)
+
+    register_game(
+        GameSpec(
+            name="multistep_sequence",
+            make_env=make_multistep_sequence,
+            extract_action=extract_action_multistep,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_MULTISTEP,
+            max_gen_tokens=512,
+        )
+    )
+
+    # Policy-gated action game - trains state verification and constraint compliance
+    # Binary rewards only, targets tau-bench core failure modes
+    def make_policy_gated_action() -> PolicyGatedActionGame:
+        return PolicyGatedActionGame(max_steps=15)
+
+    register_game(
+        GameSpec(
+            name="policy_gated_action",
+            make_env=make_policy_gated_action,
+            extract_action=extract_action_policy_gated,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_POLICY_GATED,
+            max_gen_tokens=256,  # Concise: tool calls are ~50-120 tokens max
+        )
+    )
+
+    # Simplified policy verification - single-step classification
+    # Use this FIRST to train policy reasoning, then graduate to policy_gated_action
+    def make_policy_verification() -> PolicyVerificationGame:
+        return PolicyVerificationGame()
+
+    register_game(
+        GameSpec(
+            name="policy_verification",
+            make_env=make_policy_verification,
+            extract_action=extract_action_policy_verify,
+            action_space=["[approve]", "[deny]"],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["]"],
+            system_prompt=SYSTEM_PROMPT_POLICY_VERIFICATION,
+            max_gen_tokens=64,  # Very short: just [approve] or [deny]
+        )
+    )
+
+    # Policy Action Game - single-step tool calling with policy reasoning
+    # All info provided, model must output correct tool call or refuse
+    def make_policy_action() -> PolicyActionGame:
+        return PolicyActionGame()
+
+    register_game(
+        GameSpec(
+            name="policy_action",
+            make_env=make_policy_action,
+            extract_action=extract_action_policy_action,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_POLICY_ACTION,
+            max_gen_tokens=256,
+        )
+    )
+
+    # Conditional Action Game - trains strict constraint adherence
+    # Key tau-bench failure mode: "if X unavailable, ONLY do Y" but model does both
+    def make_conditional_action() -> ConditionalActionGame:
+        return ConditionalActionGame(max_steps=10)
+
+    register_game(
+        GameSpec(
+            name="conditional_action",
+            make_env=make_conditional_action,
+            extract_action=extract_action_conditional,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_CONDITIONAL_ACTION,
+            max_gen_tokens=256,
+        )
+    )
+
+    # Tool Chain Game - 2-step tool chaining
+    def make_tool_chain() -> ToolChainGame:
+        return ToolChainGame(max_steps=5)
+
+    register_game(
+        GameSpec(
+            name="tool_chain",
+            make_env=make_tool_chain,
+            extract_action=extract_action_tool_chain,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_TOOL_CHAIN,
+            max_gen_tokens=256,
+        )
+    )
+
+    # Progressive Service Agent - comprehensive tau-bench skill training
+    # Trains: authentication, one-shot constraints, conditional logic,
+    # multi-item batching, information discovery, entity disambiguation, confirmation
+    def make_progressive_service_agent() -> ProgressiveServiceAgentEnv:
+        return ProgressiveServiceAgentEnv(max_steps=20)
+
+    register_game(
+        GameSpec(
+            name="progressive_service_agent",
+            make_env=make_progressive_service_agent,
+            extract_action=extract_action_progressive_service,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_PROGRESSIVE_SERVICE,
+            max_gen_tokens=512,  # Longer: multi-turn dialogue with tool calls
+        )
+    )
+
+    # Progressive Service Agent with CURRICULUM LEARNING
+    # Auto-advances difficulty when win rate exceeds 70% over last 3 iterations
+    def make_progressive_service_curriculum() -> ProgressiveServiceAgentEnv:
+        return ProgressiveServiceAgentEnv(
+            max_steps=20,
+            curriculum=True,
+            curriculum_threshold=0.7,
+            games_per_iter=512,      # Matches Config.GAMES_PER_ITER
+            curriculum_iters=3,       # Consider last 3 iterations for win rate
+        )
+
+    register_game(
+        GameSpec(
+            name="progressive_service_curriculum",
+            make_env=make_progressive_service_curriculum,
+            extract_action=extract_action_progressive_service,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_PROGRESSIVE_SERVICE,
+            max_gen_tokens=512,
+        )
+    )
+
+    # Progressive Service Agent variants for each complexity level
+    def make_progressive_service_simple() -> ProgressiveServiceAgentEnv:
+        return ProgressiveServiceAgentEnv(max_steps=15, complexity=TaskComplexity.SIMPLE_QUERY)
+
+    def make_progressive_service_conditional() -> ProgressiveServiceAgentEnv:
+        return ProgressiveServiceAgentEnv(max_steps=20, complexity=TaskComplexity.CONDITIONAL)
+
+    def make_progressive_service_full() -> ProgressiveServiceAgentEnv:
+        return ProgressiveServiceAgentEnv(max_steps=25, complexity=TaskComplexity.FULL_COMPLEXITY)
+
+    register_game(
+        GameSpec(
+            name="progressive_service_simple",
+            make_env=make_progressive_service_simple,
+            extract_action=extract_action_progressive_service,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_PROGRESSIVE_SERVICE,
+            max_gen_tokens=512,
+        )
+    )
+
+    register_game(
+        GameSpec(
+            name="progressive_service_conditional",
+            make_env=make_progressive_service_conditional,
+            extract_action=extract_action_progressive_service,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_PROGRESSIVE_SERVICE,
+            max_gen_tokens=512,
+        )
+    )
+
+    register_game(
+        GameSpec(
+            name="progressive_service_full",
+            make_env=make_progressive_service_full,
+            extract_action=extract_action_progressive_service,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_PROGRESSIVE_SERVICE,
+            max_gen_tokens=512,
         )
     )
 

@@ -1,0 +1,61 @@
+# τ²-bench Evaluation with Mixed Model Configuration
+# This configuration supports different models for agent and user simulator
+# Example: vLLM local model for agent + OpenAI API for user simulator
+
+# Domain Configuration
+domain: retail                                                          # Domain to evaluate
+
+# Agent Configuration (4B model)
+# Use vllm:// prefix to indicate vLLM model
+agent_llm: vllm://Qwen/Qwen3-4B-Instruct-2507
+agent: null
+
+# LoRA Adapter Configuration (optional)
+# If specified, loads this adapter and uses it instead of base model
+# lora_adapter_path: /path/to/lora/adapter
+# lora_adapter_name: ppo_iter110
+
+# User Simulator Configuration (30B model)
+user_llm: vllm://Qwen/Qwen3-30B-A3B-Instruct-2507
+user_llm_args:
+  temperature: 0.0                                                      # Temperature 0 for reproducibility
+
+user: null
+
+# Task Configuration
+# num_trials: 1                                                            # Single trial per task
+# num_tasks: 7                                                            # Run only 7 tasks for quick test
+# task_ids: [18, 21, 31, 45, 48, 57, 58]
+
+# Execution Configuration
+# max_concurrency should match the number of server pairs (2 agent + 2 user = 2 concurrent tasks)
+max_concurrency: 2
+seed: 42
+
+# Output Configuration
+output_dir: outputs
+save_to: qwen-3-4b-retail-qwen3-30b-v2
+
+# Advanced Options
+verbose: true                                                            # Enable verbose output
+
+# vLLM Configuration - Separate server pools for agent and user
+vllm:
+  api_key: null                                                          # No API key needed for local
+  # Agent servers (4B model) - ports 8090, 8091
+  agent_base_urls:
+    - http://localhost:8090/v1
+    - http://localhost:8091/v1
+  # User servers (30B model) - ports 9000, 9001
+  user_base_urls:
+    - http://localhost:9000/v1
+    - http://localhost:9001/v1
+
+# Server setup (tmux sessions):
+#   vllm_5:   port 9000 - 30B instruct (user)
+#   vllm_6_1: port 8090 - 4B instruct (agent)
+#   vllm_6_2: port 8091 - 4B instruct (agent)
+#   vllm_7:   port 9001 - 30B instruct (user)
+#
+# Run evaluation:
+#   python main.py --config config-vllm.yml

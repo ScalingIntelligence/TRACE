@@ -260,6 +260,8 @@ def collect_games(
     total_turns = 0
     p0_wins = 0
     extraction_failures = 0
+    response_lengths: List[int] = []  # Track response lengths in characters
+    response_token_counts: List[int] = []  # Track response lengths in tokens (approx)
 
     if backend.supports_batch():
         envs = []
@@ -309,6 +311,11 @@ def collect_games(
                 illegal_move = (act is None)
                 if act is None:
                     extraction_failures += 1
+
+                # Track response length
+                response_lengths.append(len(completion))
+                # Approximate token count (rough heuristic: ~4 chars per token)
+                response_token_counts.append(len(completion) // 4)
 
                 action_text = _action_text_for_training(
                     game_spec,
@@ -402,6 +409,10 @@ def collect_games(
                     extraction_failures += 1
                     act = rng.choice(legal)
 
+                # Track response length
+                response_lengths.append(len(completion))
+                response_token_counts.append(len(completion) // 4)
+
                 action_text = _action_text_for_training(
                     game_spec,
                     completion,
@@ -457,9 +468,22 @@ def collect_games(
                     game_id=game_id,
                 ))
 
+    # Compute response length statistics
+    if response_lengths:
+        resp_len_mean = sum(response_lengths) / len(response_lengths)
+        resp_len_max = max(response_lengths)
+        resp_len_min = min(response_lengths)
+        resp_tok_mean = sum(response_token_counts) / len(response_token_counts)
+    else:
+        resp_len_mean = resp_len_max = resp_len_min = resp_tok_mean = 0
+
     metrics = {
         "env/invalid_move_rate": extraction_failures / max(1, total_turns),
         "env/turns_per_game_mean": total_turns / max(1, num_games),
         "env/win_rate_p0": p0_wins / max(1, num_games),
+        "env/response_len_chars_mean": resp_len_mean,
+        "env/response_len_chars_max": resp_len_max,
+        "env/response_len_chars_min": resp_len_min,
+        "env/response_tokens_mean": resp_tok_mean,
     }
     return samples, metrics
