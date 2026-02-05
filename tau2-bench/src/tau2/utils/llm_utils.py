@@ -189,6 +189,122 @@ def to_litellm_messages(messages: list[Message]) -> list[dict]:
     return litellm_messages
 
 
+_tokenizer_cache: dict = {}
+
+
+def _extract_model_name(model: str) -> str:
+    """Extract the HuggingFace model name from various formats."""
+    if model.startswith("openai/"):
+        return model[7:]
+    if model.startswith("vllm://"):
+        return model[7:]
+    if model.startswith("hf://"):
+        return model[5:]
+    if model.startswith("huggingface://"):
+        return model[14:]
+    return model
+
+
+def _get_tokenizer(model: str):
+    """Load and cache the tokenizer for the model. Raises error if not found."""
+    model_name = _extract_model_name(model)
+
+    if model_name in _tokenizer_cache:
+        return _tokenizer_cache[model_name]
+
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    _tokenizer_cache[model_name] = tokenizer
+    logger.debug(f"Loaded tokenizer for {model_name}")
+    return tokenizer
+
+
+def _count_tokens(model: str, messages: list[dict], tools: Optional[list] = None) -> int:
+    """Count tokens using the model's tokenizer."""
+    tokenizer = _get_tokenizer(model)
+
+    text_parts = []
+    for m in messages:
+        content = m.get("content") or ""
+        role = m.get("role", "")
+        text_parts.append(f"{role}: {content}")
+        if m.get("tool_calls"):
+            text_parts.append(json.dumps(m["tool_calls"]))
+    if tools:
+        text_parts.append(json.dumps(tools))
+
+    full_text = "\n".join(text_parts)
+    tokens = tokenizer.encode(full_text)
+    # Add overhead for chat formatting (~10%)
+    return int(len(tokens) * 1.1)
+
+
+def truncate_messages_to_fit_context(
+    model: str,
+    messages: list[dict],
+    max_context_length: int,
+    tools: Optional[list] = None,
+) -> list[dict]:
+    """
+    Truncate messages to fit within the max context length.
+    Keeps system messages and removes older conversation messages from the middle.
+
+    Args:
+        model: The model name for token counting.
+        messages: The list of litellm-formatted messages.
+        max_context_length: The maximum number of tokens allowed.
+        tools: Optional tools list (affects token count).
+
+    Returns:
+        Truncated list of messages that fits within max_context_length.
+    """
+    # Apply a safety margin (5%) to account for tokenizer differences
+    effective_max = int(max_context_length * 0.95)
+
+    # Count current tokens
+    current_tokens = _count_tokens(model, messages, tools)
+    logger.debug(f"Current token count: {current_tokens}, max allowed: {effective_max}")
+
+    if current_tokens <= effective_max:
+        return messages
+
+    logger.warning(
+        f"Context length ({current_tokens}) exceeds max ({effective_max}). Truncating messages."
+    )
+
+    # Separate system messages from conversation messages
+    system_messages = [m for m in messages if m.get("role") == "system"]
+    conversation_messages = [m for m in messages if m.get("role") != "system"]
+
+    if not conversation_messages:
+        logger.warning("No conversation messages to truncate, returning as-is.")
+        return messages
+
+    # Binary search for the number of recent messages to keep
+    left, right = 1, len(conversation_messages)
+    result_messages = system_messages  # Start with just system messages
+
+    while left <= right:
+        mid = (left + right) // 2
+        # Keep the last 'mid' messages
+        candidate_messages = system_messages + conversation_messages[-mid:]
+
+        candidate_tokens = _count_tokens(model, candidate_messages, tools)
+
+        if candidate_tokens <= effective_max:
+            result_messages = candidate_messages
+            left = mid + 1  # Try to keep more messages
+        else:
+            right = mid - 1  # Need to keep fewer messages
+
+    removed_count = len(conversation_messages) - (len(result_messages) - len(system_messages))
+    if removed_count > 0:
+        final_tokens = _count_tokens(model, result_messages, tools)
+        logger.info(f"Truncated {removed_count} messages to fit context window. Final token count: {final_tokens}")
+
+    return result_messages
+
+
 def generate(
     model: str,
     messages: list[Message],
@@ -205,18 +321,34 @@ def generate(
         tools: The tools to use.
         tool_choice: The tool choice to use.
         **kwargs: Additional arguments to pass to the model.
+            - max_context_length: Optional maximum context length in tokens.
+              If the messages exceed this limit, older conversation messages
+              will be truncated (system messages are preserved).
 
     Returns: A tuple containing the message and the cost.
     """
     if kwargs.get("num_retries") is None:
         kwargs["num_retries"] = DEFAULT_MAX_RETRIES
 
+    # Extract max_context_length if provided (don't pass to litellm)
+    max_context_length = kwargs.pop("max_context_length", None)
+
     if model.startswith("claude") and not ALLOW_SONNET_THINKING:
         kwargs["thinking"] = {"type": "disabled"}
     litellm_messages = to_litellm_messages(messages)
-    tools = [tool.openai_schema for tool in tools] if tools else None
-    if tools and tool_choice is None:
+    tools_schema = [tool.openai_schema for tool in tools] if tools else None
+    if tools_schema and tool_choice is None:
         tool_choice = "auto"
+
+    # Truncate messages if max_context_length is specified
+    if max_context_length is not None:
+        litellm_messages = truncate_messages_to_fit_context(
+            model=model,
+            messages=litellm_messages,
+            max_context_length=max_context_length,
+            tools=tools_schema,
+        )
+
     # Debug: log if seed is present
     if 'seed' in kwargs:
         logger.debug(f"LLM call with seed={kwargs['seed']}")
@@ -227,7 +359,7 @@ def generate(
         response = completion(
             model=model,
             messages=litellm_messages,
-            tools=tools,
+            tools=tools_schema,
             tool_choice=tool_choice,
             **kwargs,
         )

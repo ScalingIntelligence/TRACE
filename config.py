@@ -56,7 +56,8 @@ def parse_args():
     parser.add_argument(
         "--model",
         type=str,
-        default="Qwen/Qwen3-4B-Instruct-2507",
+        # default="Qwen/Qwen3-4B-Instruct-2507",
+        default="Qwen/Qwen3-30B-A3B-Instruct-2507",
         help="HuggingFace model name to use for training and inference"
     )
 
@@ -71,11 +72,12 @@ def parse_args():
 def setup_environment(args):
     """Setup cache directories, environment variables, and device settings."""
     
-    # Determine root directory
-    if args.root is not None:
-        root = Path(args.root).resolve()
-    else:
-        root = Path(f"/matx/u/{os.getenv('USER')}").resolve()
+    # # Determine root directory
+    # if args.root is not None:
+    #     root = Path(args.root).resolve()
+    # else:
+    #     root = Path(f"/matx/u/{os.getenv('USER')}").resolve()
+    root = Path('/home/')
     
     # Setup HuggingFace cache directories
     hf_home = root / ".cache" / "huggingface"
@@ -136,15 +138,16 @@ class Config:
     """Training and game configuration constants."""
     
     # Model settings
-    MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
+    # MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
+    MODEL_NAME = "Qwen/Qwen3-30B-A3B-Instruct-2507"
     MAX_SEQ_LENGTH = 16000
-    LORA_RANK = 8
+    LORA_RANK = 16
     LORA_ALPHA = 8
     
     # Game settings
     NUM_ROUNDS = 5
     NUM_DICE = 5
-    GAMES_PER_ITER = 512
+    GAMES_PER_ITER = 256
     # PPO hyperparameters
     PPO_EPOCHS = 1
     MINI_BATCH_SIZE = 4
