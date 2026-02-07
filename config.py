@@ -26,13 +26,6 @@ def parse_args():
         help="Root directory for cache, wandb, and outputs. Defaults to /matx/u/{USER} if not specified."
     )
     parser.add_argument(
-        "--use_constrained_decoding",
-        type=bool,
-        default=False,
-        help="If True, use constrained decoding to force action-only outputs. If False, use normal generation. Default: True"
-    )
-
-    parser.add_argument(
         "--game",
         type=str,
         default="kuhn_poker",

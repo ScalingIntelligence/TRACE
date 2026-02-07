@@ -60,6 +60,11 @@ from progressive_service_agent_env import (
     SYSTEM_PROMPT as SYSTEM_PROMPT_PROGRESSIVE_SERVICE,
     TaskComplexity,
 )
+from adversarial_policy_game import (
+    AdversarialPolicyGame,
+    extract_action as extract_action_adversarial,
+    SYSTEM_PROMPT as SYSTEM_PROMPT_ADVERSARIAL,
+)
 from pathlib import Path
 
 
@@ -469,6 +474,23 @@ def _register_builtin_games() -> None:
             action_space=[],
             stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
             system_prompt=SYSTEM_PROMPT_PROGRESSIVE_SERVICE,
+            max_gen_tokens=512,
+        )
+    )
+
+    # Adversarial Policy Compliance Game — targets Skill 1 failures
+    # Trains policy adherence under adversarial user pressure
+    def make_adversarial_policy() -> AdversarialPolicyGame:
+        return AdversarialPolicyGame(max_steps=20)
+
+    register_game(
+        GameSpec(
+            name="adversarial_policy",
+            make_env=make_adversarial_policy,
+            extract_action=extract_action_adversarial,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_ADVERSARIAL,
             max_gen_tokens=512,
         )
     )

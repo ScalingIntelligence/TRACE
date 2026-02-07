@@ -1,0 +1,31 @@
+{
+  "args": {
+    "test_set": "G2",
+    "toolbench_dir": "/home/hangook/games/evals/toolbench",
+    "num_samples": -1,
+    "vllm_url": "http://localhost:8090/v1",
+    "vllm_urls": null,
+    "vllm_model": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+    "use_internal_vllm": false,
+    "gpu_memory_utilization": 0.9,
+    "tensor_parallel_size": 1,
+    "max_concurrency": 1,
+    "seed": 42,
+    "temperature": 0.0,
+    "max_tokens": 1024,
+    "output_dir": "eval_results/openbmb_toolbench",
+    "response_log": null,
+    "run_id": null
+  },
+  "results": {
+    "total": 200,
+    "pass_count": 171,
+    "pass_rate": 0.855,
+    "avg_precision": 0.7866666666666667,
+    "avg_recall": 0.7520833333333333,
+    "avg_f1": 0.7527261904761905
+  },
+  "timestamp": "20260206_095437",
+  "seed": 42,
+  "run_id": null
+}

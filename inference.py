@@ -8,7 +8,6 @@ import torch
 import torch.nn as nn
 from pathlib import Path
 from typing import Dict, List, Optional
-from transformers import StoppingCriteria, StoppingCriteriaList
 
 from config import Config
 from game_registry import GameSpec
@@ -58,86 +57,21 @@ def build_prompt_text(tokenizer, msgs: list) -> str:
 
 
 # =========================
-# Constrained decoding helpers
-# =========================
-def encode_action_candidates(tokenizer, action_space: List[str]) -> List[List[int]]:
-    """Encode action strings to token IDs."""
-    cands = []
-    for s in action_space:
-        ids = tokenizer(s, add_special_tokens=False, return_tensors="pt")["input_ids"][0].tolist()
-        cands.append(ids)
-    return cands
-
-
-class StopOnAnyAction(StoppingCriteria):
-    """
-    Stop when the generated suffix exactly ends with any action candidate token sequence.
-    (No newline reliance.)
-    """
-    def __init__(self, prompt_len: int, action_token_ids: List[List[int]]):
-        self.prompt_len = int(prompt_len)
-        self.action_token_ids = [list(x) for x in action_token_ids]
-
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> bool:
-        gen = input_ids[0, self.prompt_len:].tolist()
-        if not gen:
-            return False
-        for cand in self.action_token_ids:
-            L = len(cand)
-            if L > 0 and len(gen) >= L and gen[-L:] == cand:
-                return True
-        return False
-
-
-def make_prefix_allowed_fn(tokenizer, prompt_len: int, action_token_ids: List[List[int]]):
-    """
-    Constrained decoding:
-    only allow tokens that can lead to one of the candidate action strings.
-    This makes it impossible to emit reasoning.
-    """
-    cands = [tuple(c) for c in action_token_ids]
-
-    def prefix_allowed_tokens_fn(batch_id: int, input_ids: torch.LongTensor):
-        gen = input_ids.tolist()[prompt_len:]
-        matching = []
-        for cand in cands:
-            if len(gen) <= len(cand) and tuple(gen) == cand[: len(gen)]:
-                matching.append(cand)
-
-        if not matching:
-            # Fallback: allow EOS (should basically never happen)
-            return [tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else []
-
-        for cand in matching:
-            if len(gen) == len(cand):
-                return [tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else []
-
-        allowed = set()
-        for cand in matching:
-            allowed.add(cand[len(gen)])
-        return list(allowed)
-
-    return prefix_allowed_tokens_fn
-
-
-# =========================
 # HF local generation
 # =========================
 @torch.no_grad()
 def generate_completion(
-    model, 
-    tokenizer, 
-    player_id: int, 
-    observation: str, 
-    temperature: float, 
+    model,
+    tokenizer,
+    player_id: int,
+    observation: str,
+    temperature: float,
     max_new_tokens: int,
-    use_constrained_decoding: bool,
     device: str,
     game_spec: Optional[GameSpec] = None,
 ) -> str:
     """
-    HF local generation. If use_constrained_decoding is True, constrained to output exactly one action string.
-    Returns the action token string (e.g. "[bet]") when possible.
+    HF local generation. Returns the full completion text.
     """
     game_spec = game_spec or GameSpec(
         name="default",
@@ -149,40 +83,29 @@ def generate_completion(
     )
     msgs = messages_for_game(player_id, observation, game_spec)
     input_ids = tokenizer.apply_chat_template(
-        msgs, 
-        add_generation_prompt=True, 
+        msgs,
+        add_generation_prompt=True,
         return_tensors="pt",
         enable_thinking=Config.ENABLE_THINKING
     ).to(device)
 
     prompt_len = int(input_ids.shape[-1])
-    
+
     was_training = model.training
     model.eval()
 
     do_sample = float(temperature) > 0.0
 
-    generate_kwargs = {
-        "input_ids": input_ids,
-        "max_new_tokens": int(max_new_tokens),
-        "do_sample": do_sample,
-        "temperature": float(temperature) if do_sample else None,
-        "top_p": 1.0,
-        "use_cache": True,
-        "pad_token_id": tokenizer.pad_token_id,
-        "eos_token_id": tokenizer.eos_token_id,
-    }
-
-    should_constrain = bool(use_constrained_decoding and game_spec.action_space)
-    if should_constrain:
-        action_token_ids = encode_action_candidates(tokenizer, game_spec.action_space)
-        stopper = StopOnAnyAction(prompt_len=prompt_len, action_token_ids=action_token_ids)
-        prefix_allowed = make_prefix_allowed_fn(tokenizer, prompt_len=prompt_len, action_token_ids=action_token_ids)
-        generate_kwargs["stopping_criteria"] = StoppingCriteriaList([stopper])
-        generate_kwargs["prefix_allowed_tokens_fn"] = prefix_allowed
-
-
-    out_ids = model.generate(**generate_kwargs)
+    out_ids = model.generate(
+        input_ids=input_ids,
+        max_new_tokens=int(max_new_tokens),
+        do_sample=do_sample,
+        temperature=float(temperature) if do_sample else None,
+        top_p=1.0,
+        use_cache=True,
+        pad_token_id=tokenizer.pad_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+    )
 
     if was_training:
         model.train()
@@ -224,7 +147,6 @@ class InferenceBackend:
         temperature: float,
         max_new_tokens: int,
         game_spec: Optional[GameSpec] = None,
-        use_guided_choice: bool = False,
         mode: str = "game",
     ) -> List[str]:
         raise NotImplementedError
@@ -234,10 +156,9 @@ class HFLocalBackend(InferenceBackend):
     """Local HuggingFace generation backend."""
     name = "hf_local"
 
-    def __init__(self, model, tokenizer, use_constrained_decoding: bool, device: str):
+    def __init__(self, model, tokenizer, device: str):
         self.model = model
         self.tokenizer = tokenizer
-        self.use_constrained_decoding = use_constrained_decoding
         self.device = device
 
     def is_enabled(self) -> bool:
@@ -253,7 +174,6 @@ class HFLocalBackend(InferenceBackend):
         temperature: float,
         max_new_tokens: int,
         game_spec: Optional[GameSpec] = None,
-        use_guided_choice: bool = False,
         mode: str = "game",
     ) -> List[str]:
         raise RuntimeError("HFLocalBackend.generate should not be called with string prompts.")
@@ -267,13 +187,12 @@ class HFLocalBackend(InferenceBackend):
         game_spec: Optional[GameSpec] = None,
     ) -> str:
         return generate_completion(
-            self.model, 
-            self.tokenizer, 
-            player_id, 
-            observation, 
-            temperature, 
+            self.model,
+            self.tokenizer,
+            player_id,
+            observation,
+            temperature,
             max_new_tokens,
-            self.use_constrained_decoding,
             self.device,
             game_spec=game_spec,
         )
@@ -293,13 +212,11 @@ class VLLMServerBackend(InferenceBackend):
         lora_name: str = "ppo_policy",
         base_lora_name: str = "base_policy",
         allow_lora_reload: bool = True,
-        use_constrained_decoding: bool = False,
     ):
         self.base_url = normalize_vllm_openai_base_url(base_url)
         self.model_name = model_name
         self.lora_name = lora_name
         self.allow_lora_reload = bool(allow_lora_reload)
-        self.use_constrained_decoding = use_constrained_decoding
         self.timeout_s = float(timeout_s)
         self.session = requests.Session()
         self.headers: Dict[str, str] = {}
@@ -427,7 +344,6 @@ class VLLMServerBackend(InferenceBackend):
         temperature: float,
         max_new_tokens: int,
         game_spec: Optional[GameSpec] = None,
-        use_guided_choice: bool = False,
         mode: str = "game",
         adapter_name: Optional[str] = None,
     ) -> List[str]:
@@ -435,7 +351,6 @@ class VLLMServerBackend(InferenceBackend):
             raise RuntimeError("vLLM server backend is not available")
 
         model_to_use = adapter_name if adapter_name else self._active_model_for_generation
-        # HARD action-only via guided decoding (guided_choice) if constrained decoding is enabled
         payload = {
             "model": model_to_use,
             "prompt": prompts,
@@ -445,19 +360,12 @@ class VLLMServerBackend(InferenceBackend):
             "n": 1,
             "stream": False,
         }
-        
+
         if mode == "game" and game_spec is not None:
             stop = game_spec.stop_sequences if game_spec.stop_sequences else None
-            guided_choice = None
-            if game_spec.action_space and (use_guided_choice or self.use_constrained_decoding):
-                guided_choice = game_spec.action_space
-
             if stop:
                 payload["stop"] = stop
                 payload["include_stop_str_in_output"] = True
-            if guided_choice:
-                payload.setdefault("extra_body", {})
-                payload["extra_body"]["guided_choice"] = guided_choice
 
         r = self._post_json("/completions", payload)
         if r.status_code != 200:
@@ -516,7 +424,6 @@ class MultiVLLMBackend(InferenceBackend):
         temperature: float,
         max_new_tokens: int,
         game_spec = None,
-        use_guided_choice: bool = False,
         mode: str = "game",
         adapter_name: Optional[str] = None,
     ) -> List[str]:
@@ -533,7 +440,7 @@ class MultiVLLMBackend(InferenceBackend):
             end = min(start + chunk_size, n_prompts)
             if start < end:
                 chunks.append((i, prompts[start:end]))
-        
+
         results = {}
 
         def generate_chunk(idx, backend, chunk):
@@ -542,7 +449,6 @@ class MultiVLLMBackend(InferenceBackend):
                     temperature=temperature,
                     max_new_tokens=max_new_tokens,
                     game_spec=game_spec,
-                    use_guided_choice=use_guided_choice,
                     mode=mode,
                     adapter_name=adapter_name,
                 )
@@ -565,19 +471,19 @@ class MultiVLLMBackend(InferenceBackend):
 # =========================
 # Backend initialization
 # =========================
-def init_inference_backend(model, tokenizer, use_constrained_decoding: bool, device: str) -> InferenceBackend:
+def init_inference_backend(model, tokenizer, device: str) -> InferenceBackend:
     """Pick the fastest available inference backend."""
-    
+
     vllm_base_urls = os.getenv("VLLM_BASE_URLS", "").strip()
     vllm_base_url = os.getenv("VLLM_BASE_URL", "").strip()
-    
+
     if vllm_base_urls:
         urls = [u.strip() for u in vllm_base_urls.split(",")]
     elif vllm_base_url:
         urls = [vllm_base_url]
     else:
         urls = []
-    
+
     if urls:
         model_name = os.getenv("VLLM_MODEL", "Qwen/Qwen3-4B-Instruct-2507")
         api_key = os.getenv("VLLM_API_KEY", "") or None
@@ -594,7 +500,6 @@ def init_inference_backend(model, tokenizer, use_constrained_decoding: bool, dev
                 timeout_s=timeout_s,
                 lora_name=lora_name,
                 allow_lora_reload=allow_lora_reload,
-                use_constrained_decoding=use_constrained_decoding,
             )
 
             if backend.is_enabled():
@@ -612,4 +517,4 @@ def init_inference_backend(model, tokenizer, use_constrained_decoding: bool, dev
         else:
             print("[vLLM] No servers reachable, falling back to local HF generation")
     
-    return HFLocalBackend(model, tokenizer, use_constrained_decoding, device)
+    return HFLocalBackend(model, tokenizer, device)

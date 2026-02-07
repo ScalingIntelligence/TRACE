@@ -56,7 +56,6 @@ except Exception:
 def main():
     # Parse arguments
     args = parse_args()
-    use_constrained_decoding = bool(args.use_constrained_decoding)
     game = args.game
     num_dice = Config.NUM_DICE
     try:
@@ -81,7 +80,6 @@ def main():
     
     print(f"[Setup] Device: {device}")
     print(f"[Setup] Output directory: {output_dir_path}")
-    print(f"[Setup] Use constrained decoding: {use_constrained_decoding}")
     print(f"[Setup] Game: {game_spec.name}")
     print(f"[Setup] Max generation tokens: {max_gen_tokens}")
     if game_spec.action_space:
@@ -164,7 +162,7 @@ def main():
         print(f"[Resume] Using existing base model adapter from {base_model_adapter_dir}")
 
     # Initialize inference backend
-    inference_backend = init_inference_backend(ac.lm, tokenizer, use_constrained_decoding, device)
+    inference_backend = init_inference_backend(ac.lm, tokenizer, device)
     vllm_adapter_dir = output_dir_path / "vllm_adapter_latest"
     if hasattr(inference_backend, "sync_base_adapter"):
         inference_backend.sync_base_adapter(base_model_adapter_dir)
@@ -217,7 +215,7 @@ def main():
         # Sync policy to inference backend
         inference_backend.sync_policy(ac.lm, vllm_adapter_dir)
         if not inference_backend.is_enabled():
-            inference_backend = HFLocalBackend(ac.lm, tokenizer, use_constrained_decoding, device)
+            inference_backend = HFLocalBackend(ac.lm, tokenizer, device)
 
                 # Periodic eval (deterministic)
         if it % Config.EVAL_EVERY_ITERS == 0 and it > 0:
@@ -225,7 +223,7 @@ def main():
 
             inference_backend.sync_policy(ac.lm, vllm_adapter_dir)
             if not inference_backend.is_enabled():
-                inference_backend = HFLocalBackend(ac.lm, tokenizer, use_constrained_decoding, device)
+                inference_backend = HFLocalBackend(ac.lm, tokenizer, device)
 
             
             print(f"[eval {it}] Starting eval vs base model ({Config.EVAL_GAMES} games)")
@@ -240,7 +238,6 @@ def main():
                 max_new_tokens=max_gen_tokens,
                 seed=20_000 + it,
                 hf_hub=hf_hub,
-                use_constrained_decoding=use_constrained_decoding,
                 device=device,
                 game_spec=game_spec,
                 env_kwargs=env_kwargs,
@@ -270,7 +267,7 @@ def main():
 
             inference_backend.sync_policy(ac.lm, vllm_adapter_dir)
             if not inference_backend.is_enabled():
-                inference_backend = HFLocalBackend(ac.lm, tokenizer, use_constrained_decoding, device)
+                inference_backend = HFLocalBackend(ac.lm, tokenizer, device)
 
             print(f"[eval {it}] Starting tau2-bench evaluation...")
             t_tau2_0 = time.time()
@@ -306,9 +303,8 @@ def main():
             max_new_tokens=max_gen_tokens,
             seed=it,
             logger=rollout_logger,
-            use_constrained_decoding=use_constrained_decoding,
             device=device,
-            role_baseline_ema = role_baseline_ema,
+            role_baseline_ema=role_baseline_ema,
             game_spec=game_spec,
             env_kwargs=env_kwargs,
         )

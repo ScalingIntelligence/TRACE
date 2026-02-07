@@ -245,7 +245,6 @@ def collect_games(
     max_new_tokens: int,
     seed: int,
     logger: JSONLLogger,
-    use_constrained_decoding: bool,
     device: str,
     game_spec: GameSpec,
     env_kwargs: Optional[Dict[str, Any]] = None,
@@ -300,7 +299,6 @@ def collect_games(
                 temperature=temperature,
                 max_new_tokens=max_new_tokens,
                 game_spec=game_spec,
-                use_guided_choice=use_constrained_decoding,
             )
             t1 = time.time()
             per_item_dt = (t1 - t0) / max(1, len(active))
@@ -391,13 +389,12 @@ def collect_games(
 
                 t0 = time.time()
                 completion = generate_completion(
-                    model, 
-                    tokenizer, 
-                    pid, 
-                    obs, 
-                    temperature=temperature, 
+                    model,
+                    tokenizer,
+                    pid,
+                    obs,
+                    temperature=temperature,
                     max_new_tokens=max_new_tokens,
-                    use_constrained_decoding=use_constrained_decoding,
                     device=device,
                     game_spec=game_spec,
                 )

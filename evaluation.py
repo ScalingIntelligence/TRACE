@@ -187,7 +187,6 @@ def evaluate_vs_base(
     max_new_tokens: int,
     seed: int,
     hf_hub: Path,
-    use_constrained_decoding: bool,
     device: str,
     game_spec: GameSpec,
     env_kwargs: Optional[Dict[str, Any]] = None,
@@ -228,7 +227,6 @@ def evaluate_vs_base(
     else:
         base_model = None
         print("[eval] Using vLLM for base model", time.time())
-    
 
     half = max(1, num_games // 2)
     envs = []
@@ -272,18 +270,16 @@ def evaluate_vs_base(
                     temperature=temperature,
                     max_new_tokens=max_new_tokens,
                     game_spec=game_spec,
-                    use_guided_choice=use_constrained_decoding,
                 )
             else:
                 completions = [
                     generate_completion(
-                        current_model, 
-                        tokenizer, 
-                        pid, 
-                        obs, 
-                        temperature=temperature, 
+                        current_model,
+                        tokenizer,
+                        pid,
+                        obs,
+                        temperature=temperature,
                         max_new_tokens=max_new_tokens,
-                        use_constrained_decoding=use_constrained_decoding,
                         device=device,
                         game_spec=game_spec,
                     )
@@ -328,13 +324,12 @@ def evaluate_vs_base(
             else:
                 completions = [
                     generate_completion(
-                        base_model, 
-                        tokenizer, 
-                        pid, 
-                        obs, 
-                        temperature=temperature, 
+                        base_model,
+                        tokenizer,
+                        pid,
+                        obs,
+                        temperature=temperature,
                         max_new_tokens=max_new_tokens,
-                        use_constrained_decoding=use_constrained_decoding,
                         device=device,
                         game_spec=game_spec,
                     )
