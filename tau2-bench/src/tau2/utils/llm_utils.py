@@ -332,6 +332,8 @@ def generate(
 
     # Extract max_context_length if provided (don't pass to litellm)
     max_context_length = kwargs.pop("max_context_length", None)
+    # Extract tokenizer_model if provided (for LoRA adapters whose name isn't a valid HF model)
+    tokenizer_model = kwargs.pop("tokenizer_model", None)
 
     if model.startswith("claude") and not ALLOW_SONNET_THINKING:
         kwargs["thinking"] = {"type": "disabled"}
@@ -343,7 +345,7 @@ def generate(
     # Truncate messages if max_context_length is specified
     if max_context_length is not None:
         litellm_messages = truncate_messages_to_fit_context(
-            model=model,
+            model=tokenizer_model or model,
             messages=litellm_messages,
             max_context_length=max_context_length,
             tools=tools_schema,

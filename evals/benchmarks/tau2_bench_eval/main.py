@@ -147,8 +147,12 @@ def build_tau2_command(config: Dict[str, Any], cli_overrides: Dict[str, Any]) ->
     lora_adapter_name = merged.get("lora_adapter_name", "custom_adapter")
 
     # If LoRA adapter is specified and agent uses vLLM, load the adapter
-    if lora_adapter_path and agent_uses_vllm and vllm_config.get("base_url"):
-        base_url = vllm_config["base_url"]
+    # Resolve base_url for LoRA loading: prefer base_url, fall back to first agent_base_urls entry
+    _lora_base_url = vllm_config.get("base_url")
+    if not _lora_base_url and vllm_config.get("agent_base_urls"):
+        _lora_base_url = vllm_config["agent_base_urls"][0]
+    if lora_adapter_path and agent_uses_vllm and _lora_base_url:
+        base_url = _lora_base_url
 
         # Check if adapter is already loaded
         if not check_model_available(base_url, lora_adapter_name):
