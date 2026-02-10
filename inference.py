@@ -17,13 +17,36 @@ from game_registry import GameSpec
 # =========================
 # Prompt building
 # =========================
-def messages_for_game(player_id: int, observation: str, game_spec: GameSpec) -> list:
-    """Build messages for a game."""
+def messages_for_game(player_id: int, observation: str, game_spec: GameSpec, env=None) -> list:
+    """Build messages for a game.
+
+    If env supports structured messages (e.g. adversarial_policy), uses
+    the game's native system prompt + conversation format for better
+    training→eval alignment.
+    """
+    if env is not None and getattr(env, 'supports_structured_messages', False):
+        system = env.get_system_prompt()
+        conv = env.get_messages()
+        return [{"role": "system", "content": system}] + conv
+
     system_prompt = game_spec.system_prompt or "You are playing a 2-player game. Respond with exactly one action."
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": observation},
     ]
+
+
+def tools_for_game(env=None) -> Optional[list]:
+    """Get OpenAI-format tool schemas from env if it supports structured messages.
+
+    When tools are returned, they should be passed to apply_chat_template(tools=...)
+    so the tokenizer formats them identically to how vLLM's /chat/completions
+    endpoint formats them during evaluation.
+    """
+    if env is not None and getattr(env, 'supports_structured_messages', False):
+        schemas = env.get_tool_schemas()
+        return schemas if schemas else None
+    return None
 
 
 def messages_for_math(question: str) -> list:
@@ -34,25 +57,28 @@ def messages_for_math(question: str) -> list:
     ]
 
 
-def build_prompt_text(tokenizer, msgs: list) -> str:
+def build_prompt_text(tokenizer, msgs: list, tools: Optional[list] = None) -> str:
     """
     Build a string prompt using the model's chat template.
     Uses string prompts for vLLM/OpenAI-server compatibility.
+
+    When tools is provided, passes it to apply_chat_template(tools=...)
+    so Qwen3's template formats them as <tools>...</tools> XML — matching
+    exactly what vLLM's /chat/completions does during evaluation.
     """
+    kwargs = dict(
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=Config.ENABLE_THINKING,
+    )
+    if tools:
+        kwargs["tools"] = tools
     try:
-        return tokenizer.apply_chat_template(
-            msgs, 
-            tokenize=False, 
-            add_generation_prompt=True,
-            enable_thinking=Config.ENABLE_THINKING
-        )
+        return tokenizer.apply_chat_template(msgs, **kwargs)
     except TypeError:
-        ids = tokenizer.apply_chat_template(
-            msgs, 
-            add_generation_prompt=True, 
-            return_tensors="pt",
-            enable_thinking=Config.ENABLE_THINKING
-        )[0]
+        kwargs.pop("tokenize", None)
+        kwargs["return_tensors"] = "pt"
+        ids = tokenizer.apply_chat_template(msgs, **kwargs)[0]
         return tokenizer.decode(ids, skip_special_tokens=False)
 
 
@@ -69,6 +95,7 @@ def generate_completion(
     max_new_tokens: int,
     device: str,
     game_spec: Optional[GameSpec] = None,
+    env=None,
 ) -> str:
     """
     HF local generation. Returns the full completion text.
@@ -81,13 +108,16 @@ def generate_completion(
         system_prompt="You are playing a 2-player game. Respond with one action.",
         max_gen_tokens=max_new_tokens,
     )
-    msgs = messages_for_game(player_id, observation, game_spec)
-    input_ids = tokenizer.apply_chat_template(
-        msgs,
+    msgs = messages_for_game(player_id, observation, game_spec, env=env)
+    tools = tools_for_game(env)
+    kwargs = dict(
         add_generation_prompt=True,
         return_tensors="pt",
-        enable_thinking=Config.ENABLE_THINKING
-    ).to(device)
+        enable_thinking=Config.ENABLE_THINKING,
+    )
+    if tools:
+        kwargs["tools"] = tools
+    input_ids = tokenizer.apply_chat_template(msgs, **kwargs).to(device)
 
     prompt_len = int(input_ids.shape[-1])
 
@@ -392,10 +422,10 @@ class MultiVLLMBackend(InferenceBackend):
             raise RuntimeError("No vLLM servers are enabled")
         
     def is_enabled(self) -> bool:
-        return len(self.backends) > 0
-        
+        return any(b.is_enabled() for b in self.backends)
+
     def supports_batch(self) -> bool:
-        return True
+        return self.is_enabled()
 
     def has_base_adapter(self) -> bool:
         return all(b.has_base_adapter() for b in self.backends)

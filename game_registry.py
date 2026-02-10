@@ -29,16 +29,24 @@ from multistep_sequence_game import (
     extract_action as extract_action_multistep,
     SYSTEM_PROMPT_MULTISTEP,
 )
-from policy_gated_action_game import (
-    PolicyGatedActionGame,
-    extract_action as extract_action_policy_gated,
-    SYSTEM_PROMPT_POLICY_GATED,
-)
-from policy_verification_game import (
-    PolicyVerificationGame,
-    extract_action as extract_action_policy_verify,
-    SYSTEM_PROMPT_POLICY_VERIFICATION,
-)
+try:
+    from policy_gated_action_game import (
+        PolicyGatedActionGame,
+        extract_action as extract_action_policy_gated,
+        SYSTEM_PROMPT_POLICY_GATED,
+    )
+except ImportError:
+    PolicyGatedActionGame = None
+
+try:
+    from policy_verification_game import (
+        PolicyVerificationGame,
+        extract_action as extract_action_policy_verify,
+        SYSTEM_PROMPT_POLICY_VERIFICATION,
+    )
+except ImportError:
+    PolicyVerificationGame = None
+
 from policy_action_game import (
     PolicyActionGame,
     extract_action as extract_action_policy_action,
@@ -49,22 +57,38 @@ from conditional_action_game import (
     extract_action as extract_action_conditional,
     SYSTEM_PROMPT_CONDITIONAL_ACTION,
 )
-from tool_chain_game import (
-    ToolChainGame,
-    extract_action as extract_action_tool_chain,
-    SYSTEM_PROMPT_TOOL_CHAIN,
-)
-from progressive_service_agent_env import (
-    ProgressiveServiceAgentEnv,
-    extract_action as extract_action_progressive_service,
-    SYSTEM_PROMPT as SYSTEM_PROMPT_PROGRESSIVE_SERVICE,
-    TaskComplexity,
-)
-from adversarial_policy_game import (
-    AdversarialPolicyGame,
-    extract_action as extract_action_adversarial,
-    SYSTEM_PROMPT as SYSTEM_PROMPT_ADVERSARIAL,
-)
+
+try:
+    from tool_chain_game import (
+        ToolChainGame,
+        extract_action as extract_action_tool_chain,
+        SYSTEM_PROMPT_TOOL_CHAIN,
+    )
+except ImportError:
+    ToolChainGame = None
+
+try:
+    from progressive_service_agent_env import (
+        ProgressiveServiceAgentEnv,
+        extract_action as extract_action_progressive_service,
+        SYSTEM_PROMPT as SYSTEM_PROMPT_PROGRESSIVE_SERVICE,
+        TaskComplexity,
+    )
+except ImportError:
+    ProgressiveServiceAgentEnv = None
+    TaskComplexity = None
+
+try:
+    from adversarial_policy_game import (
+        AdversarialPolicyGame,
+        extract_action as extract_action_adversarial,
+        SYSTEM_PROMPT as SYSTEM_PROMPT_ADVERSARIAL,
+        UserLLMClient,
+    )
+except ImportError:
+    AdversarialPolicyGame = None
+    UserLLMClient = None
+
 from pathlib import Path
 
 
@@ -307,39 +331,37 @@ def _register_builtin_games() -> None:
         )
     )
 
-    # Policy-gated action game - trains state verification and constraint compliance
-    # Binary rewards only, targets tau-bench core failure modes
-    def make_policy_gated_action() -> PolicyGatedActionGame:
-        return PolicyGatedActionGame(max_steps=15)
+    if PolicyGatedActionGame is not None:
+        def make_policy_gated_action() -> PolicyGatedActionGame:
+            return PolicyGatedActionGame(max_steps=15)
 
-    register_game(
-        GameSpec(
-            name="policy_gated_action",
-            make_env=make_policy_gated_action,
-            extract_action=extract_action_policy_gated,
-            action_space=[],
-            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
-            system_prompt=SYSTEM_PROMPT_POLICY_GATED,
-            max_gen_tokens=256,  # Concise: tool calls are ~50-120 tokens max
+        register_game(
+            GameSpec(
+                name="policy_gated_action",
+                make_env=make_policy_gated_action,
+                extract_action=extract_action_policy_gated,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_POLICY_GATED,
+                max_gen_tokens=256,
+            )
         )
-    )
 
-    # Simplified policy verification - single-step classification
-    # Use this FIRST to train policy reasoning, then graduate to policy_gated_action
-    def make_policy_verification() -> PolicyVerificationGame:
-        return PolicyVerificationGame()
+    if PolicyVerificationGame is not None:
+        def make_policy_verification() -> PolicyVerificationGame:
+            return PolicyVerificationGame()
 
-    register_game(
-        GameSpec(
-            name="policy_verification",
-            make_env=make_policy_verification,
-            extract_action=extract_action_policy_verify,
-            action_space=["[approve]", "[deny]"],
-            stop_sequences=[] if Config.ENABLE_THINKING else ["]"],
-            system_prompt=SYSTEM_PROMPT_POLICY_VERIFICATION,
-            max_gen_tokens=64,  # Very short: just [approve] or [deny]
+        register_game(
+            GameSpec(
+                name="policy_verification",
+                make_env=make_policy_verification,
+                extract_action=extract_action_policy_verify,
+                action_space=["[approve]", "[deny]"],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["]"],
+                system_prompt=SYSTEM_PROMPT_POLICY_VERIFICATION,
+                max_gen_tokens=64,
+            )
         )
-    )
 
     # Policy Action Game - single-step tool calling with policy reasoning
     # All info provided, model must output correct tool call or refuse
@@ -375,125 +397,55 @@ def _register_builtin_games() -> None:
         )
     )
 
-    # Tool Chain Game - 2-step tool chaining
-    def make_tool_chain() -> ToolChainGame:
-        return ToolChainGame(max_steps=5)
+    if ToolChainGame is not None:
+        def make_tool_chain() -> ToolChainGame:
+            return ToolChainGame(max_steps=5)
 
-    register_game(
-        GameSpec(
-            name="tool_chain",
-            make_env=make_tool_chain,
-            extract_action=extract_action_tool_chain,
-            action_space=[],
-            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
-            system_prompt=SYSTEM_PROMPT_TOOL_CHAIN,
-            max_gen_tokens=256,
-        )
-    )
-
-    # Progressive Service Agent - comprehensive tau-bench skill training
-    # Trains: authentication, one-shot constraints, conditional logic,
-    # multi-item batching, information discovery, entity disambiguation, confirmation
-    def make_progressive_service_agent() -> ProgressiveServiceAgentEnv:
-        return ProgressiveServiceAgentEnv(max_steps=20)
-
-    register_game(
-        GameSpec(
-            name="progressive_service_agent",
-            make_env=make_progressive_service_agent,
-            extract_action=extract_action_progressive_service,
-            action_space=[],
-            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
-            system_prompt=SYSTEM_PROMPT_PROGRESSIVE_SERVICE,
-            max_gen_tokens=512,  # Longer: multi-turn dialogue with tool calls
-        )
-    )
-
-    # Progressive Service Agent with CURRICULUM LEARNING
-    # Auto-advances difficulty when win rate exceeds 70% over last 3 iterations
-    def make_progressive_service_curriculum() -> ProgressiveServiceAgentEnv:
-        return ProgressiveServiceAgentEnv(
-            max_steps=20,
-            curriculum=True,
-            curriculum_threshold=0.7,
-            games_per_iter=512,      # Matches Config.GAMES_PER_ITER
-            curriculum_iters=3,       # Consider last 3 iterations for win rate
+        register_game(
+            GameSpec(
+                name="tool_chain",
+                make_env=make_tool_chain,
+                extract_action=extract_action_tool_chain,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_TOOL_CHAIN,
+                max_gen_tokens=256,
+            )
         )
 
-    register_game(
-        GameSpec(
-            name="progressive_service_curriculum",
-            make_env=make_progressive_service_curriculum,
-            extract_action=extract_action_progressive_service,
-            action_space=[],
-            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
-            system_prompt=SYSTEM_PROMPT_PROGRESSIVE_SERVICE,
-            max_gen_tokens=512,
+    if ProgressiveServiceAgentEnv is not None:
+        def make_progressive_service_agent() -> ProgressiveServiceAgentEnv:
+            return ProgressiveServiceAgentEnv(max_steps=20)
+
+        register_game(
+            GameSpec(
+                name="progressive_service_agent",
+                make_env=make_progressive_service_agent,
+                extract_action=extract_action_progressive_service,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_PROGRESSIVE_SERVICE,
+                max_gen_tokens=512,
+            )
         )
-    )
-
-    # Progressive Service Agent variants for each complexity level
-    def make_progressive_service_simple() -> ProgressiveServiceAgentEnv:
-        return ProgressiveServiceAgentEnv(max_steps=15, complexity=TaskComplexity.SIMPLE_QUERY)
-
-    def make_progressive_service_conditional() -> ProgressiveServiceAgentEnv:
-        return ProgressiveServiceAgentEnv(max_steps=20, complexity=TaskComplexity.CONDITIONAL)
-
-    def make_progressive_service_full() -> ProgressiveServiceAgentEnv:
-        return ProgressiveServiceAgentEnv(max_steps=25, complexity=TaskComplexity.FULL_COMPLEXITY)
-
-    register_game(
-        GameSpec(
-            name="progressive_service_simple",
-            make_env=make_progressive_service_simple,
-            extract_action=extract_action_progressive_service,
-            action_space=[],
-            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
-            system_prompt=SYSTEM_PROMPT_PROGRESSIVE_SERVICE,
-            max_gen_tokens=512,
-        )
-    )
-
-    register_game(
-        GameSpec(
-            name="progressive_service_conditional",
-            make_env=make_progressive_service_conditional,
-            extract_action=extract_action_progressive_service,
-            action_space=[],
-            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
-            system_prompt=SYSTEM_PROMPT_PROGRESSIVE_SERVICE,
-            max_gen_tokens=512,
-        )
-    )
-
-    register_game(
-        GameSpec(
-            name="progressive_service_full",
-            make_env=make_progressive_service_full,
-            extract_action=extract_action_progressive_service,
-            action_space=[],
-            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
-            system_prompt=SYSTEM_PROMPT_PROGRESSIVE_SERVICE,
-            max_gen_tokens=512,
-        )
-    )
 
     # Adversarial Policy Compliance Game — targets Skill 1 failures
     # Trains policy adherence under adversarial user pressure
-    def make_adversarial_policy() -> AdversarialPolicyGame:
-        return AdversarialPolicyGame(max_steps=20)
+    if AdversarialPolicyGame is not None:
+        def make_adversarial_policy(user_client=None) -> AdversarialPolicyGame:
+            return AdversarialPolicyGame(max_steps=30, user_client=user_client)
 
-    register_game(
-        GameSpec(
-            name="adversarial_policy",
-            make_env=make_adversarial_policy,
-            extract_action=extract_action_adversarial,
-            action_space=[],
-            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
-            system_prompt=SYSTEM_PROMPT_ADVERSARIAL,
-            max_gen_tokens=512,
+        register_game(
+            GameSpec(
+                name="adversarial_policy",
+                make_env=make_adversarial_policy,
+                extract_action=extract_action_adversarial,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_ADVERSARIAL,
+                max_gen_tokens=1024,
+            )
         )
-    )
 
 
 def _register_openspiel_games() -> None:

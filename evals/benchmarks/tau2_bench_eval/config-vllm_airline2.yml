@@ -35,6 +35,7 @@ user: null
 # task_ids: [18, 21, 31, 45, 48, 57, 58]
 
 
+max_steps: 50
 max_concurrency: 1
 seed: 42
 
@@ -50,10 +51,10 @@ vllm:
   api_key: null                                                          # No API key needed for local
   # Agent servers (4B model) - ports 8090, 8091
   agent_base_urls:
-    - http://localhost:9001/v1
+    - http://localhost:9000/v1
   # User servers (30B model) - ports 9000, 9001
   user_base_urls:
-    - http://localhost:9001/v1
+    - http://localhost:9000/v1
 
 # Run evaluation:
 #   python main.py --config config-vllm.yml

@@ -65,15 +65,16 @@ def parse_args():
 def setup_environment(args):
     """Setup cache directories, environment variables, and device settings."""
     
-    # # Determine root directory
-    # if args.root is not None:
-    #     root = Path(args.root).resolve()
-    # else:
-    #     root = Path(f"/matx/u/{os.getenv('USER')}").resolve()
-    root = Path('/home/')
+    # Determine root directory
+    if getattr(args, 'root', None) is not None:
+        root = Path(args.root).resolve()
+    else:
+        root = Path.home()
     
-    # Setup HuggingFace cache directories
-    hf_home = root / ".cache" / "huggingface"
+    # Setup HuggingFace cache directories — always use local storage (not NFS)
+    # to avoid slow model loading over network filesystem
+    local_home = Path.home()
+    hf_home = local_home / ".cache" / "huggingface"
     hf_hub = hf_home / "hub"
     hf_datasets = hf_home / "datasets"
     

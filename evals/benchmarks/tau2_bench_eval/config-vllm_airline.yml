@@ -3,17 +3,13 @@
 # Example: vLLM local model for agent + OpenAI API for user simulator
 
 # Domain Configuration
-domain: retail                                                          # Domain to evaluate
+domain: airline                                                          # Domain to evaluate
 
 # Agent Configuration (4B model)
 # Use vllm:// prefix to indicate vLLM model
 agent_llm: vllm://Qwen/Qwen3-30B-A3B-Instruct-2507
 agent: null
 
-# LoRA Adapter Configuration (optional)
-# If specified, loads this adapter and uses it instead of base model
-lora_adapter_path: tarsur909/adversarial_v1_10iter
-lora_adapter_name: adversarial_v1_10iter
 
 # Agent LLM Arguments
 agent_llm_args:
@@ -35,12 +31,13 @@ user: null
 # task_ids: [18, 21, 31, 45, 48, 57, 58]
 
 
+max_steps: 50
 max_concurrency: 1
 seed: 42
 
 # Output Configuration
 output_dir: outputs
-save_to: qwen-3-30b-adv_v1_10iter-retail-qwen3-30b
+save_to: qwen-3-30b-adv_v1_5iter-airline-qwen3-30b
 
 # Advanced Options
 verbose: true                                                            # Enable verbose output

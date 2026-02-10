@@ -257,6 +257,9 @@ def build_tau2_command(config: Dict[str, Any], cli_overrides: Dict[str, Any]) ->
         else:
             cmd.extend(["--task-ids", str(task_ids)])
 
+    if merged.get("max_steps") is not None:
+        cmd.extend(["--max-steps", str(merged["max_steps"])])
+
     if merged.get("max_concurrency") is not None:
         cmd.extend(["--max-concurrency", str(merged["max_concurrency"])])
 
@@ -416,6 +419,7 @@ Examples:
     parser.add_argument("--task-ids", type=int, nargs="+", help="Specific task IDs to run")
 
     # Execution configuration
+    parser.add_argument("--max-steps", type=int, help="Maximum number of steps per simulation (default: 200)")
     parser.add_argument("--max-concurrency", type=int, help="Number of concurrent simulations")
     parser.add_argument("--seed", type=int, help="Random seed")
     parser.add_argument("--save-to", type=str, help="Custom filename prefix for results")

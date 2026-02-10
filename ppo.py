@@ -82,14 +82,20 @@ def pad_to_device(seqs: List[torch.Tensor], pad_id: int, device: str) -> Tuple[t
     return ids.to(device, non_blocking=True), attn.to(device, non_blocking=True)
 
 
-def build_prompt_plus_action(tokenizer, prompt_msgs: list, action_str: str) -> Tuple[torch.Tensor, int, int]:
-    """Build concatenated prompt + action tokens."""
-    prompt_ids = tokenizer.apply_chat_template(
-        prompt_msgs, 
-        add_generation_prompt=True, 
+def build_prompt_plus_action(tokenizer, prompt_msgs: list, action_str: str, tools=None) -> Tuple[torch.Tensor, int, int]:
+    """Build concatenated prompt + action tokens.
+
+    When tools is provided, passes it to apply_chat_template(tools=...)
+    so Qwen3's template formats them identically to eval.
+    """
+    kwargs = dict(
+        add_generation_prompt=True,
         return_tensors="pt",
-        enable_thinking=Config.ENABLE_THINKING
-    )[0]
+        enable_thinking=Config.ENABLE_THINKING,
+    )
+    if tools:
+        kwargs["tools"] = tools
+    prompt_ids = tokenizer.apply_chat_template(prompt_msgs, **kwargs)[0]
     action_ids = tokenizer(action_str, add_special_tokens=False, return_tensors="pt")["input_ids"][0]
     return torch.cat([prompt_ids, action_ids], dim=0), int(prompt_ids.shape[0]), int(action_ids.shape[0])
 
