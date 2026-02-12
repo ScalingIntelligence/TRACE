@@ -267,11 +267,11 @@ def parse_grpo_args_optimized():
     # -- GRPO structure --
     parser.add_argument("--group-size", type=int, default=16,
         help="Inner loop: rollouts per seed.")
-    parser.add_argument("--groups-per-batch", type=int, default=8,
+    parser.add_argument("--groups-per-batch", type=int, default=4,
         help="Outer loop: different seeds per iteration.")
 
     # -- LoRA --
-    parser.add_argument("--lora-rank", type=int, default=16,
+    parser.add_argument("--lora-rank", type=int, default=8,
         help="LoRA rank")
     parser.add_argument("--lora-alpha", type=int, default=16,
         help="LoRA alpha scaling factor")
@@ -281,16 +281,18 @@ def parse_grpo_args_optimized():
         help="Learning rate")
     parser.add_argument("--epochs", type=int, default=1,
         help="Training epochs per iteration")
-    parser.add_argument("--mini-batch-size", type=int, default=8,
+    parser.add_argument("--mini-batch-size", type=int, default=2,
         help="Mini-batch size for gradient updates")
-    parser.add_argument("--stats-chunk-size", type=int, default=8,
+    parser.add_argument("--stats-chunk-size", type=int, default=2,
         help="Chunk size for computing old/base logprobs (matches mini-batch-size for unified caching)")
     parser.add_argument("--max-grad-norm", type=float, default=1.0,
         help="Max gradient norm for clipping")
 
     # -- GRPO loss function --
-    parser.add_argument("--use-clipping", action="store_true",
-        help="Use clipped surrogate (like PPO). Default: pure importance sampling.")
+    parser.add_argument("--use-clipping", action="store_true", default=True,
+        help="Use clipped surrogate (like PPO).")
+    parser.add_argument("--no-clipping", dest="use_clipping", action="store_false",
+        help="Disable clipping and use pure importance sampling.")
     parser.add_argument("--clip-eps", type=float, default=0.2,
         help="Clipping epsilon (only used with --use-clipping)")
     parser.add_argument("--kl-coef", type=float, default=0.0,
@@ -331,6 +333,11 @@ def parse_grpo_args_optimized():
         help="Temperature for user LLM generation")
     parser.add_argument("--user-llm-max-tokens", type=int, default=1024,
         help="Max tokens for user LLM generation")
+
+    # -- Adversarial policy game --
+    parser.add_argument("--adversarial-ratio", type=float, default=0.2,
+        help="Ratio of adversarial vs cooperative scenarios (0.0-1.0). "
+             "At 0.2, 20%% adversarial (T1-T17) and 80%% cooperative (T18-T24).")
 
     # -- Training sample optimizations --
     parser.add_argument("--filter-info-turns", action="store_true", default=True,
@@ -384,6 +391,10 @@ def main():
         env_kwargs["user_client"] = user_client
         print(f"[User LLM] {args.user_llm_url} model={args.user_llm_model}")
 
+    # Wire up adversarial_ratio for adversarial_policy game
+    if game_spec.name == "adversarial_policy":
+        env_kwargs["adversarial_ratio"] = args.adversarial_ratio
+
     # ---- Environment setup ----
     env_config = setup_environment(args)
     device = env_config["device"]
@@ -408,13 +419,15 @@ def main():
     print(f"  Use clipping:        {args.use_clipping}")
     print(f"  Normalize by len:    {args.normalize_by_len}")
     print(f"  Temperature:         {args.temperature}")
+    if game_spec.name == "adversarial_policy":
+        print(f"  Adversarial ratio:   {args.adversarial_ratio}")
     print(f"  Max gen tokens:      {max_gen_tokens}")
     print(f"  Device:              {device}")
     print(f"  Output dir:          {output_dir_path}")
     print(f"  [OPT] length sorting: ON")
     print(f"  [OPT] pinned memory:  ON")
     print(f"  [OPT] torch.compile:  {use_compile}")
-    print(f"  [OPT] train autocast: {use_train_autocast}")
+    print(f"  [OPT] train autocast: ALWAYS ON (matches step 6)")
     if args.kl_coef == 0:
         print(f"  [OPT] base_logp:      SKIPPED (kl_coef=0)")
     print(f"  [OPT] filter info turns: {args.filter_info_turns}")
@@ -643,7 +656,12 @@ def main():
                     f"({samples_before_dt_filter} -> {len(samples)} samples)"
                 )
 
-        # ---- 4c. Early skip when all advantages are zero ----
+        # ---- 4c. Normalize advantages (zero mean, unit variance) ----
+        adv_std = advantages.std()
+        if adv_std > 1e-8:
+            advantages = (advantages - advantages.mean()) / (adv_std + 1e-8)
+
+        # ---- 4d. Early skip when all advantages are zero ----
         avg_abs_advantage = float(advantages.abs().mean().item())
         if avg_abs_advantage == 0.0:
             t_train1 = time.time()
@@ -675,7 +693,7 @@ def main():
 
             print(
                 f"[iter {it}] SKIPPED (all advantages zero) "
-                f"reward={avg_reward:.3f} win_p0={env_metrics['env/win_rate_p0']:.3f} "
+                f"reward={avg_reward:.3f} avg_r={env_metrics['env/avg_reward_p0']:.3f} "
                 f"samples={N} filtered={num_filtered} "
                 f"collect={logs['time/collect_sec']:.1f}s"
             )
@@ -703,6 +721,8 @@ def main():
         prompt_lens: List[int] = []
         action_lens: List[int] = []
         total_tool_results_truncated = 0
+        max_seq_len = Config.MAX_SEQ_LENGTH
+        num_skipped_long = 0
 
         for s in samples:
             if args.tool_result_max_chars > 0:
@@ -711,11 +731,20 @@ def main():
             else:
                 msgs = s.prompt_msgs
             ids, pL, aL = build_prompt_plus_action(tokenizer, msgs, s.completion_text, tools=s.tools)
+            if ids.shape[0] > max_seq_len:
+                num_skipped_long += 1
+                continue
             seqs_cpu.append(ids.cpu())
             prompt_lens.append(pL)
             action_lens.append(aL)
 
+        if num_skipped_long > 0:
+            print(f"  [OPT] Skipped {num_skipped_long}/{len(samples)} samples exceeding {max_seq_len} tokens")
+
         N = len(seqs_cpu)
+        if N == 0:
+            print(f"  [iter {iteration}] All samples exceeded max_seq_len — skipping training step")
+            continue
         seq_lens = [s.shape[0] for s in seqs_cpu]
 
         t_tok1 = time.time()
@@ -756,65 +785,78 @@ def main():
         t_pad = time.time()
 
         # ---- 6. Compute old_logp and (optionally) base_logp ----
-        # With stats_chunk_size=8 (default, matching mini_batch_size), step 6
-        # uses half as many forward passes as the original (stats_chunk_size=4).
-        # Benchmarked: 3.6x faster step 6 due to fewer batches + better GPU util.
         model.eval()
         old_logp_cpu = torch.empty(N, dtype=torch.float32)
         compute_base = args.kl_coef > 0
         base_logp_cpu = torch.empty(N, dtype=torch.float32) if compute_base else None
 
-        with torch.no_grad():
-            # -- Pass 1: old_logp (adapter ON) --
-            for mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al in stats_batch_cache:
-                mb_ids = mb_ids_cpu.to(device, non_blocking=True)
-                mb_attn = mb_attn_cpu.to(device, non_blocking=True)
+        # Check if all samples have cached logprobs from vLLM generation
+        all_cached = all(s.cached_logp is not None for s in samples)
+        used_cached_logp = False
 
-                with autocast_ctx(device):
-                    outputs = model(
-                        input_ids=mb_ids,
-                        attention_mask=mb_attn,
-                        use_cache=False,
-                    )
-                logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+        if all_cached and not compute_base:
+            # Use cached logprobs — skip entire stats forward pass
+            for idx, s in enumerate(samples):
+                if args.normalize_by_len and s.cached_logp_n_tokens and s.cached_logp_n_tokens > 0:
+                    old_logp_cpu[idx] = s.cached_logp / s.cached_logp_n_tokens
+                else:
+                    old_logp_cpu[idx] = s.cached_logp
+            used_cached_logp = True
+        else:
+            # Fall back to full computation
+            with torch.no_grad():
+                # -- Pass 1: old_logp (adapter ON) --
+                for mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al in stats_batch_cache:
+                    mb_ids = mb_ids_cpu.to(device, non_blocking=True)
+                    mb_attn = mb_attn_cpu.to(device, non_blocking=True)
 
-                mb_old_logp = logprob_action_tokens(
-                    logits, mb_ids, mb_pl, mb_al,
-                    normalize_by_len=args.normalize_by_len,
-                )
-                old_logp_cpu[mb_idx] = mb_old_logp.detach().cpu()
-                del logits, outputs, mb_old_logp, mb_ids, mb_attn
-
-            # -- Pass 2: base_logp (adapter OFF) — single toggle --
-            if compute_base:
-                model.disable_adapter_layers()
-                try:
-                    for mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al in stats_batch_cache:
-                        mb_ids = mb_ids_cpu.to(device, non_blocking=True)
-                        mb_attn = mb_attn_cpu.to(device, non_blocking=True)
-
-                        with autocast_ctx(device):
-                            outputs = model(
-                                input_ids=mb_ids,
-                                attention_mask=mb_attn,
-                                use_cache=False,
-                            )
-                        logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
-
-                        mb_base_logp = logprob_action_tokens(
-                            logits, mb_ids, mb_pl, mb_al,
-                            normalize_by_len=args.normalize_by_len,
+                    with autocast_ctx(device):
+                        outputs = model(
+                            input_ids=mb_ids,
+                            attention_mask=mb_attn,
+                            use_cache=False,
                         )
-                        base_logp_cpu[mb_idx] = mb_base_logp.detach().cpu()
-                        del logits, outputs, mb_base_logp, mb_ids, mb_attn
-                finally:
-                    model.enable_adapter_layers()
+                    logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+
+                    mb_old_logp = logprob_action_tokens(
+                        logits, mb_ids, mb_pl, mb_al,
+                        normalize_by_len=args.normalize_by_len,
+                    )
+                    old_logp_cpu[mb_idx] = mb_old_logp.detach().cpu()
+                    del logits, outputs, mb_old_logp, mb_ids, mb_attn
+
+                # -- Pass 2: base_logp (adapter OFF) — single toggle --
+                if compute_base:
+                    model.disable_adapter_layers()
+                    try:
+                        for mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al in stats_batch_cache:
+                            mb_ids = mb_ids_cpu.to(device, non_blocking=True)
+                            mb_attn = mb_attn_cpu.to(device, non_blocking=True)
+
+                            with autocast_ctx(device):
+                                outputs = model(
+                                    input_ids=mb_ids,
+                                    attention_mask=mb_attn,
+                                    use_cache=False,
+                                )
+                            logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+
+                            mb_base_logp = logprob_action_tokens(
+                                logits, mb_ids, mb_pl, mb_al,
+                                normalize_by_len=args.normalize_by_len,
+                            )
+                            base_logp_cpu[mb_idx] = mb_base_logp.detach().cpu()
+                            del logits, outputs, mb_base_logp, mb_ids, mb_attn
+                    finally:
+                        model.enable_adapter_layers()
 
         # Free stats cache if separate from train cache
         if not unified_batches:
             del stats_batch_cache
 
         t_stats = time.time()
+        if used_cached_logp:
+            print(f"  [OPT] Used cached vLLM logprobs (skipped {len(train_batches)} forward passes, saved ~{len(train_batches) * 37:.0f}s)")
 
         # ---- 7. GRPO training ----
         model.train()
@@ -842,20 +884,8 @@ def main():
                 mb_adv = advantages[mb_idx].to(device)
                 mb_base_logp = base_logp_cpu[mb_idx].to(device) if base_logp_cpu is not None else None
 
-                # Forward pass
-                if use_train_autocast:
-                    with autocast_ctx(device):
-                        outputs = model(
-                            input_ids=mb_ids,
-                            attention_mask=mb_attn,
-                            use_cache=False,
-                        )
-                        logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
-                        new_logp = logprob_action_tokens(
-                            logits, mb_ids, mb_pl, mb_al,
-                            normalize_by_len=args.normalize_by_len,
-                        )
-                else:
+                # Forward pass (always autocast to match step 6 precision)
+                with autocast_ctx(device):
                     outputs = model(
                         input_ids=mb_ids,
                         attention_mask=mb_attn,
@@ -957,7 +987,7 @@ def main():
 
         print(
             f"[iter {it}] step={global_step} "
-            f"reward={avg_reward:.3f} win_p0={env_metrics['env/win_rate_p0']:.3f} "
+            f"reward={avg_reward:.3f} avg_r={env_metrics['env/avg_reward_p0']:.3f} "
             f"abs_adv={avg_abs_advantage:.3f} "
             f"invalid={env_metrics['env/invalid_move_rate']:.3f} "
             f"samples={N} info_filt={dt_filtered} const_filt={num_filtered} "
