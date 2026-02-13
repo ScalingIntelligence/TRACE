@@ -53,6 +53,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
@@ -143,7 +144,7 @@ def collect_grpo_rollouts(
     invalid_games = 0
     total_turns = 0
     extraction_failures = 0
-    p0_wins = 0
+    p0_reward_sum = 0.0
     response_lengths: List[int] = []
 
     if backend.supports_batch():
@@ -151,6 +152,7 @@ def collect_grpo_rollouts(
         envs = []
         g_ids: List[int] = []        # group_id per env
         gm_ids: List[int] = []       # game_id per env
+        # Each step tuple: (msgs, act, pid, completion, tools)
         episode_steps: List[List[Tuple[list, Optional[str], int, str, Optional[list]]]] = []
 
         for g_idx, g_seed in enumerate(group_seeds):
@@ -190,6 +192,8 @@ def collect_grpo_rollouts(
             )
             t1 = time.time()
 
+            # Phase 1: Extract actions + bookkeeping (sequential)
+            step_data = []
             for j, (i, pid, obs, legal, msgs, tools) in enumerate(meta):
                 completion = completions[j]
                 act = game_spec.extract_action(completion, legal)
@@ -198,9 +202,17 @@ def collect_grpo_rollouts(
 
                 response_lengths.append(len(completion))
                 episode_steps[i].append((msgs, act, pid, completion, tools))
-                envs[i].step(act)
                 total_turns += 1
+                step_data.append((i, pid, legal, act, completion))
 
+            # Phase 2: Step all environments in parallel (I/O-bound user LLM calls)
+            with ThreadPoolExecutor(max_workers=len(step_data)) as executor:
+                futures = [executor.submit(envs[i].step, act) for i, _, _, act, _ in step_data]
+                for f in futures:
+                    f.result()
+
+            # Phase 3: Log results (sequential for ordered writes)
+            for i, pid, legal, act, completion in step_data:
                 logger.log({
                     "type": "step",
                     "game_id": gm_ids[i],
@@ -216,7 +228,7 @@ def collect_grpo_rollouts(
         # Convert finished games to samples
         for i, env in enumerate(envs):
             invalid_games += 1 if env.invalid_player is not None else 0
-            p0_wins += 1 if env.rewards.get(0, 0.0) > 0 else 0
+            p0_reward_sum += float(env.rewards.get(0, 0.0))
 
             logger.log({
                 "type": "game_end",
@@ -276,7 +288,7 @@ def collect_grpo_rollouts(
                     total_turns += 1
 
                 invalid_games += 1 if env.invalid_player is not None else 0
-                p0_wins += 1 if env.rewards.get(0, 0.0) > 0 else 0
+                p0_reward_sum += float(env.rewards.get(0, 0.0))
 
                 for msgs, act, pid, completion, tools in ep_steps:
                     samples.append(GRPOSample(
@@ -297,7 +309,7 @@ def collect_grpo_rollouts(
         "env/total_samples": len(samples),
         "env/invalid_move_rate": extraction_failures / max(1, total_turns),
         "env/turns_per_game_mean": total_turns / max(1, total_games),
-        "env/win_rate_p0": p0_wins / max(1, total_games),
+        "env/avg_reward_p0": p0_reward_sum / max(1, total_games),
         "env/response_len_chars_mean": resp_len_mean,
     }
     return samples, metrics
@@ -423,9 +435,9 @@ def parse_grpo_args():
         help="Learning rate (higher than PPO for meaningful updates)")
     parser.add_argument("--epochs", type=int, default=1,
         help="Training epochs per iteration over collected samples")
-    parser.add_argument("--mini-batch-size", type=int, default=8,
+    parser.add_argument("--mini-batch-size", type=int, default=4,
         help="Mini-batch size for gradient updates")
-    parser.add_argument("--stats-chunk-size", type=int, default=4,
+    parser.add_argument("--stats-chunk-size", type=int, default=2,
         help="Chunk size for computing old/base logprobs (lower = less VRAM)")
     parser.add_argument("--max-grad-norm", type=float, default=1.0,
         help="Max gradient norm for clipping")
@@ -453,7 +465,7 @@ def parse_grpo_args():
         help="Path to checkpoint directory to resume from")
     parser.add_argument("--rollout-log", type=str, default="rollouts_grpo.jsonl",
         help="Filename for rollout logs")
-    parser.add_argument("--save-every", type=int, default=5,
+    parser.add_argument("--save-every", type=int, default=10,
         help="Save checkpoint every N iterations")
     parser.add_argument("--eval-every", type=int, default=100000,
         help="Eval vs base model every N iterations")
@@ -463,6 +475,11 @@ def parse_grpo_args():
         help="Math benchmark eval every N iterations (0 to disable)")
     parser.add_argument("--tau2-eval-every", type=int, default=0,
         help="Tau2-bench eval every N iterations (0 to disable)")
+
+    # -- Adversarial policy game --
+    parser.add_argument("--adversarial-ratio", type=float, default=0.2,
+        help="Ratio of adversarial vs cooperative scenarios (0.0-1.0). "
+             "At 0.2, 20%% adversarial (T1-T17) and 80%% cooperative (T18-T24).")
 
     # -- User LLM (for adversarial_policy game) --
     parser.add_argument("--user-llm-url", type=str, default=None,
@@ -515,6 +532,10 @@ def main():
         env_kwargs["user_client"] = user_client
         print(f"[User LLM] {args.user_llm_url} model={args.user_llm_model}")
 
+    # Wire up adversarial_ratio for adversarial_policy game
+    if game_spec.name == "adversarial_policy":
+        env_kwargs["adversarial_ratio"] = args.adversarial_ratio
+
     # ---- Environment setup (reuse existing config infrastructure) ----
     env_config = setup_environment(args)
     device = env_config["device"]
@@ -539,6 +560,8 @@ def main():
     print(f"  Use clipping:        {args.use_clipping}")
     print(f"  Normalize by len:    {args.normalize_by_len}")
     print(f"  Temperature:         {args.temperature}")
+    if game_spec.name == "adversarial_policy":
+        print(f"  Adversarial ratio:   {args.adversarial_ratio}")
     print(f"  Max gen tokens:      {max_gen_tokens}")
     print(f"  Device:              {device}")
     print(f"  Output dir:          {output_dir_path}")
@@ -776,7 +799,7 @@ def main():
 
             print(
                 f"[iter {it}] SKIPPED (all advantages zero) "
-                f"reward={avg_reward:.3f} win_p0={env_metrics['env/win_rate_p0']:.3f} "
+                f"reward={avg_reward:.3f} avg_r={env_metrics['env/avg_reward_p0']:.3f} "
                 f"samples={N} filtered={num_filtered} "
                 f"collect={logs['time/collect_sec']:.1f}s"
             )
@@ -798,14 +821,28 @@ def main():
         seqs_cpu: List[torch.Tensor] = []
         prompt_lens: List[int] = []
         action_lens: List[int] = []
+        kept_indices: List[int] = []
+        max_seq_len = Config.MAX_SEQ_LENGTH
+        num_skipped_long = 0
 
-        for s in samples:
+        for i, s in enumerate(samples):
             ids, pL, aL = build_prompt_plus_action(tokenizer, s.prompt_msgs, s.completion_text, tools=s.tools)
+            if ids.shape[0] > max_seq_len:
+                num_skipped_long += 1
+                continue
+            kept_indices.append(i)
             seqs_cpu.append(ids.cpu())
             prompt_lens.append(pL)
             action_lens.append(aL)
 
+        if num_skipped_long > 0:
+            print(f"  Skipped {num_skipped_long}/{len(samples)} samples exceeding {max_seq_len} tokens")
+            advantages = advantages[torch.tensor(kept_indices, dtype=torch.long)]
+
         N = len(seqs_cpu)
+        if N == 0:
+            print(f"  [iter {it}] All samples exceeded max_seq_len — skipping training step")
+            continue
 
         # ---- 6. Compute old_logp and base_logp in a single merged loop ----
         # Both passes reuse the same padded tensors on GPU to avoid
@@ -986,7 +1023,7 @@ def main():
 
         print(
             f"[iter {it}] step={global_step} "
-            f"reward={avg_reward:.3f} win_p0={env_metrics['env/win_rate_p0']:.3f} "
+            f"reward={avg_reward:.3f} avg_r={env_metrics['env/avg_reward_p0']:.3f} "
             f"abs_adv={avg_abs_advantage:.3f} "
             f"invalid={env_metrics['env/invalid_move_rate']:.3f} "
             f"samples={N} filtered={num_filtered} "

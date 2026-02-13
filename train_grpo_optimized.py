@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Optimized GRPO trainer — same algorithm as train_grpo.py, faster training step.
+Optimized GRPO trainer — based on train_grpo.py with performance and algorithmic improvements.
 
 Optimizations over train_grpo.py (each benchmarked for significant impact):
   1. Length-sorted batching: sequences sorted by length to minimize padding waste
@@ -18,18 +18,32 @@ Optimizations over train_grpo.py (each benchmarked for significant impact):
   6. Optional training-time autocast (bfloat16) via GRPO_TRAIN_AUTOCAST=1.
   7. Detailed sub-step timing breakdown (tokenize, pad, stats, grad, pad_eff).
 
-All optimizations are provably equivalent to train_grpo.py — same loss, same
-gradient computation, same advantage normalization. The only differences are:
+Algorithmic differences from train_grpo.py (beyond pure performance):
+  - Advantage normalization: advantages are standardized (mean=0, std=1) after
+    group-relative centering. train_grpo.py uses raw centered advantages.
+  - Gradient accumulation: gradients are accumulated across all mini-batches in
+    an epoch, then a single optimizer step is taken (required for distributed
+    all-reduce). train_grpo.py takes one optimizer step per mini-batch.
+  - Info-gathering turn filtering: read-only tool call turns can be filtered out
+    of training samples (--filter-info-turns, default ON).
+  - Tool result compression: old tool results are truncated to reduce prompt
+    length (--tool-result-max-chars, default 200).
+
+Performance-only differences (no algorithmic impact):
   - Batch composition (grouping similar-length sequences reduces padding)
   - Mini-batch ordering (length-bucketed then shuffled vs fully shuffled)
   - Floating-point ordering from different batch compositions (negligible)
 
 Usage (drop-in replacement for train_grpo.py):
+    # Single GPU:
     VLLM_BASE_URL=http://localhost:8000 python train_grpo_optimized.py \\
         --game adversarial_policy --group-size 8 --groups-per-batch 16
-"""
-from unsloth import FastLanguageModel
 
+    # Multi-GPU (N GPUs for ~Nx speedup on training step):
+    VLLM_BASE_URL=http://localhost:8000 torchrun --nproc_per_node=4 \\
+        train_grpo_optimized.py --game adversarial_policy \\
+        --group-size 8 --groups-per-batch 16
+"""
 import argparse
 import json
 import os
@@ -66,6 +80,11 @@ from train_grpo import (
     filter_constant_reward_groups,
 )
 from evaluation import evaluate_vs_base, evaluate_math, evaluate_tau2_bench
+from dist_utils import (
+    dist_init, dist_cleanup, is_main_rank, broadcast_objects,
+    shard_batches, allreduce_coalesced_grads, allreduce_scalars,
+    barrier, suppress_print,
+)
 
 try:
     import wandb
@@ -347,6 +366,10 @@ def parse_grpo_args_optimized():
     parser.add_argument("--tool-result-max-chars", type=int, default=200,
         help="Max chars for truncated old tool results (0 to disable)")
 
+    # -- Distributed training --
+    parser.add_argument("--dist-lr-scale", type=float, default=1.0,
+        help="Scale learning rate for distributed training (try 2-4x with many GPUs)")
+
     # -- Root directory --
     parser.add_argument("--root", type=str, default=None,
         help="Root directory for cache and outputs")
@@ -359,7 +382,20 @@ def parse_grpo_args_optimized():
 # ============================================================================
 
 def main():
+    # ---- Distributed init (must precede any CUDA / model loading) ----
+    rank, world_size, local_rank = dist_init()
+    if not is_main_rank():
+        suppress_print()
+
+    # Import Unsloth AFTER dist_init() so CUDA device is already set
+    # (Unsloth may initialize CUDA context during import)
+    from unsloth import FastLanguageModel
+
     args = parse_grpo_args_optimized()
+
+    # Apply distributed LR scaling
+    if world_size > 1 and args.dist_lr_scale != 1.0:
+        args.lr *= args.dist_lr_scale
 
     # Optimization flags via env vars
     use_compile = os.getenv("GRPO_COMPILE", "0") == "1"
@@ -397,7 +433,7 @@ def main():
 
     # ---- Environment setup ----
     env_config = setup_environment(args)
-    device = env_config["device"]
+    device = f"cuda:{local_rank}" if world_size > 1 else env_config["device"]
     hf_hub = env_config["hf_hub"]
     output_dir_path = env_config["output_dir_path"]
     rollout_log_path = env_config["rollout_log_path"]
@@ -432,19 +468,39 @@ def main():
         print(f"  [OPT] base_logp:      SKIPPED (kl_coef=0)")
     print(f"  [OPT] filter info turns: {args.filter_info_turns}")
     print(f"  [OPT] tool result trunc: {args.tool_result_max_chars} chars (0=off)")
+    if world_size > 1:
+        print(f"  [DIST] world_size:    {world_size}")
+        print(f"  [DIST] rank:          {rank}")
+        print(f"  [DIST] lr_scale:      {args.dist_lr_scale}")
     print("=" * 60)
 
-    # ---- Load model + LoRA ----
+    # ---- Load model + LoRA (sequential across ranks to avoid memory/IO contention) ----
     model_name = args.model or Config.MODEL_NAME
-    print(f"[Model] Loading {model_name} with LoRA rank={args.lora_rank}...")
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=model_name,
-        max_seq_length=Config.MAX_SEQ_LENGTH,
-        dtype=None,
-        load_in_4bit=True,
-        offload_embedding=True,
-        cache_dir=str(hf_hub),
-    )
+    if world_size > 1:
+        # Load one rank at a time to avoid OOM from simultaneous 4-bit quantization
+        for loading_rank in range(world_size):
+            if rank == loading_rank:
+                print(f"[Model] Rank {rank}: Loading {model_name} with LoRA rank={args.lora_rank}...")
+                model, tokenizer = FastLanguageModel.from_pretrained(
+                    model_name=model_name,
+                    max_seq_length=Config.MAX_SEQ_LENGTH,
+                    dtype=None,
+                    load_in_4bit=True,
+                    offload_embedding=True,
+                    cache_dir=str(hf_hub),
+                )
+                print(f"[Model] Rank {rank}: Model loaded successfully")
+            barrier()
+    else:
+        print(f"[Model] Loading {model_name} with LoRA rank={args.lora_rank}...")
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=model_name,
+            max_seq_length=Config.MAX_SEQ_LENGTH,
+            dtype=None,
+            load_in_4bit=True,
+            offload_embedding=True,
+            cache_dir=str(hf_hub),
+        )
     model = FastLanguageModel.get_peft_model(
         model,
         r=args.lora_rank,
@@ -493,21 +549,26 @@ def main():
         model = torch.compile(model)
         print("[OPT] Compilation complete")
 
-    # ---- Save initial adapter for eval baseline ----
+    # ---- Save initial adapter for eval baseline (rank 0 only) ----
     base_model_adapter_dir = output_dir_path / "base_model_adapter_grpo"
-    if not args.resume:
+    if not args.resume and is_main_rank():
         base_model_adapter_dir.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(str(base_model_adapter_dir))
         print(f"[Base] Saved initial adapter to {base_model_adapter_dir}")
+    barrier()
 
-    # ---- Initialize inference backend ----
-    inference_backend = init_inference_backend(model, tokenizer, device)
-    vllm_adapter_dir = output_dir_path / "vllm_adapter_latest_grpo"
-    if hasattr(inference_backend, "sync_base_adapter"):
-        inference_backend.sync_base_adapter(base_model_adapter_dir)
+    # ---- Initialize inference backend (rank 0 only for vLLM interaction) ----
+    if is_main_rank():
+        inference_backend = init_inference_backend(model, tokenizer, device)
+        vllm_adapter_dir = output_dir_path / "vllm_adapter_latest_grpo"
+        if hasattr(inference_backend, "sync_base_adapter"):
+            inference_backend.sync_base_adapter(base_model_adapter_dir)
+    else:
+        inference_backend = None
+        vllm_adapter_dir = None
 
-    # ---- wandb ----
-    if wandb:
+    # ---- wandb (rank 0 only) ----
+    if wandb and is_main_rank():
         if not os.getenv("WANDB_NAME"):
             os.environ["WANDB_NAME"] = f"grpo-opt-{game}-{int(time.time())}"
         wandb.login(key=os.getenv("WANDB_API_KEY", ""), relogin=True)
@@ -524,13 +585,14 @@ def main():
             "temperature": args.temperature,
             "opt_compile": use_compile,
             "opt_train_autocast": use_train_autocast,
+            "world_size": world_size,
         })
         print("[wandb] Initialized")
 
     # ---- Optimizer (LoRA params only, NO value head) ----
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optim = torch.optim.AdamW(trainable_params, lr=args.lr)
-    rollout_logger = JSONLLogger(rollout_log_path)
+    rollout_logger = JSONLLogger(rollout_log_path) if is_main_rank() else None
 
     print(f"[GRPO] Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
     print(f"[GRPO] Starting optimized training loop...")
@@ -544,170 +606,201 @@ def main():
     for it in tqdm(range(start_iter, 10_000), desc="GRPO iters", initial=start_iter, total=10_000):
         t_iter_start = time.time()
 
-        # ---- 1. Sync policy to vLLM ----
-        inference_backend.sync_policy(model, vllm_adapter_dir)
-        if not inference_backend.is_enabled():
-            inference_backend = HFLocalBackend(model, tokenizer, device)
-
-        # ---- 2. Periodic evaluation ----
-        if args.eval_every and it % args.eval_every == 0 and it > 0:
-            model.eval()
+        # ---- 1. Sync policy to vLLM (rank 0 only) ----
+        if is_main_rank():
             inference_backend.sync_policy(model, vllm_adapter_dir)
             if not inference_backend.is_enabled():
                 inference_backend = HFLocalBackend(model, tokenizer, device)
+        barrier()
 
-            print(f"\n[eval {it}] Starting eval vs base ({args.eval_games} games)")
-            t_eval0 = time.time()
-            eval_logs = evaluate_vs_base(
-                current_model=model,
-                base_model_adapter_dir=base_model_adapter_dir,
-                tokenizer=tokenizer,
+        # ---- 2. Periodic evaluation (rank 0 only) ----
+        if args.eval_every and it % args.eval_every == 0 and it > 0:
+            if is_main_rank():
+                model.eval()
+                inference_backend.sync_policy(model, vllm_adapter_dir)
+                if not inference_backend.is_enabled():
+                    inference_backend = HFLocalBackend(model, tokenizer, device)
+
+                print(f"\n[eval {it}] Starting eval vs base ({args.eval_games} games)")
+                t_eval0 = time.time()
+                eval_logs = evaluate_vs_base(
+                    current_model=model,
+                    base_model_adapter_dir=base_model_adapter_dir,
+                    tokenizer=tokenizer,
+                    backend=inference_backend,
+                    num_games=args.eval_games,
+                    temperature=0.0,
+                    max_new_tokens=max_gen_tokens,
+                    seed=20_000 + it,
+                    hf_hub=hf_hub,
+                    device=device,
+                    game_spec=game_spec,
+                    env_kwargs=env_kwargs,
+                )
+                t_eval1 = time.time()
+                wr = eval_logs.get("eval/win_rate_vs_base", 0.0)
+                print(f"[eval {it}] win_rate={wr:.3f} ({t_eval1 - t_eval0:.1f}s)")
+                if wr > 0.5:
+                    print(f"[eval {it}] Model is better than base!")
+
+                if wandb:
+                    wandb.log(eval_logs, step=global_step)
+            barrier()
+
+        # tau2-bench evaluation (rank 0 only)
+        if args.tau2_eval_every and it % args.tau2_eval_every == 0 and it > 0:
+            if is_main_rank():
+                model.eval()
+                inference_backend.sync_policy(model, vllm_adapter_dir)
+                if not inference_backend.is_enabled():
+                    inference_backend = HFLocalBackend(model, tokenizer, device)
+
+                print(f"\n[eval {it}] Starting tau2-bench evaluation...")
+                t_tau2_0 = time.time()
+                tau2_logs = evaluate_tau2_bench(
+                    backend=inference_backend,
+                    output_dir=output_dir_path,
+                    iteration=it,
+                    domains=list(Config.TAU2_EVAL_DOMAINS),
+                    num_tasks=Config.TAU2_EVAL_NUM_TASKS,
+                    num_trials=Config.TAU2_EVAL_NUM_TRIALS,
+                    max_concurrency_per_shard=Config.TAU2_EVAL_MAX_CONCURRENCY_PER_SHARD,
+                    seed=Config.TAU2_EVAL_SEED,
+                )
+                t_tau2_1 = time.time()
+                if tau2_logs:
+                    tau2_logs["eval_tau2/time_total_sec"] = t_tau2_1 - t_tau2_0
+                    print(f"[eval {it}] tau2-bench done ({t_tau2_1 - t_tau2_0:.1f}s)")
+                    if wandb:
+                        wandb.log(tau2_logs, step=global_step)
+            barrier()
+
+        # ---- 3. Collect group-based rollouts (rank 0) + broadcast ----
+        if is_main_rank():
+            t_collect0 = time.time()
+            samples, env_metrics = collect_grpo_rollouts(
                 backend=inference_backend,
-                num_games=args.eval_games,
-                temperature=0.0,
-                max_new_tokens=max_gen_tokens,
-                seed=20_000 + it,
-                hf_hub=hf_hub,
-                device=device,
+                tokenizer=tokenizer,
                 game_spec=game_spec,
+                groups_per_batch=args.groups_per_batch,
+                group_size=args.group_size,
+                temperature=args.temperature,
+                max_new_tokens=max_gen_tokens,
+                base_seed=it,
+                logger=rollout_logger,
                 env_kwargs=env_kwargs,
             )
-            t_eval1 = time.time()
-            wr = eval_logs.get("eval/win_rate_vs_base", 0.0)
-            print(f"[eval {it}] win_rate={wr:.3f} ({t_eval1 - t_eval0:.1f}s)")
-            if wr > 0.5:
-                print(f"[eval {it}] Model is better than base!")
+            t_collect1 = time.time()
+        else:
+            t_collect0 = t_collect1 = time.time()
+            samples, env_metrics = [], {}
 
-            if wandb:
-                wandb.log(eval_logs, step=global_step)
+        # ---- 4. Compute advantages + filter (rank 0), then broadcast ----
+        # broadcast_data layout: [skip_flag, samples, advantages, num_filtered,
+        #   dt_filtered, env_metrics, avg_abs_advantage, t_collect0, t_collect1]
+        # skip_flag: True = skip this iteration, False = proceed
+        if is_main_rank():
+            if not samples:
+                broadcast_data = [True, None, None, 0, 0, {}, 0.0, t_collect0, t_collect1]
+                print(f"[iter {it}] No samples collected, skipping")
+            else:
+                # Compute group-relative advantages
+                advantages = compute_group_advantages(samples)
 
-        # tau2-bench evaluation
-        if args.tau2_eval_every and it % args.tau2_eval_every == 0 and it > 0:
-            model.eval()
-            inference_backend.sync_policy(model, vllm_adapter_dir)
-            if not inference_backend.is_enabled():
-                inference_backend = HFLocalBackend(model, tokenizer, device)
+                # 4b. Filter constant-reward groups
+                num_filtered = 0
+                if args.filter_constant_groups:
+                    pre_filter_count = len(samples)
+                    samples, advantages, num_filtered = filter_constant_reward_groups(
+                        samples, advantages,
+                    )
+                    if num_filtered > 0:
+                        print(
+                            f"[iter {it}] Filtered {num_filtered} constant-reward groups "
+                            f"({pre_filter_count} -> {len(samples)} samples)"
+                        )
 
-            print(f"\n[eval {it}] Starting tau2-bench evaluation...")
-            t_tau2_0 = time.time()
-            tau2_logs = evaluate_tau2_bench(
-                backend=inference_backend,
-                output_dir=output_dir_path,
-                iteration=it,
-                domains=list(Config.TAU2_EVAL_DOMAINS),
-                num_tasks=Config.TAU2_EVAL_NUM_TASKS,
-                num_trials=Config.TAU2_EVAL_NUM_TRIALS,
-                max_concurrency_per_shard=Config.TAU2_EVAL_MAX_CONCURRENCY_PER_SHARD,
-                seed=Config.TAU2_EVAL_SEED,
-            )
-            t_tau2_1 = time.time()
-            if tau2_logs:
-                tau2_logs["eval_tau2/time_total_sec"] = t_tau2_1 - t_tau2_0
-                print(f"[eval {it}] tau2-bench done ({t_tau2_1 - t_tau2_0:.1f}s)")
-                if wandb:
-                    wandb.log(tau2_logs, step=global_step)
+                # 4b2. Filter info-gathering turns
+                dt_filtered = 0
+                samples_before_dt_filter = len(samples)
+                if args.filter_info_turns:
+                    samples, advantages, dt_filtered = filter_info_gathering_turns(
+                        samples, advantages,
+                    )
+                    if dt_filtered > 0:
+                        print(
+                            f"[iter {it}] Filtered {dt_filtered} info-gathering turns "
+                            f"({samples_before_dt_filter} -> {len(samples)} samples)"
+                        )
 
-        # ---- 3. Collect group-based rollouts ----
-        t_collect0 = time.time()
-        samples, env_metrics = collect_grpo_rollouts(
-            backend=inference_backend,
-            tokenizer=tokenizer,
-            game_spec=game_spec,
-            groups_per_batch=args.groups_per_batch,
-            group_size=args.group_size,
-            temperature=args.temperature,
-            max_new_tokens=max_gen_tokens,
-            base_seed=it,
-            logger=rollout_logger,
-            env_kwargs=env_kwargs,
-        )
-        t_collect1 = time.time()
+                # 4c. Normalize advantages
+                adv_std = advantages.std()
+                if adv_std > 1e-8:
+                    advantages = (advantages - advantages.mean()) / (adv_std + 1e-8)
 
-        if not samples:
-            print(f"[iter {it}] No samples collected, skipping")
+                avg_abs_advantage = float(advantages.abs().mean().item())
+
+                broadcast_data = [False, samples, advantages, num_filtered, dt_filtered,
+                                  env_metrics, avg_abs_advantage, t_collect0, t_collect1]
+        else:
+            broadcast_data = [None] * 9
+
+        broadcast_data = broadcast_objects(broadcast_data)
+        skip_flag = broadcast_data[0]
+
+        if skip_flag:
             continue
 
-        # ---- 4. Compute group-relative advantages ----
-        advantages = compute_group_advantages(samples)
-
-        # ---- 4b. Filter constant-reward groups ----
-        num_filtered = 0
-        if args.filter_constant_groups:
-            pre_filter_count = len(samples)
-            samples, advantages, num_filtered = filter_constant_reward_groups(
-                samples, advantages,
-            )
-            if num_filtered > 0:
-                print(
-                    f"[iter {it}] Filtered {num_filtered} constant-reward groups "
-                    f"({pre_filter_count} -> {len(samples)} samples)"
-                )
-
-        # ---- 4b2. Filter info-gathering turns (decision-turn-only training) ----
-        dt_filtered = 0
-        samples_before_dt_filter = len(samples)
-        if args.filter_info_turns:
-            samples, advantages, dt_filtered = filter_info_gathering_turns(
-                samples, advantages,
-            )
-            if dt_filtered > 0:
-                print(
-                    f"[iter {it}] Filtered {dt_filtered} info-gathering turns "
-                    f"({samples_before_dt_filter} -> {len(samples)} samples)"
-                )
-
-        # ---- 4c. Normalize advantages (zero mean, unit variance) ----
-        adv_std = advantages.std()
-        if adv_std > 1e-8:
-            advantages = (advantages - advantages.mean()) / (adv_std + 1e-8)
+        _, samples, advantages, num_filtered, dt_filtered, \
+            env_metrics, avg_abs_advantage, t_collect0, t_collect1 = broadcast_data
 
         # ---- 4d. Early skip when all advantages are zero ----
-        avg_abs_advantage = float(advantages.abs().mean().item())
         if avg_abs_advantage == 0.0:
-            t_train1 = time.time()
-            avg_reward = float(torch.tensor([s.reward for s in samples]).mean().item())
-            N = len(samples)
+            if is_main_rank():
+                t_train1 = time.time()
+                avg_reward = float(torch.tensor([s.reward for s in samples]).mean().item())
+                N = len(samples)
 
-            logs = {
-                "iter": it,
-                "global_step": global_step,
-                "grpo/policy_loss": 0.0,
-                "grpo/kl_base_loss": 0.0,
-                "grpo/approx_kl_rollout": 0.0,
-                "grpo/approx_kl_base": 0.0,
-                "grpo/clip_frac": 0.0,
-                "grpo/ratio_mean": 1.0,
-                "grpo/avg_reward": avg_reward,
-                "grpo/avg_advantage": 0.0,
-                "grpo/avg_abs_advantage": 0.0,
-                "grpo/num_samples": N,
-                "grpo/constant_groups_filtered": num_filtered,
-                "grpo/skipped_zero_adv": 1,
-                "opt/info_turns_filtered": dt_filtered,
-                "opt/tool_results_truncated": 0,
-                "time/collect_sec": t_collect1 - t_collect0,
-                "time/train_sec": 0.0,
-                "time/iter_sec": t_train1 - t_iter_start,
-                **env_metrics,
-            }
+                logs = {
+                    "iter": it,
+                    "global_step": global_step,
+                    "grpo/policy_loss": 0.0,
+                    "grpo/kl_base_loss": 0.0,
+                    "grpo/approx_kl_rollout": 0.0,
+                    "grpo/approx_kl_base": 0.0,
+                    "grpo/clip_frac": 0.0,
+                    "grpo/ratio_mean": 1.0,
+                    "grpo/avg_reward": avg_reward,
+                    "grpo/avg_advantage": 0.0,
+                    "grpo/avg_abs_advantage": 0.0,
+                    "grpo/num_samples": N,
+                    "grpo/constant_groups_filtered": num_filtered,
+                    "grpo/skipped_zero_adv": 1,
+                    "opt/info_turns_filtered": dt_filtered,
+                    "opt/tool_results_truncated": 0,
+                    "time/collect_sec": t_collect1 - t_collect0,
+                    "time/train_sec": 0.0,
+                    "time/iter_sec": t_train1 - t_iter_start,
+                    **env_metrics,
+                }
 
-            print(
-                f"[iter {it}] SKIPPED (all advantages zero) "
-                f"reward={avg_reward:.3f} avg_r={env_metrics['env/avg_reward_p0']:.3f} "
-                f"samples={N} filtered={num_filtered} "
-                f"collect={logs['time/collect_sec']:.1f}s"
-            )
+                print(
+                    f"[iter {it}] SKIPPED (all advantages zero) "
+                    f"reward={avg_reward:.3f} avg_r={env_metrics['env/avg_reward_p0']:.3f} "
+                    f"samples={N} filtered={num_filtered} "
+                    f"collect={logs['time/collect_sec']:.1f}s"
+                )
 
-            if wandb:
-                wandb.log(logs, step=global_step)
+                if wandb:
+                    wandb.log(logs, step=global_step)
 
-            if it % args.save_every == 0:
-                ckpt_dir = output_dir_path / f"grpo_ckpt_iter_{it}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                ckpt_dir.mkdir(parents=True, exist_ok=True)
-                model.save_pretrained(str(ckpt_dir))
-                tokenizer.save_pretrained(str(ckpt_dir))
-                print(f"[checkpoint] Saved to {ckpt_dir}")
-
+                if it % args.save_every == 0:
+                    ckpt_dir = output_dir_path / f"grpo_ckpt_iter_{it}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    ckpt_dir.mkdir(parents=True, exist_ok=True)
+                    model.save_pretrained(str(ckpt_dir))
+                    tokenizer.save_pretrained(str(ckpt_dir))
+                    print(f"[checkpoint] Saved to {ckpt_dir}")
+            barrier()
             continue
 
         # ================================================================
@@ -720,11 +813,12 @@ def main():
         seqs_cpu: List[torch.Tensor] = []
         prompt_lens: List[int] = []
         action_lens: List[int] = []
+        kept_indices: List[int] = []
         total_tool_results_truncated = 0
         max_seq_len = Config.MAX_SEQ_LENGTH
         num_skipped_long = 0
 
-        for s in samples:
+        for i, s in enumerate(samples):
             if args.tool_result_max_chars > 0:
                 msgs, n_trunc = compress_tool_results(s.prompt_msgs, args.tool_result_max_chars)
                 total_tool_results_truncated += n_trunc
@@ -734,16 +828,19 @@ def main():
             if ids.shape[0] > max_seq_len:
                 num_skipped_long += 1
                 continue
+            kept_indices.append(i)
             seqs_cpu.append(ids.cpu())
             prompt_lens.append(pL)
             action_lens.append(aL)
 
         if num_skipped_long > 0:
             print(f"  [OPT] Skipped {num_skipped_long}/{len(samples)} samples exceeding {max_seq_len} tokens")
+            advantages = advantages[torch.tensor(kept_indices, dtype=torch.long)]
+            samples = [samples[i] for i in kept_indices]
 
         N = len(seqs_cpu)
         if N == 0:
-            print(f"  [iter {iteration}] All samples exceeded max_seq_len — skipping training step")
+            print(f"  [iter {it}] All samples exceeded max_seq_len — skipping training step")
             continue
         seq_lens = [s.shape[0] for s in seqs_cpu]
 
@@ -784,81 +881,84 @@ def main():
 
         t_pad = time.time()
 
-        # ---- 6. Compute old_logp and (optionally) base_logp ----
+        # ---- 6. Compute old_logp and (optionally) base_logp [DISTRIBUTED] ----
         model.eval()
-        old_logp_cpu = torch.empty(N, dtype=torch.float32)
+        old_logp_cpu = torch.zeros(N, dtype=torch.float32)  # zeros for all-reduce SUM trick
         compute_base = args.kl_coef > 0
-        base_logp_cpu = torch.empty(N, dtype=torch.float32) if compute_base else None
+        base_logp_cpu = torch.zeros(N, dtype=torch.float32) if compute_base else None
 
-        # Check if all samples have cached logprobs from vLLM generation
-        all_cached = all(s.cached_logp is not None for s in samples)
-        used_cached_logp = False
+        # Shard stats batches across ranks
+        all_stats_indices = list(range(len(stats_batch_cache)))
+        my_stats_indices, _ = shard_batches(all_stats_indices, rank, world_size)
 
-        if all_cached and not compute_base:
-            # Use cached logprobs — skip entire stats forward pass
-            for idx, s in enumerate(samples):
-                if args.normalize_by_len and s.cached_logp_n_tokens and s.cached_logp_n_tokens > 0:
-                    old_logp_cpu[idx] = s.cached_logp / s.cached_logp_n_tokens
-                else:
-                    old_logp_cpu[idx] = s.cached_logp
-            used_cached_logp = True
-        else:
-            # Fall back to full computation
-            with torch.no_grad():
-                # -- Pass 1: old_logp (adapter ON) --
-                for mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al in stats_batch_cache:
-                    mb_ids = mb_ids_cpu.to(device, non_blocking=True)
-                    mb_attn = mb_attn_cpu.to(device, non_blocking=True)
+        with torch.no_grad():
+            # -- Pass 1: old_logp (adapter ON) — each rank does its shard --
+            for bi in my_stats_indices:
+                mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = stats_batch_cache[bi]
+                mb_ids = mb_ids_cpu.to(device, non_blocking=True)
+                mb_attn = mb_attn_cpu.to(device, non_blocking=True)
 
-                    with autocast_ctx(device):
-                        outputs = model(
-                            input_ids=mb_ids,
-                            attention_mask=mb_attn,
-                            use_cache=False,
-                        )
-                    logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
-
-                    mb_old_logp = logprob_action_tokens(
-                        logits, mb_ids, mb_pl, mb_al,
-                        normalize_by_len=args.normalize_by_len,
+                with autocast_ctx(device):
+                    outputs = model(
+                        input_ids=mb_ids,
+                        attention_mask=mb_attn,
+                        use_cache=False,
                     )
-                    old_logp_cpu[mb_idx] = mb_old_logp.detach().cpu()
-                    del logits, outputs, mb_old_logp, mb_ids, mb_attn
+                logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
 
-                # -- Pass 2: base_logp (adapter OFF) — single toggle --
-                if compute_base:
-                    model.disable_adapter_layers()
-                    try:
-                        for mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al in stats_batch_cache:
-                            mb_ids = mb_ids_cpu.to(device, non_blocking=True)
-                            mb_attn = mb_attn_cpu.to(device, non_blocking=True)
+                mb_old_logp = logprob_action_tokens(
+                    logits, mb_ids, mb_pl, mb_al,
+                    normalize_by_len=args.normalize_by_len,
+                )
+                old_logp_cpu[mb_idx] = mb_old_logp.detach().cpu()
+                del logits, outputs, mb_old_logp, mb_ids, mb_attn
 
-                            with autocast_ctx(device):
-                                outputs = model(
-                                    input_ids=mb_ids,
-                                    attention_mask=mb_attn,
-                                    use_cache=False,
-                                )
-                            logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+            # All-reduce: each rank wrote to disjoint indices (rest are 0), SUM assembles full vector
+            if world_size > 1:
+                old_logp_gpu = old_logp_cpu.to(device)
+                torch.distributed.all_reduce(old_logp_gpu, op=torch.distributed.ReduceOp.SUM)
+                old_logp_cpu = old_logp_gpu.cpu()
+                del old_logp_gpu
 
-                            mb_base_logp = logprob_action_tokens(
-                                logits, mb_ids, mb_pl, mb_al,
-                                normalize_by_len=args.normalize_by_len,
+            # -- Pass 2: base_logp (adapter OFF) — distributed --
+            if compute_base:
+                model.disable_adapter_layers()
+                try:
+                    for bi in my_stats_indices:
+                        mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = stats_batch_cache[bi]
+                        mb_ids = mb_ids_cpu.to(device, non_blocking=True)
+                        mb_attn = mb_attn_cpu.to(device, non_blocking=True)
+
+                        with autocast_ctx(device):
+                            outputs = model(
+                                input_ids=mb_ids,
+                                attention_mask=mb_attn,
+                                use_cache=False,
                             )
-                            base_logp_cpu[mb_idx] = mb_base_logp.detach().cpu()
-                            del logits, outputs, mb_base_logp, mb_ids, mb_attn
-                    finally:
-                        model.enable_adapter_layers()
+                        logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+
+                        mb_base_logp = logprob_action_tokens(
+                            logits, mb_ids, mb_pl, mb_al,
+                            normalize_by_len=args.normalize_by_len,
+                        )
+                        base_logp_cpu[mb_idx] = mb_base_logp.detach().cpu()
+                        del logits, outputs, mb_base_logp, mb_ids, mb_attn
+
+                    if world_size > 1:
+                        base_logp_gpu = base_logp_cpu.to(device)
+                        torch.distributed.all_reduce(base_logp_gpu, op=torch.distributed.ReduceOp.SUM)
+                        base_logp_cpu = base_logp_gpu.cpu()
+                        del base_logp_gpu
+                finally:
+                    model.enable_adapter_layers()
 
         # Free stats cache if separate from train cache
         if not unified_batches:
             del stats_batch_cache
 
         t_stats = time.time()
-        if used_cached_logp:
-            print(f"  [OPT] Used cached vLLM logprobs (skipped {len(train_batches)} forward passes, saved ~{len(train_batches) * 37:.0f}s)")
 
-        # ---- 7. GRPO training ----
+        # ---- 7. GRPO training [DISTRIBUTED: gradient accumulation + all-reduce] ----
         model.train()
 
         policy_loss_acc = 0.0
@@ -867,15 +967,22 @@ def main():
         kl_base_acc = 0.0
         clip_frac_acc = 0.0
         ratio_mean_acc = 0.0
-        updates = 0
+        local_updates = 0
 
         for _epoch in range(args.epochs):
-            # Shuffle the ORDER of mini-batches (not individual samples).
-            # Each mini-batch still has similar-length sequences for minimal padding.
+            # Shuffle the ORDER of mini-batches — same seed on all ranks for
+            # deterministic sharding (each rank gets a disjoint subset).
             batch_order = list(range(len(train_batch_cache)))
-            random.shuffle(batch_order)
+            rng = random.Random(it * 1000 + _epoch)
+            rng.shuffle(batch_order)
 
-            for bi in batch_order:
+            # Shard mini-batches across ranks
+            my_batch_order, n_total_batches = shard_batches(batch_order, rank, world_size)
+
+            # Zero gradients once — accumulate across all local mini-batches
+            optim.zero_grad(set_to_none=True)
+
+            for bi in my_batch_order:
                 mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = train_batch_cache[bi]
 
                 mb_ids = mb_ids_cpu.to(device, non_blocking=True)
@@ -915,14 +1022,12 @@ def main():
                 if args.kl_coef > 0 and mb_base_logp is not None:
                     kl_loss = args.kl_coef * torch.mean(new_logp - mb_base_logp)
 
-                loss = policy_loss + kl_loss
+                # Scale loss for gradient accumulation: divide by total batches so
+                # accumulated gradient = (1/N) * sum(g_i), the full-batch gradient.
+                loss = (policy_loss + kl_loss) / n_total_batches
+                loss.backward()  # Gradients accumulate (no zero_grad per mini-batch)
 
-                optim.zero_grad(set_to_none=True)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)
-                optim.step()
-
-                # Tracking (no grad)
+                # Tracking (no grad, unscaled losses for logging)
                 with torch.no_grad():
                     approx_kl = torch.mean(mb_old_logp - new_logp)
                     clip_frac = torch.mean(
@@ -934,8 +1039,7 @@ def main():
                     else:
                         approx_kl_base = torch.tensor(0.0)
 
-                global_step += 1
-                updates += 1
+                local_updates += 1
                 policy_loss_acc += float(policy_loss.item())
                 kl_loss_acc += float(kl_loss.item())
                 approx_kl_acc += float(approx_kl.item())
@@ -945,103 +1049,151 @@ def main():
 
                 del mb_ids, mb_attn, logits, outputs, new_logp, ratio, loss
 
+            # All-reduce accumulated LoRA gradients across ranks
+            allreduce_coalesced_grads(trainable_params)
+
+            # Single gradient clip + optimizer step (identical on all ranks)
+            torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)
+            optim.step()
+
+        # Aggregate metrics across ranks for correct averaging
+        if world_size > 1:
+            local_metrics = {
+                "approx_kl": approx_kl_acc,
+                "clip_frac": clip_frac_acc,
+                "kl_base": kl_base_acc,
+                "kl_loss": kl_loss_acc,
+                "n_updates": float(local_updates),
+                "policy_loss": policy_loss_acc,
+                "ratio_mean": ratio_mean_acc,
+            }
+            agg = allreduce_scalars(local_metrics)
+            total_updates = int(agg["n_updates"])
+            policy_loss_acc = agg["policy_loss"]
+            kl_loss_acc = agg["kl_loss"]
+            approx_kl_acc = agg["approx_kl"]
+            kl_base_acc = agg["kl_base"]
+            clip_frac_acc = agg["clip_frac"]
+            ratio_mean_acc = agg["ratio_mean"]
+        else:
+            total_updates = local_updates
+
+        global_step += n_total_batches  # preserve approximate scale with original
+        updates = total_updates
+
         t_train1 = time.time()
 
         # Free pre-padded batch cache
         del train_batch_cache
 
-        # ---- 8. Logging ----
-        avg_advantage = float(advantages.mean().item())
-        all_rewards = torch.tensor([s.reward for s in samples], dtype=torch.float32)
-        avg_reward = float(all_rewards.mean().item())
+        # ---- 8. Logging (rank 0 only) ----
+        if is_main_rank():
+            avg_advantage = float(advantages.mean().item())
+            all_rewards = torch.tensor([s.reward for s in samples], dtype=torch.float32)
+            avg_reward = float(all_rewards.mean().item())
 
-        pad_eff = compute_padding_efficiency(seq_lens, train_batches)
+            pad_eff = compute_padding_efficiency(seq_lens, train_batches)
 
-        logs = {
-            "iter": it,
-            "global_step": global_step,
-            "grpo/policy_loss": policy_loss_acc / max(1, updates),
-            "grpo/kl_base_loss": kl_loss_acc / max(1, updates),
-            "grpo/approx_kl_rollout": approx_kl_acc / max(1, updates),
-            "grpo/approx_kl_base": kl_base_acc / max(1, updates),
-            "grpo/clip_frac": clip_frac_acc / max(1, updates),
-            "grpo/ratio_mean": ratio_mean_acc / max(1, updates),
-            "grpo/avg_reward": avg_reward,
-            "grpo/avg_advantage": avg_advantage,
-            "grpo/avg_abs_advantage": avg_abs_advantage,
-            "grpo/num_samples": N,
-            "grpo/constant_groups_filtered": num_filtered,
-            "grpo/skipped_zero_adv": 0,
-            "time/collect_sec": t_collect1 - t_collect0,
-            "time/train_sec": t_train1 - t_collect1,
-            "time/iter_sec": t_train1 - t_iter_start,
-            "time/tokenize_sec": t_tok1 - t_tok0,
-            "time/pad_cache_sec": t_pad - t_tok1,
-            "time/stats_sec": t_stats - t_pad,
-            "time/grad_sec": t_train1 - t_stats,
-            "opt/padding_efficiency": pad_eff,
-            "opt/info_turns_filtered": dt_filtered,
-            "opt/tool_results_truncated": total_tool_results_truncated,
-            **env_metrics,
-        }
+            logs = {
+                "iter": it,
+                "global_step": global_step,
+                "grpo/policy_loss": policy_loss_acc / max(1, updates),
+                "grpo/kl_base_loss": kl_loss_acc / max(1, updates),
+                "grpo/approx_kl_rollout": approx_kl_acc / max(1, updates),
+                "grpo/approx_kl_base": kl_base_acc / max(1, updates),
+                "grpo/clip_frac": clip_frac_acc / max(1, updates),
+                "grpo/ratio_mean": ratio_mean_acc / max(1, updates),
+                "grpo/avg_reward": avg_reward,
+                "grpo/avg_advantage": avg_advantage,
+                "grpo/avg_abs_advantage": avg_abs_advantage,
+                "grpo/num_samples": N,
+                "grpo/constant_groups_filtered": num_filtered,
+                "grpo/skipped_zero_adv": 0,
+                "time/collect_sec": t_collect1 - t_collect0,
+                "time/train_sec": t_train1 - t_collect1,
+                "time/iter_sec": t_train1 - t_iter_start,
+                "time/tokenize_sec": t_tok1 - t_tok0,
+                "time/pad_cache_sec": t_pad - t_tok1,
+                "time/stats_sec": t_stats - t_pad,
+                "time/grad_sec": t_train1 - t_stats,
+                "opt/padding_efficiency": pad_eff,
+                "opt/info_turns_filtered": dt_filtered,
+                "opt/tool_results_truncated": total_tool_results_truncated,
+                "dist/world_size": world_size,
+                **env_metrics,
+            }
 
-        print(
-            f"[iter {it}] step={global_step} "
-            f"reward={avg_reward:.3f} avg_r={env_metrics['env/avg_reward_p0']:.3f} "
-            f"abs_adv={avg_abs_advantage:.3f} "
-            f"invalid={env_metrics['env/invalid_move_rate']:.3f} "
-            f"samples={N} info_filt={dt_filtered} const_filt={num_filtered} "
-            f"trunc={total_tool_results_truncated} "
-            f"KL_rollout={logs['grpo/approx_kl_rollout']:.4f} "
-            f"KL_base={logs['grpo/approx_kl_base']:.4f} "
-            f"collect={logs['time/collect_sec']:.1f}s train={logs['time/train_sec']:.1f}s "
-            f"(tok={t_tok1 - t_tok0:.1f}s pad={t_pad - t_tok1:.1f}s "
-            f"stats={t_stats - t_pad:.1f}s grad={t_train1 - t_stats:.1f}s "
-            f"pad_eff={pad_eff:.1%})"
-        )
+            print(
+                f"[iter {it}] step={global_step} "
+                f"reward={avg_reward:.3f} avg_r={env_metrics['env/avg_reward_p0']:.3f} "
+                f"abs_adv={avg_abs_advantage:.3f} "
+                f"invalid={env_metrics['env/invalid_move_rate']:.3f} "
+                f"samples={N} info_filt={dt_filtered} const_filt={num_filtered} "
+                f"trunc={total_tool_results_truncated} "
+                f"KL_rollout={logs['grpo/approx_kl_rollout']:.4f} "
+                f"KL_base={logs['grpo/approx_kl_base']:.4f} "
+                f"collect={logs['time/collect_sec']:.1f}s train={logs['time/train_sec']:.1f}s "
+                f"(tok={t_tok1 - t_tok0:.1f}s pad={t_pad - t_tok1:.1f}s "
+                f"stats={t_stats - t_pad:.1f}s grad={t_train1 - t_stats:.1f}s "
+                f"pad_eff={pad_eff:.1%})"
+            )
 
-        if wandb:
-            wandb.log(logs, step=global_step)
-
-        # ---- Math evaluation ----
-        if args.math_eval_every and it % args.math_eval_every == 0 and it > 0:
-            model.eval()
-            all_math_logs: Dict[str, float] = {}
-            for ds_name in Config.MATH_EVAL_DATASETS:
-                math_start = time.time()
-                math_logs = evaluate_math(
-                    model=model,
-                    tokenizer=tokenizer,
-                    data_path=math_eval_data_path,
-                    dataset_name=ds_name,
-                    num_samples=Config.MATH_EVAL_SAMPLES,
-                    temperature=0.0,
-                    max_new_tokens=Config.MAX_TOKENS_MATH_EVAL,
-                    backend=inference_backend,
-                    device=device,
-                )
-                math_end = time.time()
-                acc = math_logs.get(f"eval_math/{ds_name}_accuracy", 0.0)
-                print(f"[eval {it}] {ds_name}: accuracy={acc:.3f} ({math_end - math_start:.1f}s)")
-                all_math_logs.update(math_logs)
             if wandb:
-                wandb.log(all_math_logs, step=global_step)
+                wandb.log(logs, step=global_step)
 
-        # ---- 9. Save checkpoint ----
+        # ---- Math evaluation (rank 0 only) ----
+        if args.math_eval_every and it % args.math_eval_every == 0 and it > 0:
+            if is_main_rank():
+                model.eval()
+                all_math_logs: Dict[str, float] = {}
+                for ds_name in Config.MATH_EVAL_DATASETS:
+                    math_start = time.time()
+                    math_logs = evaluate_math(
+                        model=model,
+                        tokenizer=tokenizer,
+                        data_path=math_eval_data_path,
+                        dataset_name=ds_name,
+                        num_samples=Config.MATH_EVAL_SAMPLES,
+                        temperature=0.0,
+                        max_new_tokens=Config.MAX_TOKENS_MATH_EVAL,
+                        backend=inference_backend,
+                        device=device,
+                    )
+                    math_end = time.time()
+                    acc = math_logs.get(f"eval_math/{ds_name}_accuracy", 0.0)
+                    print(f"[eval {it}] {ds_name}: accuracy={acc:.3f} ({math_end - math_start:.1f}s)")
+                    all_math_logs.update(math_logs)
+                if wandb:
+                    wandb.log(all_math_logs, step=global_step)
+            barrier()
+
+        # ---- 9. Save checkpoint (rank 0 only) ----
         if it % args.save_every == 0:
-            ckpt_dir = output_dir_path / f"grpo_ckpt_iter_{it}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            ckpt_dir.mkdir(parents=True, exist_ok=True)
-            model.save_pretrained(str(ckpt_dir))
-            tokenizer.save_pretrained(str(ckpt_dir))
-            print(f"[checkpoint] Saved to {ckpt_dir}")
+            if is_main_rank():
+                ckpt_dir = output_dir_path / f"grpo_ckpt_iter_{it}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                ckpt_dir.mkdir(parents=True, exist_ok=True)
+                model.save_pretrained(str(ckpt_dir))
+                tokenizer.save_pretrained(str(ckpt_dir))
+                print(f"[checkpoint] Saved to {ckpt_dir}")
+            barrier()
 
-    # ---- Final save ----
-    final_dir = output_dir_path / f"grpo_{game}_final"
-    final_dir.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(str(final_dir))
-    tokenizer.save_pretrained(str(final_dir))
-    print(f"[GRPO] Training complete! Saved to {final_dir}")
+    # ---- Final save (rank 0 only) ----
+    if is_main_rank():
+        final_dir = output_dir_path / f"grpo_{game}_final"
+        final_dir.mkdir(parents=True, exist_ok=True)
+        model.save_pretrained(str(final_dir))
+        tokenizer.save_pretrained(str(final_dir))
+        print(f"[GRPO] Training complete! Saved to {final_dir}")
+
+    dist_cleanup()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+    finally:
+        dist_cleanup()
+
