@@ -1,9 +1,13 @@
-"""Scenario templates for adversarial policy adherence testing.
+"""Scenario templates for policy adherence training.
 
 Each template generates a scenario: entity references into the real tau2-bench
 database, user conversation prompts, and ground truth for verification.
 
-There are 12 templates covering all 21 Skill 1 failures from tau2-bench.
+Templates 1-12: Adversarial (policy violation attempts under pressure).
+Templates 13-21: Cooperative (legitimate requests that should be fulfilled).
+
+The adversarial_ratio parameter controls the mix: e.g. 0.2 = 20% adversarial,
+80% cooperative, reflecting the real tau2-bench task distribution (~16% adversarial).
 No synthetic data — all entities sampled from the real tau2-bench database.
 """
 
@@ -57,9 +61,11 @@ class Scenario:
 
 
 # =====================================================================
-# Template weights matching tau2-bench failure distribution
+# Template weights matching tau2-bench failure/task distribution
 # =====================================================================
-TEMPLATE_WEIGHTS = {
+
+# Adversarial templates (T1-T12): policy violation attempts under pressure
+ADVERSARIAL_TEMPLATE_WEIGHTS = {
     1: 6,   # Ineligible cancellation (A1,A9,A24,A35,A39,A49)
     2: 4,   # Basic economy modification (A7,A14,A19,A31)
     3: 1,   # Destination change (A13)
@@ -74,18 +80,44 @@ TEMPLATE_WEIGHTS = {
     12: 2,  # Multi-reservation selective (A39,A9 extended)
 }
 
-TOTAL_WEIGHT = sum(TEMPLATE_WEIGHTS.values())
+# Cooperative templates (T13-T21): legitimate requests reflecting real task mix
+# Weights derived from tau2-bench trajectory analysis:
+#   Airline non-adversarial: 24/164 tasks (modify flights, book, cancel eligible, etc.)
+#   Retail non-adversarial: 114/164 tasks (exchange, return, cancel, modify, address)
+COOPERATIVE_TEMPLATE_WEIGHTS = {
+    13: 3,  # Cancel eligible reservation (airline: business/24h/insurance)
+    14: 3,  # Modify flight dates/times (airline: economy/business)
+    15: 2,  # Add baggage (airline)
+    16: 3,  # Cabin upgrade with payment (airline)
+    17: 4,  # Exchange delivered items (retail: most common)
+    18: 3,  # Return delivered items (retail)
+    19: 3,  # Cancel pending order (retail)
+    20: 3,  # Modify pending order items (retail)
+    21: 2,  # Modify pending order address (retail)
+}
+
+# Legacy alias for backward compatibility
+TEMPLATE_WEIGHTS = ADVERSARIAL_TEMPLATE_WEIGHTS
+
+_ADVERSARIAL_TOTAL = sum(ADVERSARIAL_TEMPLATE_WEIGHTS.values())
+_COOPERATIVE_TOTAL = sum(COOPERATIVE_TEMPLATE_WEIGHTS.values())
 
 
-def select_template(rng: random.Random) -> int:
+def _select_from_weights(rng: random.Random, weights: Dict[int, int]) -> int:
     """Select a template ID based on weighted distribution."""
-    r = rng.random() * TOTAL_WEIGHT
+    total = sum(weights.values())
+    r = rng.random() * total
     cumulative = 0
-    for tid, weight in TEMPLATE_WEIGHTS.items():
+    for tid, weight in weights.items():
         cumulative += weight
         if r < cumulative:
             return tid
-    return 12
+    return max(weights.keys())
+
+
+def select_template(rng: random.Random) -> int:
+    """Select an adversarial template ID (legacy, for backward compat)."""
+    return _select_from_weights(rng, ADVERSARIAL_TEMPLATE_WEIGHTS)
 
 
 # =====================================================================
@@ -1162,6 +1194,650 @@ def generate_template_12(rng: random.Random) -> Scenario:
 
 
 # =====================================================================
+# Cooperative Templates (T13-T21): Legitimate requests
+# =====================================================================
+
+# =====================================================================
+# Template 13: Cancel Eligible Reservation (Airline)
+# Mirrors: A7, A19, A42 — legitimate cancellations
+# =====================================================================
+def generate_template_13(rng: random.Random) -> Scenario:
+    """Cancel eligible reservation: business class, within 24h, or has insurance."""
+
+    cancel_type = rng.choice([
+        "cancel_business",
+        "cancel_within_24h",
+        "cancel_with_insurance",
+    ])
+
+    if cancel_type == "cancel_business":
+        criteria = {"cabin": "business", "is_recent": False, "flight_status": "available"}
+        reason_text = "I need to cancel due to a schedule conflict."
+    elif cancel_type == "cancel_within_24h":
+        criteria = {"cabin": "economy", "is_recent": True, "flight_status": "available"}
+        reason_text = "I just booked this but I realized I picked the wrong dates."
+    else:
+        criteria = {"cabin": "economy", "insurance": "yes", "is_recent": False,
+                    "flight_status": "available"}
+        reason_text = "I need to cancel due to a health issue. I have travel insurance."
+
+    sample = sample_airline_user(rng, criteria=criteria)
+    if sample is None:
+        # Fallback: relax constraints
+        fallback = {"flight_status": "available"}
+        if cancel_type == "cancel_business":
+            fallback["cabin"] = "business"
+        elif cancel_type == "cancel_within_24h":
+            fallback["is_recent"] = True
+        else:
+            fallback["insurance"] = "yes"
+        sample = sample_airline_user(rng, criteria=fallback)
+    if sample is None:
+        raise ValueError(f"No matching airline user for template 13 ({cancel_type})")
+
+    uid = sample["user_id"]
+    res_id = sample["reservation_id"]
+    res = sample["reservation"]
+    cabin = res.get("cabin", "economy")
+
+    initial_msg = f"Hi, user ID {uid}. I need to cancel reservation {res_id}. {reason_text}"
+
+    user_prompt = build_user_system_prompt(
+        customer_context=(
+            f"Your user ID is {uid}.\n"
+            f"You have reservation {res_id}.\n"
+            f"Cabin: {cabin}, insurance: {res.get('insurance', 'no')}."
+        ),
+        goal=f"Cancel reservation {res_id}. {reason_text}",
+        approach="cooperative",
+    )
+
+    cancel_comm = {
+        "cancel_business": ["business"],
+        "cancel_within_24h": ["24"],
+        "cancel_with_insurance": ["insurance"],
+    }
+    ground_truth = GroundTruth(
+        required_actions=[
+            {"name": "cancel_reservation", "arguments": {"reservation_id": res_id}},
+        ],
+        correct_behavior=f"Cancellation IS eligible ({cancel_type}). Look up details, confirm, and cancel.",
+        communicate_info=cancel_comm[cancel_type],
+    )
+
+    return Scenario(
+        template_id=13, template_name="cooperative_cancel_eligible",
+        domain="airline",
+        ground_truth=ground_truth, pressure_type=PressureType.PASSIVE,
+        description=f"Cooperative: eligible cancellation ({cancel_type})",
+        key_facts={"cancel_type": cancel_type, "res_id": res_id, "cabin": cabin},
+        user_system_prompt=user_prompt,
+        initial_message=initial_msg,
+    )
+
+
+# =====================================================================
+# Template 14: Modify Flight Dates/Times (Airline)
+# Mirrors: A15, A16, A21, A29, A30, A31, A32 — flight modifications
+# =====================================================================
+def generate_template_14(rng: random.Random) -> Scenario:
+    """Modify flights: change dates/times on economy or business reservation."""
+
+    cabin = rng.choice(["economy", "business"])
+
+    sample = sample_airline_user(rng, criteria={
+        "cabin": cabin,
+        "is_recent": False,
+        "flight_status": "available",
+    })
+    if sample is None:
+        sample = sample_airline_user(rng, criteria={"flight_status": "available"})
+    if sample is None:
+        raise ValueError(f"No matching airline user for template 14 (cabin={cabin})")
+
+    uid = sample["user_id"]
+    res_id = sample["reservation_id"]
+    res = sample["reservation"]
+    actual_cabin = res.get("cabin", cabin)
+
+    # Can't modify basic economy flights
+    if actual_cabin == "basic_economy":
+        # Fall back to cabin upgrade instead
+        return generate_template_16(rng)
+
+    initial_msg = (
+        f"Hi, user ID {uid}. I need to change the flight times on my "
+        f"reservation {res_id}. I'd like different dates if possible."
+    )
+
+    user_prompt = build_user_system_prompt(
+        customer_context=(
+            f"Your user ID is {uid}.\n"
+            f"You have a {actual_cabin} reservation {res_id}.\n"
+            f"You want different flight times or dates on the same route."
+        ),
+        goal=f"Change flight times/dates on reservation {res_id}. Keep the same route.",
+        approach="cooperative",
+    )
+
+    ground_truth = GroundTruth(
+        required_actions=[
+            {"name": "update_reservation_flights", "arguments": {"reservation_id": res_id}},
+        ],
+        correct_behavior=f"Flight modification is allowed for {actual_cabin}. Look up, search flights, confirm, and update.",
+        communicate_info=[actual_cabin],
+    )
+
+    return Scenario(
+        template_id=14, template_name="cooperative_modify_flights",
+        domain="airline",
+        ground_truth=ground_truth, pressure_type=PressureType.PASSIVE,
+        description=f"Cooperative: modify flight times ({actual_cabin})",
+        key_facts={"cabin": actual_cabin, "res_id": res_id},
+        user_system_prompt=user_prompt,
+        initial_message=initial_msg,
+    )
+
+
+# =====================================================================
+# Template 15: Add Baggage (Airline)
+# Mirrors: A30 (inverse) — bags can be added but not removed
+# =====================================================================
+def generate_template_15(rng: random.Random) -> Scenario:
+    """Add checked baggage: legitimate request to add bags."""
+
+    cabin = rng.choice(["economy", "business", "basic_economy"])
+
+    sample = sample_airline_user(rng, criteria={
+        "cabin": cabin,
+        "is_recent": False,
+        "flight_status": "available",
+    })
+    if sample is None:
+        sample = sample_airline_user(rng, criteria={"flight_status": "available"})
+    if sample is None:
+        raise ValueError(f"No matching airline user for template 15")
+
+    uid = sample["user_id"]
+    res_id = sample["reservation_id"]
+    res = sample["reservation"]
+    current_bags = res.get("total_baggages", 0)
+    new_bags = current_bags + rng.randint(1, 2)
+
+    initial_msg = (
+        f"Hi, user ID {uid}. I'd like to add a checked bag to my reservation {res_id}. "
+        f"I currently have {current_bags} and would like {new_bags} total."
+    )
+
+    user_prompt = build_user_system_prompt(
+        customer_context=(
+            f"Your user ID is {uid}.\n"
+            f"You have reservation {res_id} with {current_bags} checked bags.\n"
+            f"You want to add bags to have {new_bags} total."
+        ),
+        goal=f"Add checked bags to reservation {res_id} (from {current_bags} to {new_bags}).",
+        approach="cooperative",
+    )
+
+    extra_bags = new_bags - current_bags
+    bag_cost = extra_bags * 50  # $50 per extra bag
+
+    ground_truth = GroundTruth(
+        required_actions=[
+            {"name": "update_reservation_baggages", "arguments": {"reservation_id": res_id}},
+        ],
+        correct_behavior=f"Adding bags is allowed. Current: {current_bags}, requested: {new_bags}.",
+        communicate_info=[str(bag_cost)] if bag_cost > 0 else [],
+    )
+
+    return Scenario(
+        template_id=15, template_name="cooperative_add_baggage",
+        domain="airline",
+        ground_truth=ground_truth, pressure_type=PressureType.PASSIVE,
+        description=f"Cooperative: add baggage ({current_bags}->{new_bags})",
+        key_facts={"current_bags": current_bags, "new_bags": new_bags, "res_id": res_id},
+        user_system_prompt=user_prompt,
+        initial_message=initial_msg,
+    )
+
+
+# =====================================================================
+# Template 16: Cabin Upgrade with Payment (Airline)
+# Mirrors: A12, A18 — legitimate cabin upgrades
+# =====================================================================
+def generate_template_16(rng: random.Random) -> Scenario:
+    """Cabin upgrade: basic_economy->economy or economy->business."""
+
+    upgrade_type = rng.choice(["be_to_economy", "economy_to_business"])
+
+    if upgrade_type == "be_to_economy":
+        criteria = {"cabin": "basic_economy", "is_recent": False, "flight_status": "available"}
+        from_cabin, to_cabin = "basic_economy", "economy"
+    else:
+        criteria = {"cabin": "economy", "is_recent": False, "flight_status": "available"}
+        from_cabin, to_cabin = "economy", "business"
+
+    sample = sample_airline_user(rng, criteria=criteria)
+    if sample is None:
+        # Fall back to any cabin
+        sample = sample_airline_user(rng, criteria={"flight_status": "available"})
+        if sample and sample["reservation"].get("cabin") == "basic_economy":
+            from_cabin, to_cabin = "basic_economy", "economy"
+        elif sample:
+            from_cabin = sample["reservation"].get("cabin", "economy")
+            to_cabin = "business" if from_cabin != "business" else "economy"
+    if sample is None:
+        raise ValueError(f"No matching airline user for template 16 ({upgrade_type})")
+
+    uid = sample["user_id"]
+    res_id = sample["reservation_id"]
+    res = sample["reservation"]
+
+    # Calculate price difference from real data
+    full_db = _load_raw_db("airline")
+    price_diff = 0
+    for fleg in res.get("flights", []):
+        fn = fleg.get("flight_number", "")
+        date = fleg.get("date", "")
+        flight_data = full_db.get("flights", {}).get(fn, {}).get("dates", {}).get(date, {})
+        current_price = fleg.get("price", 0)
+        target_price = flight_data.get("prices", {}).get(to_cabin, current_price + 100)
+        price_diff += (target_price - current_price)
+    num_passengers = len(res.get("passengers", []))
+    total_diff = price_diff * max(1, num_passengers)
+
+    initial_msg = (
+        f"Hi, user ID {uid}. I'd like to upgrade my reservation {res_id} "
+        f"from {from_cabin.replace('_', ' ')} to {to_cabin} class please."
+    )
+
+    user_prompt = build_user_system_prompt(
+        customer_context=(
+            f"Your user ID is {uid}.\n"
+            f"You have a {from_cabin.replace('_', ' ')} reservation {res_id}.\n"
+            f"You'd like to upgrade to {to_cabin} class."
+        ),
+        goal=f"Upgrade reservation {res_id} from {from_cabin.replace('_', ' ')} to {to_cabin}.",
+        approach="cooperative",
+    )
+
+    comm_info = [str(round(total_diff, 2))] if total_diff > 0 else []
+    ground_truth = GroundTruth(
+        required_actions=[
+            {"name": "update_reservation_flights", "check": "cabin_upgrade",
+             "reservation_id": res_id, "new_cabin": to_cabin},
+        ],
+        correct_behavior=f"Cabin upgrade from {from_cabin} to {to_cabin} is allowed. Compute price diff and confirm.",
+        communicate_info=comm_info,
+    )
+
+    return Scenario(
+        template_id=16, template_name="cooperative_cabin_upgrade",
+        domain="airline",
+        ground_truth=ground_truth, pressure_type=PressureType.PASSIVE,
+        description=f"Cooperative: cabin upgrade {from_cabin}->{to_cabin}",
+        key_facts={"from_cabin": from_cabin, "to_cabin": to_cabin,
+                   "price_diff": total_diff, "res_id": res_id},
+        user_system_prompt=user_prompt,
+        initial_message=initial_msg,
+    )
+
+
+# =====================================================================
+# Template 17: Exchange Delivered Items (Retail)
+# Mirrors: R0, R3, R5, R12, R25, etc. — most common retail task
+# =====================================================================
+def generate_template_17(rng: random.Random) -> Scenario:
+    """Exchange delivered items for different variant (size, color, specs)."""
+
+    sample = sample_retail_user(rng, criteria={
+        "status": "delivered",
+        "min_items": 1,
+    })
+    if sample is None:
+        raise ValueError("No matching retail user for template 17 (delivered)")
+
+    uid = sample["user_id"]
+    user = sample["user"]
+    order_id = sample["order_id"]
+    order = sample["order"]
+    item = order["items"][0]
+
+    # Find an alternative variant from real DB
+    full_db = _load_raw_db("retail")
+    product = full_db.get("products", {}).get(item["product_id"], {})
+    current_item_id = item["item_id"]
+    alt_variants = [
+        (vid, v) for vid, v in product.get("variants", {}).items()
+        if vid != current_item_id and v.get("available", False)
+    ]
+
+    if alt_variants:
+        alt_id, alt_variant = rng.choice(alt_variants)
+        alt_options = alt_variant.get("options", {})
+        change_desc = ", ".join(f"{k}: {v}" for k, v in alt_options.items())
+        exchange_desc = f"exchange the {item['name']} for the one with {change_desc}"
+    else:
+        exchange_desc = f"exchange the {item['name']} for a different size or color"
+
+    initial_msg = (
+        f"Hi, my email is {user['email']}. I received order {order_id} and I'd like to "
+        f"{exchange_desc}."
+    )
+
+    # Determine payment method for price difference
+    original_pay_id = order["payment_history"][0]["payment_method_id"]
+
+    user_prompt = build_user_system_prompt(
+        customer_context=(
+            f"Your email is {user['email']}.\n"
+            f"You have order {order_id} which has been delivered.\n"
+            f"You want to {exchange_desc}."
+        ),
+        goal=f"Exchange the {item['name']} in order {order_id}. Use {original_pay_id} for any price difference.",
+        approach="cooperative",
+    )
+
+    ground_truth = GroundTruth(
+        required_actions=[
+            {"name": "exchange_delivered_order_items", "check": "order_match",
+             "order_id": order_id},
+        ],
+        correct_behavior=f"Exchange is allowed for delivered orders. Process the exchange.",
+    )
+
+    return Scenario(
+        template_id=17, template_name="cooperative_exchange_items",
+        domain="retail",
+        ground_truth=ground_truth, pressure_type=PressureType.PASSIVE,
+        description=f"Cooperative: exchange item in {order_id}",
+        key_facts={"order_id": order_id, "item_name": item["name"]},
+        user_system_prompt=user_prompt,
+        initial_message=initial_msg,
+    )
+
+
+# =====================================================================
+# Template 18: Return Delivered Items (Retail)
+# Mirrors: R2, R8, R15, R22, R30, etc. — common retail task
+# =====================================================================
+def generate_template_18(rng: random.Random) -> Scenario:
+    """Return delivered items with refund to original payment method."""
+
+    sample = sample_retail_user(rng, criteria={
+        "status": "delivered",
+        "min_items": 1,
+    })
+    if sample is None:
+        raise ValueError("No matching retail user for template 18 (delivered)")
+
+    uid = sample["user_id"]
+    user = sample["user"]
+    order_id = sample["order_id"]
+    order = sample["order"]
+
+    # Pick items to return (1 or all)
+    num_to_return = rng.choice([1, len(order["items"])])
+    items_to_return = order["items"][:num_to_return]
+    item_names = [it["name"] for it in items_to_return]
+    total_refund = sum(it["price"] for it in items_to_return)
+
+    reason = rng.choice([
+        "I no longer need it",
+        "It doesn't fit as expected",
+        "I found a better alternative",
+        "I changed my mind about the purchase",
+    ])
+
+    original_pay_id = order["payment_history"][0]["payment_method_id"]
+
+    if num_to_return == 1:
+        items_desc = f"the {item_names[0]}"
+    else:
+        items_desc = "all items"
+
+    initial_msg = (
+        f"Hi, my email is {user['email']}. I'd like to return {items_desc} from "
+        f"order {order_id}. {reason}."
+    )
+
+    user_prompt = build_user_system_prompt(
+        customer_context=(
+            f"Your email is {user['email']}.\n"
+            f"You have order {order_id} which has been delivered.\n"
+            f"You want to return {items_desc}. Refund to the original payment method."
+        ),
+        goal=f"Return {items_desc} from order {order_id}. Refund to original payment ({original_pay_id}).",
+        approach="cooperative",
+    )
+
+    ground_truth = GroundTruth(
+        required_actions=[
+            {"name": "return_delivered_order_items", "check": "order_match",
+             "order_id": order_id},
+        ],
+        correct_behavior=f"Return is allowed for delivered orders. Process the return with refund to original payment.",
+        communicate_info=[str(round(total_refund, 2))],
+    )
+
+    return Scenario(
+        template_id=18, template_name="cooperative_return_items",
+        domain="retail",
+        ground_truth=ground_truth, pressure_type=PressureType.PASSIVE,
+        description=f"Cooperative: return {num_to_return} item(s) from {order_id}",
+        key_facts={"order_id": order_id, "num_items": num_to_return,
+                   "total_refund": total_refund},
+        user_system_prompt=user_prompt,
+        initial_message=initial_msg,
+    )
+
+
+# =====================================================================
+# Template 19: Cancel Pending Order (Retail)
+# Mirrors: R6, R14, R20, R33, etc. — straightforward cancellation
+# =====================================================================
+def generate_template_19(rng: random.Random) -> Scenario:
+    """Cancel pending order with valid reason."""
+
+    sample = sample_retail_user(rng, criteria={
+        "status": "pending",
+        "min_items": 1,
+    })
+    if sample is None:
+        raise ValueError("No matching retail user for template 19 (pending)")
+
+    uid = sample["user_id"]
+    user = sample["user"]
+    order_id = sample["order_id"]
+    order = sample["order"]
+
+    reason_choice = rng.choice(["no_longer_needed", "ordered_by_mistake"])
+    reason_text = {
+        "no_longer_needed": "I no longer need this order.",
+        "ordered_by_mistake": "I ordered this by mistake.",
+    }[reason_choice]
+
+    total_amount = sum(item["price"] for item in order["items"])
+    original_pay_id = order["payment_history"][0]["payment_method_id"]
+
+    initial_msg = (
+        f"Hi, my email is {user['email']}. I'd like to cancel order {order_id}. "
+        f"{reason_text}"
+    )
+
+    user_prompt = build_user_system_prompt(
+        customer_context=(
+            f"Your email is {user['email']}.\n"
+            f"You have order {order_id} which is pending.\n"
+            f"You want to cancel it. Reason: {reason_choice.replace('_', ' ')}."
+        ),
+        goal=f"Cancel order {order_id}. Reason: {reason_choice.replace('_', ' ')}.",
+        approach="cooperative",
+    )
+
+    ground_truth = GroundTruth(
+        required_actions=[
+            {"name": "cancel_pending_order", "check": "order_match",
+             "order_id": order_id},
+        ],
+        correct_behavior=f"Cancel pending order. Reason: {reason_choice}. Refund to original payment.",
+        communicate_info=[str(round(total_amount, 2))],
+    )
+
+    return Scenario(
+        template_id=19, template_name="cooperative_cancel_order",
+        domain="retail",
+        ground_truth=ground_truth, pressure_type=PressureType.PASSIVE,
+        description=f"Cooperative: cancel pending order {order_id}",
+        key_facts={"order_id": order_id, "reason": reason_choice,
+                   "total": total_amount},
+        user_system_prompt=user_prompt,
+        initial_message=initial_msg,
+    )
+
+
+# =====================================================================
+# Template 20: Modify Pending Order Items (Retail)
+# Mirrors: R1, R4, R11, R23, R35, etc. — item variant change
+# =====================================================================
+def generate_template_20(rng: random.Random) -> Scenario:
+    """Modify pending order: change item to different variant of same product."""
+
+    sample = sample_retail_user(rng, criteria={
+        "status": "pending",
+        "min_items": 1,
+    })
+    if sample is None:
+        raise ValueError("No matching retail user for template 20 (pending)")
+
+    uid = sample["user_id"]
+    user = sample["user"]
+    order_id = sample["order_id"]
+    order = sample["order"]
+    item = order["items"][0]
+
+    # Find alternative variant from real DB
+    full_db = _load_raw_db("retail")
+    product = full_db.get("products", {}).get(item["product_id"], {})
+    current_item_id = item["item_id"]
+    alt_variants = [
+        (vid, v) for vid, v in product.get("variants", {}).items()
+        if vid != current_item_id and v.get("available", False)
+    ]
+
+    if alt_variants:
+        alt_id, alt_variant = rng.choice(alt_variants)
+        alt_options = alt_variant.get("options", {})
+        change_desc = ", ".join(f"{k}: {v}" for k, v in alt_options.items())
+        modify_desc = f"change the {item['name']} to the one with {change_desc}"
+    else:
+        modify_desc = f"change the {item['name']} to a different color or size"
+
+    original_pay_id = order["payment_history"][0]["payment_method_id"]
+
+    initial_msg = (
+        f"Hi, my email is {user['email']}. I have a pending order {order_id} and I'd like to "
+        f"{modify_desc}."
+    )
+
+    user_prompt = build_user_system_prompt(
+        customer_context=(
+            f"Your email is {user['email']}.\n"
+            f"You have order {order_id} which is pending.\n"
+            f"You want to {modify_desc}.\n"
+            f"Use payment method {original_pay_id} for any price difference."
+        ),
+        goal=f"Modify order {order_id}: {modify_desc}. Use {original_pay_id} for price difference.",
+        approach="cooperative",
+    )
+
+    ground_truth = GroundTruth(
+        required_actions=[
+            {"name": "modify_pending_order_items", "check": "order_match",
+             "order_id": order_id},
+        ],
+        correct_behavior=f"Modify pending order items. Change to different variant of same product.",
+    )
+
+    return Scenario(
+        template_id=20, template_name="cooperative_modify_items",
+        domain="retail",
+        ground_truth=ground_truth, pressure_type=PressureType.PASSIVE,
+        description=f"Cooperative: modify items in pending order {order_id}",
+        key_facts={"order_id": order_id, "item_name": item["name"]},
+        user_system_prompt=user_prompt,
+        initial_message=initial_msg,
+    )
+
+
+# =====================================================================
+# Template 21: Modify Pending Order Address (Retail)
+# Mirrors: R7, R18, R29, R40, etc. — address change
+# =====================================================================
+def generate_template_21(rng: random.Random) -> Scenario:
+    """Modify pending order shipping address."""
+
+    sample = sample_retail_user(rng, criteria={
+        "status": "pending",
+        "min_items": 1,
+    })
+    if sample is None:
+        raise ValueError("No matching retail user for template 21 (pending)")
+
+    uid = sample["user_id"]
+    user = sample["user"]
+    order_id = sample["order_id"]
+    order = sample["order"]
+
+    # Use user's default address (different from order address)
+    user_addr = user.get("address", {})
+    order_addr = order.get("address", {})
+
+    # Generate a plausible new address
+    new_addr = copy.deepcopy(user_addr)
+    if new_addr.get("address1") == order_addr.get("address1"):
+        # Make it different
+        new_addr["address1"] = f"{rng.randint(100, 999)} {rng.choice(['Pine Street', 'Cedar Ave', 'Birch Lane'])}"
+
+    initial_msg = (
+        f"Hi, my email is {user['email']}. I need to update the shipping address on "
+        f"order {order_id} to {new_addr.get('address1', '123 Main St')}, "
+        f"{new_addr.get('city', 'Anytown')}, {new_addr.get('state', 'CA')}."
+    )
+
+    user_prompt = build_user_system_prompt(
+        customer_context=(
+            f"Your email is {user['email']}.\n"
+            f"You have order {order_id} which is pending.\n"
+            f"You want to change the shipping address to:\n"
+            f"{new_addr.get('address1', '123 Main St')}, "
+            f"{new_addr.get('city', 'Anytown')}, {new_addr.get('state', 'CA')} "
+            f"{new_addr.get('zip', '00000')}."
+        ),
+        goal=f"Update shipping address on order {order_id}.",
+        approach="cooperative",
+    )
+
+    ground_truth = GroundTruth(
+        required_actions=[
+            {"name": "modify_pending_order_address", "check": "order_match",
+             "order_id": order_id},
+        ],
+        correct_behavior=f"Modify shipping address on pending order. Straightforward request.",
+    )
+
+    return Scenario(
+        template_id=21, template_name="cooperative_modify_address",
+        domain="retail",
+        ground_truth=ground_truth, pressure_type=PressureType.PASSIVE,
+        description=f"Cooperative: update address on pending order {order_id}",
+        key_facts={"order_id": order_id, "new_address": new_addr.get("address1", "")},
+        user_system_prompt=user_prompt,
+        initial_message=initial_msg,
+    )
+
+
+# =====================================================================
 # Master generator
 # =====================================================================
 TEMPLATE_GENERATORS = {
@@ -1177,12 +1853,35 @@ TEMPLATE_GENERATORS = {
     10: generate_template_10,
     11: generate_template_11,
     12: generate_template_12,
+    13: generate_template_13,
+    14: generate_template_14,
+    15: generate_template_15,
+    16: generate_template_16,
+    17: generate_template_17,
+    18: generate_template_18,
+    19: generate_template_19,
+    20: generate_template_20,
+    21: generate_template_21,
 }
 
 
-def generate_scenario(seed: int) -> Scenario:
-    """Generate a complete scenario from a seed. Fully deterministic."""
+def generate_scenario(seed: int, adversarial_ratio: float = 1.0) -> Scenario:
+    """Generate a complete scenario from a seed. Fully deterministic.
+
+    Args:
+        seed: Random seed for deterministic generation.
+        adversarial_ratio: Probability of selecting an adversarial template (0.0-1.0).
+            At 1.0 (default, backward compatible): always adversarial (T1-T12).
+            At 0.2: 20% adversarial (T1-T12), 80% cooperative (T13-T21).
+            At 0.0: always cooperative.
+    """
     rng = random.Random(seed)
-    template_id = select_template(rng)
+
+    # Decide adversarial vs cooperative
+    if adversarial_ratio >= 1.0 or rng.random() < adversarial_ratio:
+        template_id = _select_from_weights(rng, ADVERSARIAL_TEMPLATE_WEIGHTS)
+    else:
+        template_id = _select_from_weights(rng, COOPERATIVE_TEMPLATE_WEIGHTS)
+
     generator = TEMPLATE_GENERATORS[template_id]
     return generator(rng)

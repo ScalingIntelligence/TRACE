@@ -431,9 +431,13 @@ def _register_builtin_games() -> None:
 
     # Adversarial Policy Compliance Game — targets Skill 1 failures
     # Trains policy adherence under adversarial user pressure
+    # adversarial_ratio controls mix: 0.2 = 20% adversarial, 80% cooperative
     if AdversarialPolicyGame is not None:
-        def make_adversarial_policy(user_client=None) -> AdversarialPolicyGame:
-            return AdversarialPolicyGame(max_steps=30, user_client=user_client)
+        def make_adversarial_policy(user_client=None, adversarial_ratio=1.0) -> AdversarialPolicyGame:
+            return AdversarialPolicyGame(
+                max_steps=30, user_client=user_client,
+                adversarial_ratio=adversarial_ratio,
+            )
 
         register_game(
             GameSpec(

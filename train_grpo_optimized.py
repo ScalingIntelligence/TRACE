@@ -356,7 +356,8 @@ def parse_grpo_args_optimized():
     # -- Adversarial policy game --
     parser.add_argument("--adversarial-ratio", type=float, default=0.2,
         help="Ratio of adversarial vs cooperative scenarios (0.0-1.0). "
-             "At 0.2, 20%% adversarial (T1-T17) and 80%% cooperative (T18-T24).")
+             "At 0.2, 20%% adversarial (T1-T12) and 80%% cooperative (T13-T21). "
+             "Reflects real tau2-bench distribution (~16%% adversarial).")
 
     # -- Training sample optimizations --
     parser.add_argument("--filter-info-turns", action="store_true", default=True,

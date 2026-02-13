@@ -39,9 +39,11 @@ class AdversarialPolicyGame:
     # for structured training that matches tau2-bench eval format.
     supports_structured_messages = True
 
-    def __init__(self, max_steps: int = 30, user_client: Optional[UserLLMClient] = None):
+    def __init__(self, max_steps: int = 30, user_client: Optional[UserLLMClient] = None,
+                 adversarial_ratio: float = 1.0):
         self.max_steps = max_steps
         self._user_client = user_client
+        self._adversarial_ratio = adversarial_ratio
 
         # GameEnv protocol attributes
         self.done: bool = False
@@ -62,7 +64,7 @@ class AdversarialPolicyGame:
 
     def reset(self, seed: int) -> None:
         """Reset with new seed. Fully deterministic scenario generation."""
-        self._scenario = generate_scenario(seed)
+        self._scenario = generate_scenario(seed, adversarial_ratio=self._adversarial_ratio)
         self._tools = ToolExecutor(self._scenario.domain, get_pydantic_db(self._scenario.domain))
 
         # Initialize LLM user
