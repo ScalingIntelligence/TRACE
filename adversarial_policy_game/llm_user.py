@@ -29,6 +29,10 @@ class UserLLMClient:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.session = requests.Session()
+        # Increase pool size to handle parallel rollouts (default 10 is too small)
+        adapter = requests.adapters.HTTPAdapter(pool_maxsize=128, pool_connections=128)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
 
     def generate(self, system_prompt: str, messages: List[Dict[str, str]]) -> str:
         """Generate next user response.

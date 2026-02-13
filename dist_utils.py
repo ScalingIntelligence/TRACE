@@ -8,6 +8,7 @@ Falls back to single-GPU no-ops when not running under torchrun/distributed.
 import builtins
 import os
 import pickle
+from datetime import timedelta
 from typing import Any, Dict, List, Tuple
 
 import torch
@@ -28,6 +29,73 @@ def dist_init() -> Tuple[int, int, int]:
         dist.init_process_group(backend="nccl")
         return rank, world_size, local_rank
     return 0, 1, 0
+
+
+def isolate_gpu_per_rank() -> int:
+    """Restrict each rank to a single GPU via CUDA_VISIBLE_DEVICES.
+
+    Must be called BEFORE any CUDA operations (including torch.cuda.set_device).
+    Rewrites CUDA_VISIBLE_DEVICES so each rank sees only its assigned GPU as
+    cuda:0.  This prevents from_pretrained / accelerate / bitsandbytes from
+    creating CUDA contexts on all visible GPUs, which causes NCCL hangs.
+
+    Returns:
+        The original LOCAL_RANK (before overriding to 0).
+    """
+    if "LOCAL_RANK" not in os.environ:
+        return 0
+
+    local_rank = int(os.environ["LOCAL_RANK"])
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+
+    if visible:
+        gpus = [g.strip() for g in visible.split(",")]
+        if local_rank < len(gpus):
+            os.environ["CUDA_VISIBLE_DEVICES"] = gpus[local_rank]
+    else:
+        # No CUDA_VISIBLE_DEVICES set; isolate to the local_rank-th GPU
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(local_rank)
+
+    # Override LOCAL_RANK to 0 since each process now sees exactly 1 GPU
+    os.environ["LOCAL_RANK"] = "0"
+    return local_rank
+
+
+def dist_pre_init() -> Tuple[int, int, int]:
+    """Phase 1 of distributed init: read env vars and set CUDA device.
+
+    Does NOT initialize NCCL. Use this before model loading to avoid
+    from_pretrained / accelerate triggering unexpected collective operations
+    when torch.distributed.is_initialized() is True.
+
+    Call dist_nccl_init() after model loading to complete initialization.
+
+    Returns:
+        (rank, world_size, local_rank)
+    """
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ.get("LOCAL_RANK", rank))
+        torch.cuda.set_device(local_rank)
+        return rank, world_size, local_rank
+    return 0, 1, 0
+
+
+def dist_nccl_init() -> None:
+    """Phase 2 of distributed init: initialize NCCL process group.
+
+    Call after model loading is complete, paired with dist_pre_init().
+    Passes device_id to avoid the 'Guessing device ID' NCCL warning/hang.
+    No-op if already initialized or not running under torchrun.
+    """
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ and not dist.is_initialized():
+        local_rank = int(os.environ.get("LOCAL_RANK", os.environ["RANK"]))
+        dist.init_process_group(
+            backend="nccl",
+            device_id=torch.device(f"cuda:{local_rank}"),
+            timeout=timedelta(minutes=30),
+        )
 
 
 def dist_cleanup() -> None:

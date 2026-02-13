@@ -158,7 +158,7 @@ class Config:
     MAX_TOKENS_MATH_EVAL = 7000
     
     # Checkpointing and evaluation
-    SAVE_EVERY_ITERS = 10
+    SAVE_EVERY_ITERS = 5
     EVAL_EVERY_ITERS = 100000
     EVAL_GAMES = 50
     MATH_EVAL_SAMPLES = 50

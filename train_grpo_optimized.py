@@ -81,7 +81,8 @@ from train_grpo import (
 )
 from evaluation import evaluate_vs_base, evaluate_math, evaluate_tau2_bench
 from dist_utils import (
-    dist_init, dist_cleanup, is_main_rank, broadcast_objects,
+    dist_init, dist_pre_init, dist_nccl_init,
+    dist_cleanup, is_main_rank, broadcast_objects,
     shard_batches, allreduce_coalesced_grads, allreduce_scalars,
     barrier, suppress_print,
 )
@@ -290,7 +291,7 @@ def parse_grpo_args_optimized():
         help="Outer loop: different seeds per iteration.")
 
     # -- LoRA --
-    parser.add_argument("--lora-rank", type=int, default=8,
+    parser.add_argument("--lora-rank", type=int, default=16,
         help="LoRA rank")
     parser.add_argument("--lora-alpha", type=int, default=16,
         help="LoRA alpha scaling factor")
@@ -300,9 +301,9 @@ def parse_grpo_args_optimized():
         help="Learning rate")
     parser.add_argument("--epochs", type=int, default=1,
         help="Training epochs per iteration")
-    parser.add_argument("--mini-batch-size", type=int, default=2,
+    parser.add_argument("--mini-batch-size", type=int, default=4,
         help="Mini-batch size for gradient updates")
-    parser.add_argument("--stats-chunk-size", type=int, default=2,
+    parser.add_argument("--stats-chunk-size", type=int, default=4,
         help="Chunk size for computing old/base logprobs (matches mini-batch-size for unified caching)")
     parser.add_argument("--max-grad-norm", type=float, default=1.0,
         help="Max gradient norm for clipping")
@@ -322,7 +323,7 @@ def parse_grpo_args_optimized():
         action="store_false")
 
     # -- Generation --
-    parser.add_argument("--temperature", type=float, default=0.7,
+    parser.add_argument("--temperature", type=float, default=1.0,
         help="Sampling temperature for rollouts")
     parser.add_argument("--normalize-by-len", action="store_true",
         help="Normalize logprobs by action length")
@@ -383,16 +384,17 @@ def parse_grpo_args_optimized():
 # ============================================================================
 
 def main():
-    # Import Unsloth BEFORE dist_init(): Unsloth's module-level code
+    # Import Unsloth BEFORE NCCL init: Unsloth's module-level code
     # (vLLM logger suppression, torch.compile LoRA patching) deadlocks
-    # when NCCL is already initialized.  Importing first is safe because
-    # CUDA_VISIBLE_DEVICES is set externally, so any CUDA context Unsloth
-    # creates during import lands on the correct physical GPU.
+    # when NCCL is already initialized.
     from unsloth import FastLanguageModel
 
-    # ---- Distributed init ----
-    rank, world_size, local_rank = dist_init()
-    if not is_main_rank():
+    # ---- Distributed init (Phase 1: CUDA device only, NO NCCL yet) ----
+    # Defer NCCL initialization until after model loading because
+    # from_pretrained / accelerate detect is_initialized() and trigger
+    # internal collective operations that differ across ranks.
+    rank, world_size, local_rank = dist_pre_init()
+    if rank != 0:
         suppress_print()
 
     args = parse_grpo_args_optimized()
@@ -482,24 +484,31 @@ def main():
     print("=" * 60)
 
     # ---- Load model + LoRA ----
-    # All ranks load simultaneously.  Each rank targets its own GPU via
-    # CUDA_VISIBLE_DEVICES + torch.cuda.set_device(), so there is no memory
-    # contention.  Sequential loading with barrier() deadlocks because
-    # from_pretrained triggers internal distributed collectives (accelerate /
-    # transformers check torch.distributed.is_initialized()).
+    # All ranks load simultaneously BEFORE NCCL is initialized.  Each rank
+    # targets its own GPU via CUDA_VISIBLE_DEVICES + torch.cuda.set_device().
+    # NCCL must NOT be initialized yet: from_pretrained / accelerate /
+    # transformers detect is_initialized() and trigger internal collective
+    # operations that differ across ranks, causing asymmetric NCCL hangs.
     model_name = args.model or Config.MODEL_NAME
     print(f"[Model] Rank {rank}: Loading {model_name} with LoRA rank={args.lora_rank}...")
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=model_name,
         max_seq_length=Config.MAX_SEQ_LENGTH,
         dtype=None,
-        load_in_4bit=True,
-        offload_embedding=True,
         use_exact_model_name=True,
         cache_dir=str(hf_hub),
+        device_map={"": local_rank},
     )
-    print(f"[Model] Rank {rank}: Model loaded successfully")
+    print(f"[Model] Rank {rank}: Model loaded successfully", flush=True)
+
+    # ---- Distributed init (Phase 2: NOW init NCCL) ----
+    # Model is loaded on each rank independently. Safe to init NCCL now
+    # since no more from_pretrained calls that could trigger rogue collectives.
+    print(f"[NCCL] Rank {rank}: Initializing NCCL process group...", flush=True)
+    dist_nccl_init()
+    print(f"[NCCL] Rank {rank}: NCCL initialized, entering barrier...", flush=True)
     barrier()
+    print(f"[NCCL] Rank {rank}: Barrier passed, setting up LoRA...", flush=True)
     model = FastLanguageModel.get_peft_model(
         model,
         r=args.lora_rank,
@@ -793,7 +802,7 @@ def main():
                 if wandb:
                     wandb.log(logs, step=global_step)
 
-                if it % args.save_every == 0:
+                if it <= 1 or it % args.save_every == 0:
                     ckpt_dir = output_dir_path / f"grpo_ckpt_iter_{it}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                     ckpt_dir.mkdir(parents=True, exist_ok=True)
                     model.save_pretrained(str(ckpt_dir))
@@ -1166,8 +1175,8 @@ def main():
                     wandb.log(all_math_logs, step=global_step)
             barrier()
 
-        # ---- 9. Save checkpoint (rank 0 only) ----
-        if it % args.save_every == 0:
+        # ---- 9. Save checkpoint: 1st iter, 2nd iter, then every save_every (rank 0 only) ----
+        if it <= 1 or it % args.save_every == 0:
             if is_main_rank():
                 ckpt_dir = output_dir_path / f"grpo_ckpt_iter_{it}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 ckpt_dir.mkdir(parents=True, exist_ok=True)

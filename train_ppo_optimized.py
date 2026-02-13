@@ -315,7 +315,7 @@ def parse_ppo_args_optimized():
         help="Path to checkpoint directory to resume from")
     parser.add_argument("--rollout-log", type=str, default="selfplay_rollouts_ppo.jsonl",
         help="Filename for rollout logs")
-    parser.add_argument("--save-every", type=int, default=10,
+    parser.add_argument("--save-every", type=int, default=5,
         help="Save checkpoint every N iterations")
     parser.add_argument("--eval-every", type=int, default=100000,
         help="Eval vs base model every N iterations")
@@ -1078,8 +1078,8 @@ def main():
                     wandb.log(all_math_logs, step=global_step)
             barrier()
 
-        # ---- 9. Save checkpoint (rank 0 only) ----
-        if it % args.save_every == 0:
+        # ---- 9. Save checkpoint: 1st iter, 2nd iter, then every save_every (rank 0 only) ----
+        if it <= 1 or it % args.save_every == 0:
             if is_main_rank():
                 ckpt_dir = output_dir_path / f"ppo_ckpt_iter_{it}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 ckpt_dir.mkdir(parents=True, exist_ok=True)

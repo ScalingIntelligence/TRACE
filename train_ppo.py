@@ -482,8 +482,8 @@ def main():
             if wandb:
                 wandb.log(all_math_logs, step=global_step)
 
-        # Save checkpoints
-        if it % Config.SAVE_EVERY_ITERS == 0:
+        # Save checkpoints: 1st iter, 2nd iter, then every SAVE_EVERY_ITERS
+        if it <= 1 or it % Config.SAVE_EVERY_ITERS == 0:
             ckpt_dir = output_dir_path / f"ppo_ckpt_iter_{it}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             ac.lm.save_pretrained(str(ckpt_dir / "policy"))
