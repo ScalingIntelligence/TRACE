@@ -287,6 +287,6 @@ def get_max_gen_tokens(game: str) -> int:
     
 def autocast_ctx(device):
     """Return appropriate autocast context for the device."""
-    if device == "cuda":
+    if str(device).startswith("cuda"):
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     return torch.no_grad()

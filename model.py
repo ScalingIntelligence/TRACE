@@ -61,7 +61,7 @@ class PolicyWithValueHead(nn.Module):
         self.value_head = nn.Linear(hidden_size, 1).to(dtype=torch.float32)
 
     def forward(self, input_ids, attention_mask=None):
-        with (autocast_ctx(self.device) if self.device == "cuda" else torch.no_grad()):
+        with (autocast_ctx(self.device) if str(self.device).startswith("cuda") else torch.no_grad()):
             out = self.backbone(
                 input_ids=input_ids,
                 attention_mask=attention_mask,

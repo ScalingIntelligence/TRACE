@@ -536,6 +536,9 @@ def main():
     if game_spec.name == "adversarial_policy":
         env_kwargs["adversarial_ratio"] = args.adversarial_ratio
 
+    # Set dynamic rollout log name
+    args.rollout_log = f"rollouts_grpo_{game_spec.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+
     # ---- Environment setup (reuse existing config infrastructure) ----
     env_config = setup_environment(args)
     device = env_config["device"]

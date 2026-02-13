@@ -71,6 +71,9 @@ def main():
     elif game_spec.name == "liars_dice":
         env_kwargs["num_dice"] = num_dice
     
+    # Set dynamic rollout log name
+    args.rollout_log = f"rollouts_ppo_{game_spec.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+
     # Setup environment
     env_config = setup_environment(args)
     device = env_config["device"]

@@ -1,48 +1,46 @@
 #!/usr/bin/env python3
 """
-Optimized GRPO trainer — based on train_grpo.py with performance and algorithmic improvements.
+Optimized PPO trainer — based on train_ppo.py with performance improvements
+ported from train_grpo_optimized.py.
 
-Optimizations over train_grpo.py (each benchmarked for significant impact):
+PPO algorithm (value head baseline, clipped surrogate + value loss) combined
+with the GRPO-optimized infrastructure (length-sorted batching, pinned memory,
+distributed training, gradient accumulation, autocast, detailed timing).
+
+Optimizations over train_ppo.py (each benchmarked for significant impact in
+the GRPO-optimized trainer and ported here):
   1. Length-sorted batching: sequences sorted by length to minimize padding waste
      in forward passes. Padding efficiency goes from ~55% to ~99%.
-     (Benchmarked: 1.78x less wasted compute)
-  2. stats_chunk_size=8 (was 4): halves number of forward passes in step 6.
-     Unified with mini_batch_size so one pre-padded cache serves both steps 6+7.
-     (Benchmarked: 3.6x faster step 6, 4.7x faster caching, 50% less CPU memory)
-  3. KL regularization defaults to OFF (kl_coef=0). LoRA already constrains
-     drift; skipping base_logp eliminates ~50% of step 6 forward passes.
-  4. Single adapter toggle: computes ALL old_logp first (adapter ON), then ALL
+  2. Unified batch caching: stats_chunk_size == mini_batch_size so one set of
+     pre-padded batches serves both the stats pass (old_logp/old_v) and the
+     training pass.
+  3. Pinned-memory CPU tensors for faster async GPU transfers.
+  4. KL regularization against base model (optional, default OFF). When kl_coef=0,
+     skips base_logp pass entirely.
+  5. Single adapter toggle: computes ALL old_logp first (adapter ON), then ALL
      base_logp (adapter OFF), toggling adapter layers only once.
-  5. Pinned-memory CPU tensors for faster async GPU transfers.
-     (Benchmarked: 18.9x faster CPU→GPU transfer)
-  6. Optional training-time autocast (bfloat16) via GRPO_TRAIN_AUTOCAST=1.
+  6. Training-time autocast (bfloat16) via PolicyWithValueHead.
   7. Detailed sub-step timing breakdown (tokenize, pad, stats, grad, pad_eff).
+  8. Multi-GPU distributed training via torchrun (gradient accumulation +
+     all-reduce).
+  9. Optional info-gathering turn filtering and tool result compression
+     for adversarial_policy-style games.
 
-Algorithmic differences from train_grpo.py (beyond pure performance):
-  - Advantage normalization: advantages are standardized (mean=0, std=1) after
-    group-relative centering. train_grpo.py uses raw centered advantages.
+Algorithmic differences from train_ppo.py (beyond pure performance):
   - Gradient accumulation: gradients are accumulated across all mini-batches in
     an epoch, then a single optimizer step is taken (required for distributed
-    all-reduce). train_grpo.py takes one optimizer step per mini-batch.
-  - Info-gathering turn filtering: read-only tool call turns can be filtered out
-    of training samples (--filter-info-turns, default ON).
-  - Tool result compression: old tool results are truncated to reduce prompt
-    length (--tool-result-max-chars, default 200).
+    all-reduce). train_ppo.py takes one optimizer step per mini-batch.
+  - global_step increments by n_total_batches per epoch (preserves approximate
+    scale with the original trainer).
 
-Performance-only differences (no algorithmic impact):
-  - Batch composition (grouping similar-length sequences reduces padding)
-  - Mini-batch ordering (length-bucketed then shuffled vs fully shuffled)
-  - Floating-point ordering from different batch compositions (negligible)
-
-Usage (drop-in replacement for train_grpo.py):
+Usage (drop-in replacement for train_ppo.py):
     # Single GPU:
-    VLLM_BASE_URL=http://localhost:8000 python train_grpo_optimized.py \\
-        --game adversarial_policy --group-size 8 --groups-per-batch 16
+    VLLM_BASE_URL=http://localhost:8000 python train_ppo_optimized.py \\
+        --game kuhn_poker --games-per-iter 256
 
     # Multi-GPU (N GPUs for ~Nx speedup on training step):
     VLLM_BASE_URL=http://localhost:8000 torchrun --nproc_per_node=4 \\
-        train_grpo_optimized.py --game adversarial_policy \\
-        --group-size 8 --groups-per-batch 16
+        train_ppo_optimized.py --game kuhn_poker --games-per-iter 256
 """
 import argparse
 import json
@@ -52,7 +50,6 @@ import time
 import torch
 import torch.nn.functional as F
 from collections import defaultdict
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -66,18 +63,15 @@ from inference import (
     HFLocalBackend,
     init_inference_backend,
 )
+from model import PolicyWithValueHead
 from ppo import (
     JSONLLogger,
+    EMA,
+    StepSample,
+    collect_games,
     build_prompt_plus_action,
     logprob_action_tokens,
-)
-
-# Reuse data structures and helpers from train_grpo (no duplication)
-from train_grpo import (
-    GRPOSample,
-    collect_grpo_rollouts,
-    compute_group_advantages,
-    filter_constant_reward_groups,
+    values_from_hidden,
 )
 from evaluation import evaluate_vs_base, evaluate_math, evaluate_tau2_bench
 from dist_utils import (
@@ -98,7 +92,7 @@ except Exception:
 
 
 # ============================================================================
-# Optimization helpers
+# Optimization helpers (ported from train_grpo_optimized.py)
 # ============================================================================
 
 def make_sorted_batches(seq_lens: List[int], batch_size: int) -> List[List[int]]:
@@ -117,8 +111,6 @@ def pad_and_pin(seqs: List[torch.Tensor], pad_id: int) -> Tuple[torch.Tensor, to
     Pad sequences to max length in the batch and pin memory for fast GPU transfer.
 
     Returns (input_ids, attention_mask) on CPU with pinned memory.
-    Identical output to ppo.pad_to_device() but stays on CPU with pinned memory
-    so the caller can transfer asynchronously with non_blocking=True.
     """
     max_len = max(s.shape[0] for s in seqs)
     bsz = len(seqs)
@@ -145,21 +137,17 @@ def compute_padding_efficiency(seq_lens: List[int], batches: List[List[int]]) ->
 
 
 # ============================================================================
-# Adversarial policy training optimizations
+# PPO-specific info-turn filtering (adapted from train_grpo_optimized.py)
 # ============================================================================
 
 # Read-only tool names — info-gathering, no policy decision.
-# Matches read_ops in adversarial_policy_game/verification.py:109-118.
 _INFO_ONLY_TOOLS = frozenset({
-    # Airline read operations
     "get_user_details", "get_reservation_details",
     "search_direct_flight", "search_onestop_flight",
     "list_all_airports", "get_flight_status",
-    # Retail read operations
     "get_order_details", "get_product_details",
     "find_user_id_by_email", "find_user_id_by_name_zip",
     "list_all_product_types",
-    # Generic
     "calculate",
 })
 
@@ -186,21 +174,21 @@ def _extract_tool_name(completion_text: str) -> Optional[str]:
     return None
 
 
-def filter_info_gathering_turns(
-    samples: List["GRPOSample"],
-    advantages: torch.Tensor,
-) -> Tuple[List["GRPOSample"], torch.Tensor, int]:
+def filter_info_gathering_samples(
+    samples: List[StepSample],
+) -> Tuple[List[StepSample], List[int], int]:
     """Remove samples where the agent only made a read-only tool call.
 
-    Keeps samples where the agent called respond_to_user, transfer,
-    write/action tools, think, or produced plain text (no tool call).
+    Unlike train_grpo_optimized.py's filter_info_gathering_turns(), this
+    version does NOT require an advantages tensor (PPO advantages are computed
+    after the stats pass, so they don't exist at filter time).
 
     Guarantees at least one sample per game_id is kept (the last turn)
-    so the game's reward signal is preserved for advantage computation.
+    so the game's reward signal is preserved.
 
-    Applied AFTER compute_group_advantages and filter_constant_reward_groups.
+    Returns:
+        (filtered_samples, keep_indices, num_filtered_out)
     """
-    # Pass 1: mark info-only turns for removal
     keep_mask = []
     for s in samples:
         tool_name = _extract_tool_name(s.completion_text)
@@ -209,23 +197,21 @@ def filter_info_gathering_turns(
         else:
             keep_mask.append(False)
 
-    # Pass 2: guarantee at least one sample per game_id (keep last turn)
+    # Guarantee at least one sample per game_id (keep last turn)
     last_idx_per_game: Dict[int, int] = {}
     for i, s in enumerate(samples):
         last_idx_per_game[s.game_id] = i
     for last_idx in last_idx_per_game.values():
         keep_mask[last_idx] = True
 
-    # Pass 3: build filtered lists
     keep_indices = [i for i, keep in enumerate(keep_mask) if keep]
     num_filtered_out = len(samples) - len(keep_indices)
 
     if num_filtered_out == 0:
-        return samples, advantages, 0
+        return samples, list(range(len(samples))), 0
 
     filtered_samples = [samples[i] for i in keep_indices]
-    filtered_advantages = advantages[torch.tensor(keep_indices, dtype=torch.long)]
-    return filtered_samples, filtered_advantages, num_filtered_out
+    return filtered_samples, keep_indices, num_filtered_out
 
 
 def compress_tool_results(
@@ -236,8 +222,6 @@ def compress_tool_results(
 
     Keeps the LAST tool result in full (needed for current decision).
     Truncates all earlier tool results to max_tool_result_chars.
-
-    Returns (compressed_msgs, num_truncated).
     """
     tool_indices = [
         i for i, msg in enumerate(prompt_msgs)
@@ -268,12 +252,12 @@ def compress_tool_results(
 
 
 # ============================================================================
-# Argument parsing (extends train_grpo's parser with optimization defaults)
+# Argument parsing
 # ============================================================================
 
-def parse_grpo_args_optimized():
+def parse_ppo_args_optimized():
     parser = argparse.ArgumentParser(
-        description="Optimized GRPO trainer (same algorithm, faster training step)",
+        description="Optimized PPO trainer (same algorithm, faster training step)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -283,11 +267,9 @@ def parse_grpo_args_optimized():
     parser.add_argument("--model", type=str, default=None,
         help="HuggingFace model name (default: Config.MODEL_NAME)")
 
-    # -- GRPO structure --
-    parser.add_argument("--group-size", type=int, default=16,
-        help="Inner loop: rollouts per seed.")
-    parser.add_argument("--groups-per-batch", type=int, default=4,
-        help="Outer loop: different seeds per iteration.")
+    # -- PPO structure --
+    parser.add_argument("--games-per-iter", type=int, default=256,
+        help="Number of self-play games per iteration")
 
     # -- LoRA --
     parser.add_argument("--lora-rank", type=int, default=8,
@@ -296,43 +278,44 @@ def parse_grpo_args_optimized():
         help="LoRA alpha scaling factor")
 
     # -- Optimization --
-    parser.add_argument("--lr", type=float, default=1e-5,
+    parser.add_argument("--lr", type=float, default=1e-6,
         help="Learning rate")
-    parser.add_argument("--epochs", type=int, default=1,
-        help="Training epochs per iteration")
-    parser.add_argument("--mini-batch-size", type=int, default=2,
+    parser.add_argument("--ppo-epochs", type=int, default=1,
+        help="PPO training epochs per iteration")
+    parser.add_argument("--mini-batch-size", type=int, default=4,
         help="Mini-batch size for gradient updates")
-    parser.add_argument("--stats-chunk-size", type=int, default=2,
-        help="Chunk size for computing old/base logprobs (matches mini-batch-size for unified caching)")
+    parser.add_argument("--stats-chunk-size", type=int, default=4,
+        help="Chunk size for computing old logprobs/values "
+             "(set equal to mini-batch-size for unified caching)")
     parser.add_argument("--max-grad-norm", type=float, default=1.0,
         help="Max gradient norm for clipping")
 
-    # -- GRPO loss function --
-    parser.add_argument("--use-clipping", action="store_true", default=True,
-        help="Use clipped surrogate (like PPO).")
-    parser.add_argument("--no-clipping", dest="use_clipping", action="store_false",
-        help="Disable clipping and use pure importance sampling.")
+    # -- PPO loss function --
     parser.add_argument("--clip-eps", type=float, default=0.2,
-        help="Clipping epsilon (only used with --use-clipping)")
+        help="PPO clipping epsilon")
+    parser.add_argument("--vf-coef", type=float, default=0.5,
+        help="Value function loss coefficient")
     parser.add_argument("--kl-coef", type=float, default=0.0,
-        help="KL penalty coefficient against base model (0 to disable, saves ~50%% of step 6 time)")
-    parser.add_argument("--filter-constant-groups", action="store_true", default=True,
-        help="Remove groups where all rollouts got the same reward")
-    parser.add_argument("--no-filter-constant-groups", dest="filter_constant_groups",
-        action="store_false")
+        help="KL penalty against base model (0 to disable)")
 
     # -- Generation --
     parser.add_argument("--temperature", type=float, default=0.7,
         help="Sampling temperature for rollouts")
-    parser.add_argument("--normalize-by-len", action="store_true",
-        help="Normalize logprobs by action length")
+
+    # -- Role baseline --
+    parser.add_argument("--use-role-baseline", action="store_true", default=True,
+        help="Use EMA role baseline for advantage estimation")
+    parser.add_argument("--no-role-baseline", dest="use_role_baseline",
+        action="store_false", help="Disable role baseline")
+    parser.add_argument("--role-baseline-gamma", type=float, default=0.95,
+        help="EMA gamma for role baseline")
 
     # -- Checkpointing and evaluation --
     parser.add_argument("--resume", type=str, default=None,
         help="Path to checkpoint directory to resume from")
-    parser.add_argument("--rollout-log", type=str, default="selfplay_rollouts_grpo.jsonl",
+    parser.add_argument("--rollout-log", type=str, default="selfplay_rollouts_ppo.jsonl",
         help="Filename for rollout logs")
-    parser.add_argument("--save-every", type=int, default=5,
+    parser.add_argument("--save-every", type=int, default=10,
         help="Save checkpoint every N iterations")
     parser.add_argument("--eval-every", type=int, default=100000,
         help="Eval vs base model every N iterations")
@@ -355,8 +338,7 @@ def parse_grpo_args_optimized():
 
     # -- Adversarial policy game --
     parser.add_argument("--adversarial-ratio", type=float, default=0.2,
-        help="Ratio of adversarial vs cooperative scenarios (0.0-1.0). "
-             "At 0.2, 20%% adversarial (T1-T17) and 80%% cooperative (T18-T24).")
+        help="Ratio of adversarial vs cooperative scenarios (0.0-1.0)")
 
     # -- Training sample optimizations --
     parser.add_argument("--filter-info-turns", action="store_true", default=True,
@@ -368,7 +350,7 @@ def parse_grpo_args_optimized():
 
     # -- Distributed training --
     parser.add_argument("--dist-lr-scale", type=float, default=1.0,
-        help="Scale learning rate for distributed training (try 2-4x with many GPUs)")
+        help="Scale learning rate for distributed training")
 
     # -- Root directory --
     parser.add_argument("--root", type=str, default=None,
@@ -382,11 +364,8 @@ def parse_grpo_args_optimized():
 # ============================================================================
 
 def main():
-    # Import Unsloth BEFORE dist_init(): Unsloth's module-level code
-    # (vLLM logger suppression, torch.compile LoRA patching) deadlocks
-    # when NCCL is already initialized.  Importing first is safe because
-    # CUDA_VISIBLE_DEVICES is set externally, so any CUDA context Unsloth
-    # creates during import lands on the correct physical GPU.
+    # Import Unsloth BEFORE dist_init() to avoid NCCL deadlock
+    # (see train_grpo_optimized.py for details)
     from unsloth import FastLanguageModel
 
     # ---- Distributed init ----
@@ -394,15 +373,14 @@ def main():
     if not is_main_rank():
         suppress_print()
 
-    args = parse_grpo_args_optimized()
+    args = parse_ppo_args_optimized()
 
     # Apply distributed LR scaling
     if world_size > 1 and args.dist_lr_scale != 1.0:
         args.lr *= args.dist_lr_scale
 
     # Optimization flags via env vars
-    use_compile = os.getenv("GRPO_COMPILE", "0") == "1"
-    use_train_autocast = os.getenv("GRPO_TRAIN_AUTOCAST", "0") == "1"
+    use_compile = os.getenv("PPO_COMPILE", "0") == "1"
 
     # ---- Game setup ----
     game = args.game
@@ -430,12 +408,11 @@ def main():
         env_kwargs["user_client"] = user_client
         print(f"[User LLM] {args.user_llm_url} model={args.user_llm_model}")
 
-    # Wire up adversarial_ratio for adversarial_policy game
     if game_spec.name == "adversarial_policy":
         env_kwargs["adversarial_ratio"] = args.adversarial_ratio
 
     # Set dynamic rollout log name
-    args.rollout_log = f"rollouts_grpo_{game_spec.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+    args.rollout_log = f"rollouts_ppo_{game_spec.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
 
     # ---- Environment setup ----
     env_config = setup_environment(args)
@@ -444,23 +421,21 @@ def main():
     output_dir_path = env_config["output_dir_path"]
     rollout_log_path = env_config["rollout_log_path"]
 
-    total_games_per_iter = args.group_size * args.groups_per_batch
-
     print("=" * 60)
-    print("GRPO TRAINER (OPTIMIZED)")
+    print("PPO TRAINER (OPTIMIZED)")
     print("=" * 60)
     print(f"  Game:                {game_spec.name}")
-    print(f"  Group size (inner):  {args.group_size}")
-    print(f"  Groups/batch (outer):{args.groups_per_batch}")
-    print(f"  Total games/iter:    {total_games_per_iter}")
+    print(f"  Games per iter:      {args.games_per_iter}")
     print(f"  LoRA rank:           {args.lora_rank}")
     print(f"  LoRA alpha:          {args.lora_alpha}")
     print(f"  Learning rate:       {args.lr}")
-    print(f"  KL coefficient:      {args.kl_coef} (vs base model)")
-    print(f"  Filter const groups: {args.filter_constant_groups}")
-    print(f"  Use clipping:        {args.use_clipping}")
-    print(f"  Normalize by len:    {args.normalize_by_len}")
+    print(f"  PPO epochs:          {args.ppo_epochs}")
+    print(f"  Mini-batch size:     {args.mini_batch_size}")
+    print(f"  Clip epsilon:        {args.clip_eps}")
+    print(f"  VF coefficient:      {args.vf_coef}")
+    print(f"  KL coefficient:      {args.kl_coef}")
     print(f"  Temperature:         {args.temperature}")
+    print(f"  Role baseline:       {args.use_role_baseline}")
     if game_spec.name == "adversarial_policy":
         print(f"  Adversarial ratio:   {args.adversarial_ratio}")
     print(f"  Max gen tokens:      {max_gen_tokens}")
@@ -469,7 +444,7 @@ def main():
     print(f"  [OPT] length sorting: ON")
     print(f"  [OPT] pinned memory:  ON")
     print(f"  [OPT] torch.compile:  {use_compile}")
-    print(f"  [OPT] train autocast: ALWAYS ON (matches step 6)")
+    print(f"  [OPT] train autocast: ON (PolicyWithValueHead)")
     if args.kl_coef == 0:
         print(f"  [OPT] base_logp:      SKIPPED (kl_coef=0)")
     print(f"  [OPT] filter info turns: {args.filter_info_turns}")
@@ -481,11 +456,6 @@ def main():
     print("=" * 60)
 
     # ---- Load model + LoRA ----
-    # All ranks load simultaneously.  Each rank targets its own GPU via
-    # CUDA_VISIBLE_DEVICES + torch.cuda.set_device(), so there is no memory
-    # contention.  Sequential loading with barrier() deadlocks because
-    # from_pretrained triggers internal distributed collectives (accelerate /
-    # transformers check torch.distributed.is_initialized()).
     model_name = args.model or Config.MODEL_NAME
     print(f"[Model] Rank {rank}: Loading {model_name} with LoRA rank={args.lora_rank}...")
     model, tokenizer = FastLanguageModel.from_pretrained(
@@ -512,7 +482,7 @@ def main():
     )
     FastLanguageModel.for_training(model)
 
-    # ---- Resume from checkpoint ----
+    # ---- Resume from checkpoint (LoRA adapter) ----
     start_iter = 0
     if args.resume:
         import safetensors.torch
@@ -521,7 +491,7 @@ def main():
         resume_path = Path(args.resume)
         print(f"[Resume] Loading from {resume_path}")
 
-        adapter_path = resume_path / "adapter_model.safetensors"
+        adapter_path = resume_path / "policy" / "adapter_model.safetensors"
         if adapter_path.exists():
             state = safetensors.torch.load_file(str(adapter_path))
             set_peft_model_state_dict(model, state)
@@ -530,7 +500,7 @@ def main():
             raise FileNotFoundError(f"Adapter not found at {adapter_path}")
 
         try:
-            start_iter = int(resume_path.name.split("_")[-2]) + 1
+            start_iter = int(resume_path.name.split("_")[-1]) + 1
         except (ValueError, IndexError):
             start_iter = 0
         print(f"[Resume] Starting from iteration {start_iter}")
@@ -539,26 +509,53 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     model = model.to(device)
-    print(f"[Model] Loaded — NO value head (GRPO style)")
+
+    # ---- Wrap with value head (PPO-specific) ----
+    ac = PolicyWithValueHead(model, device=device).to(device)
+
+    # ---- Resume value head ----
+    if args.resume:
+        value_head_path = Path(args.resume) / "value_head.pt"
+        if value_head_path.exists():
+            ac.value_head.load_state_dict(
+                torch.load(value_head_path, map_location=device)
+            )
+            print(f"[Resume] Loaded value head from {value_head_path}")
+        else:
+            print(f"[Resume] Warning: value_head.pt not found, starting fresh value head")
+
+    # ---- Sync value head across ranks (Bug 2 fix) ----
+    # nn.Linear random init differs across ranks; broadcast from rank 0
+    if world_size > 1:
+        vhead_state = [ac.value_head.state_dict()] if is_main_rank() else [None]
+        vhead_state = broadcast_objects(vhead_state)
+        if not is_main_rank():
+            ac.value_head.load_state_dict(vhead_state[0])
+        barrier()
+        print(f"[DIST] Value head synced across {world_size} ranks")
+
+    print(f"[Model] Loaded with value head (PPO style)")
 
     # ---- Optional: torch.compile ----
     if use_compile:
         print("[OPT] Compiling model with torch.compile...")
-        model = torch.compile(model)
+        ac.lm = torch.compile(ac.lm)
         print("[OPT] Compilation complete")
 
     # ---- Save initial adapter for eval baseline (rank 0 only) ----
-    base_model_adapter_dir = output_dir_path / "base_model_adapter_grpo"
+    base_model_adapter_dir = output_dir_path / "base_model_adapter_ppo"
     if not args.resume and is_main_rank():
         base_model_adapter_dir.mkdir(parents=True, exist_ok=True)
-        model.save_pretrained(str(base_model_adapter_dir))
+        ac.lm.save_pretrained(str(base_model_adapter_dir))
         print(f"[Base] Saved initial adapter to {base_model_adapter_dir}")
+    elif args.resume:
+        print(f"[Resume] Using existing base model adapter from {base_model_adapter_dir}")
     barrier()
 
     # ---- Initialize inference backend (rank 0 only for vLLM interaction) ----
     if is_main_rank():
-        inference_backend = init_inference_backend(model, tokenizer, device)
-        vllm_adapter_dir = output_dir_path / "vllm_adapter_latest_grpo"
+        inference_backend = init_inference_backend(ac.lm, tokenizer, device)
+        vllm_adapter_dir = output_dir_path / "vllm_adapter_latest_ppo"
         if hasattr(inference_backend, "sync_base_adapter"):
             inference_backend.sync_base_adapter(base_model_adapter_dir)
     else:
@@ -568,61 +565,69 @@ def main():
     # ---- wandb (rank 0 only) ----
     if wandb and is_main_rank():
         if not os.getenv("WANDB_NAME"):
-            os.environ["WANDB_NAME"] = f"grpo-opt-{game}-{int(time.time())}"
+            os.environ["WANDB_NAME"] = f"ppo-opt-{game}-{int(time.time())}"
         wandb.login(key=os.getenv("WANDB_API_KEY", ""), relogin=True)
         wandb.init(entity="forge_scaling_intelligence_lab", project="games")
         wandb.config.update({
-            "trainer": "grpo_optimized",
+            "trainer": "ppo_optimized",
             "game": game,
-            "group_size": args.group_size,
-            "groups_per_batch": args.groups_per_batch,
+            "games_per_iter": args.games_per_iter,
             "lora_rank": args.lora_rank,
             "lr": args.lr,
+            "ppo_epochs": args.ppo_epochs,
+            "clip_eps": args.clip_eps,
+            "vf_coef": args.vf_coef,
             "kl_coef": args.kl_coef,
-            "use_clipping": args.use_clipping,
             "temperature": args.temperature,
             "opt_compile": use_compile,
-            "opt_train_autocast": use_train_autocast,
             "world_size": world_size,
         })
         print("[wandb] Initialized")
 
-    # ---- Optimizer (LoRA params only, NO value head) ----
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    # ---- Optimizer (LoRA + value head) ----
+    trainable_params = [p for p in ac.parameters() if p.requires_grad]
     optim = torch.optim.AdamW(trainable_params, lr=args.lr)
     rollout_logger = JSONLLogger(rollout_log_path) if is_main_rank() else None
 
-    print(f"[GRPO] Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
-    print(f"[GRPO] Starting optimized training loop...")
+    print(f"[PPO] Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
+    print(f"[PPO] Starting optimized training loop...")
 
     global_step = start_iter * 25 if args.resume else 0
     math_eval_data_path = Path(__file__).resolve().parent / "data"
 
+    # Role baseline EMA (PPO-specific)
+    role_baseline_ema = None
+    if args.use_role_baseline:
+        role_baseline_ema = {
+            0: EMA(args.role_baseline_gamma),
+            1: EMA(args.role_baseline_gamma),
+        }
+
     # ======================================================================
-    # Main GRPO loop (optimized)
+    # Main PPO loop (optimized)
     # ======================================================================
-    for it in tqdm(range(start_iter, 10_000), desc="GRPO iters", initial=start_iter, total=10_000):
+    for it in tqdm(range(start_iter, 10_000), desc="PPO iters", initial=start_iter, total=10_000):
         t_iter_start = time.time()
 
         # ---- 1. Sync policy to vLLM (rank 0 only) ----
         if is_main_rank():
-            inference_backend.sync_policy(model, vllm_adapter_dir)
+            inference_backend.sync_policy(ac.lm, vllm_adapter_dir)
             if not inference_backend.is_enabled():
-                inference_backend = HFLocalBackend(model, tokenizer, device)
+                inference_backend = HFLocalBackend(ac.lm, tokenizer, device)
         barrier()
 
         # ---- 2. Periodic evaluation (rank 0 only) ----
         if args.eval_every and it % args.eval_every == 0 and it > 0:
             if is_main_rank():
-                model.eval()
-                inference_backend.sync_policy(model, vllm_adapter_dir)
+                ac.eval()
+                inference_backend.sync_policy(ac.lm, vllm_adapter_dir)
                 if not inference_backend.is_enabled():
-                    inference_backend = HFLocalBackend(model, tokenizer, device)
+                    inference_backend = HFLocalBackend(ac.lm, tokenizer, device)
 
                 print(f"\n[eval {it}] Starting eval vs base ({args.eval_games} games)")
                 t_eval0 = time.time()
                 eval_logs = evaluate_vs_base(
-                    current_model=model,
+                    current_model=ac.lm,
                     base_model_adapter_dir=base_model_adapter_dir,
                     tokenizer=tokenizer,
                     backend=inference_backend,
@@ -648,10 +653,10 @@ def main():
         # tau2-bench evaluation (rank 0 only)
         if args.tau2_eval_every and it % args.tau2_eval_every == 0 and it > 0:
             if is_main_rank():
-                model.eval()
-                inference_backend.sync_policy(model, vllm_adapter_dir)
+                ac.eval()
+                inference_backend.sync_policy(ac.lm, vllm_adapter_dir)
                 if not inference_backend.is_enabled():
-                    inference_backend = HFLocalBackend(model, tokenizer, device)
+                    inference_backend = HFLocalBackend(ac.lm, tokenizer, device)
 
                 print(f"\n[eval {it}] Starting tau2-bench evaluation...")
                 t_tau2_0 = time.time()
@@ -673,75 +678,50 @@ def main():
                         wandb.log(tau2_logs, step=global_step)
             barrier()
 
-        # ---- 3. Collect group-based rollouts (rank 0) + broadcast ----
+        # ---- 3. Collect self-play rollouts (rank 0) + broadcast ----
         if is_main_rank():
             t_collect0 = time.time()
-            samples, env_metrics = collect_grpo_rollouts(
-                backend=inference_backend,
+            batch, env_metrics = collect_games(
+                model=ac.lm,
                 tokenizer=tokenizer,
-                game_spec=game_spec,
-                groups_per_batch=args.groups_per_batch,
-                group_size=args.group_size,
+                backend=inference_backend,
+                num_games=args.games_per_iter,
                 temperature=args.temperature,
                 max_new_tokens=max_gen_tokens,
-                base_seed=it,
+                seed=it,
                 logger=rollout_logger,
+                device=device,
+                role_baseline_ema=role_baseline_ema,
+                game_spec=game_spec,
                 env_kwargs=env_kwargs,
             )
             t_collect1 = time.time()
         else:
             t_collect0 = t_collect1 = time.time()
-            samples, env_metrics = [], {}
+            batch, env_metrics = [], {}
 
-        # ---- 4. Compute advantages + filter (rank 0), then broadcast ----
-        # broadcast_data layout: [skip_flag, samples, advantages, num_filtered,
-        #   dt_filtered, env_metrics, avg_abs_advantage, t_collect0, t_collect1]
-        # skip_flag: True = skip this iteration, False = proceed
+        # ---- 3b. Filter info-gathering turns (rank 0, before broadcast) ----
+        dt_filtered = 0
+        if is_main_rank() and args.filter_info_turns and batch:
+            samples_before = len(batch)
+            batch, _keep_idx, dt_filtered = filter_info_gathering_samples(batch)
+            if dt_filtered > 0:
+                print(
+                    f"[iter {it}] Filtered {dt_filtered} info-gathering turns "
+                    f"({samples_before} -> {len(batch)} samples)"
+                )
+
+        # Broadcast collected data to all ranks
         if is_main_rank():
-            if not samples:
-                broadcast_data = [True, None, None, 0, 0, {}, 0.0, t_collect0, t_collect1]
+            if not batch:
+                broadcast_data = [True, None, None, 0, t_collect0, t_collect1]
                 print(f"[iter {it}] No samples collected, skipping")
             else:
-                # Compute group-relative advantages
-                advantages = compute_group_advantages(samples)
-
-                # 4b. Filter constant-reward groups
-                num_filtered = 0
-                if args.filter_constant_groups:
-                    pre_filter_count = len(samples)
-                    samples, advantages, num_filtered = filter_constant_reward_groups(
-                        samples, advantages,
-                    )
-                    if num_filtered > 0:
-                        print(
-                            f"[iter {it}] Filtered {num_filtered} constant-reward groups "
-                            f"({pre_filter_count} -> {len(samples)} samples)"
-                        )
-
-                # 4b2. Filter info-gathering turns
-                dt_filtered = 0
-                samples_before_dt_filter = len(samples)
-                if args.filter_info_turns:
-                    samples, advantages, dt_filtered = filter_info_gathering_turns(
-                        samples, advantages,
-                    )
-                    if dt_filtered > 0:
-                        print(
-                            f"[iter {it}] Filtered {dt_filtered} info-gathering turns "
-                            f"({samples_before_dt_filter} -> {len(samples)} samples)"
-                        )
-
-                # 4c. Normalize advantages
-                adv_std = advantages.std()
-                if adv_std > 1e-8:
-                    advantages = (advantages - advantages.mean()) / (adv_std + 1e-8)
-
-                avg_abs_advantage = float(advantages.abs().mean().item())
-
-                broadcast_data = [False, samples, advantages, num_filtered, dt_filtered,
-                                  env_metrics, avg_abs_advantage, t_collect0, t_collect1]
+                random.shuffle(batch)
+                broadcast_data = [False, batch, env_metrics, dt_filtered,
+                                  t_collect0, t_collect1]
         else:
-            broadcast_data = [None] * 9
+            broadcast_data = [None] * 6
 
         broadcast_data = broadcast_objects(broadcast_data)
         skip_flag = broadcast_data[0]
@@ -749,105 +729,54 @@ def main():
         if skip_flag:
             continue
 
-        _, samples, advantages, num_filtered, dt_filtered, \
-            env_metrics, avg_abs_advantage, t_collect0, t_collect1 = broadcast_data
-
-        # ---- 4d. Early skip when all advantages are zero ----
-        if avg_abs_advantage == 0.0:
-            if is_main_rank():
-                t_train1 = time.time()
-                avg_reward = float(torch.tensor([s.reward for s in samples]).mean().item())
-                N = len(samples)
-
-                logs = {
-                    "iter": it,
-                    "global_step": global_step,
-                    "grpo/policy_loss": 0.0,
-                    "grpo/kl_base_loss": 0.0,
-                    "grpo/approx_kl_rollout": 0.0,
-                    "grpo/approx_kl_base": 0.0,
-                    "grpo/clip_frac": 0.0,
-                    "grpo/ratio_mean": 1.0,
-                    "grpo/avg_reward": avg_reward,
-                    "grpo/avg_advantage": 0.0,
-                    "grpo/avg_abs_advantage": 0.0,
-                    "grpo/num_samples": N,
-                    "grpo/constant_groups_filtered": num_filtered,
-                    "grpo/skipped_zero_adv": 1,
-                    "opt/info_turns_filtered": dt_filtered,
-                    "opt/tool_results_truncated": 0,
-                    "time/collect_sec": t_collect1 - t_collect0,
-                    "time/train_sec": 0.0,
-                    "time/iter_sec": t_train1 - t_iter_start,
-                    **env_metrics,
-                }
-
-                print(
-                    f"[iter {it}] SKIPPED (all advantages zero) "
-                    f"reward={avg_reward:.3f} avg_r={env_metrics['env/avg_reward_p0']:.3f} "
-                    f"samples={N} filtered={num_filtered} "
-                    f"collect={logs['time/collect_sec']:.1f}s"
-                )
-
-                if wandb:
-                    wandb.log(logs, step=global_step)
-
-                if it % args.save_every == 0:
-                    ckpt_dir = output_dir_path / f"grpo_ckpt_iter_{it}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                    ckpt_dir.mkdir(parents=True, exist_ok=True)
-                    model.save_pretrained(str(ckpt_dir))
-                    tokenizer.save_pretrained(str(ckpt_dir))
-                    print(f"[checkpoint] Saved to {ckpt_dir}")
-            barrier()
-            continue
+        _, batch, env_metrics, dt_filtered, t_collect0, t_collect1 = broadcast_data
 
         # ================================================================
-        # OPTIMIZED STEPS 5-7
+        # OPTIMIZED STEPS 4-7
         # ================================================================
 
-        # ---- 5. Pre-tokenize all samples ----
+        # ---- 4. Pre-tokenize all samples ----
         t_tok0 = time.time()
 
         seqs_cpu: List[torch.Tensor] = []
         prompt_lens: List[int] = []
         action_lens: List[int] = []
-        kept_indices: List[int] = []
+        returns_cpu_list: List[float] = []
         total_tool_results_truncated = 0
         max_seq_len = Config.MAX_SEQ_LENGTH
         num_skipped_long = 0
 
-        for i, s in enumerate(samples):
+        for i, s in enumerate(batch):
             if args.tool_result_max_chars > 0:
-                msgs, n_trunc = compress_tool_results(s.prompt_msgs, args.tool_result_max_chars)
+                msgs, n_trunc = compress_tool_results(
+                    s.prompt_msgs, args.tool_result_max_chars
+                )
                 total_tool_results_truncated += n_trunc
             else:
                 msgs = s.prompt_msgs
-            ids, pL, aL = build_prompt_plus_action(tokenizer, msgs, s.completion_text, tools=s.tools)
+            ids, pL, aL = build_prompt_plus_action(tokenizer, msgs, s.action_str)
             if ids.shape[0] > max_seq_len:
                 num_skipped_long += 1
                 continue
-            kept_indices.append(i)
             seqs_cpu.append(ids.cpu())
             prompt_lens.append(pL)
             action_lens.append(aL)
+            returns_cpu_list.append(float(s.ret))
 
         if num_skipped_long > 0:
-            print(f"  [OPT] Skipped {num_skipped_long}/{len(samples)} samples exceeding {max_seq_len} tokens")
-            advantages = advantages[torch.tensor(kept_indices, dtype=torch.long)]
-            samples = [samples[i] for i in kept_indices]
+            print(f"  [OPT] Skipped {num_skipped_long}/{len(batch)} samples exceeding {max_seq_len} tokens")
 
         N = len(seqs_cpu)
         if N == 0:
             print(f"  [iter {it}] All samples exceeded max_seq_len — skipping training step")
             continue
+
+        returns_cpu = torch.tensor(returns_cpu_list, dtype=torch.float32)
         seq_lens = [s.shape[0] for s in seqs_cpu]
 
         t_tok1 = time.time()
 
-        # ---- 5b. Create length-sorted batches ----
-        # When stats_chunk_size == mini_batch_size (default), we use a SINGLE
-        # set of batches for both steps 6 and 7 — avoids duplicate padding and
-        # halves CPU memory usage (benchmarked: 4.7x faster caching, 50% less mem).
+        # ---- 4b. Create length-sorted batches ----
         unified_batches = args.stats_chunk_size == args.mini_batch_size
         train_batches = make_sorted_batches(seq_lens, args.mini_batch_size)
 
@@ -856,9 +785,7 @@ def main():
         else:
             stats_batches = make_sorted_batches(seq_lens, args.stats_chunk_size)
 
-        # ---- 5c. Pre-pad and pin all batches on CPU ----
-        # Also pre-compute per-batch prompt_lens/action_lens to avoid repeated
-        # list comprehensions in the hot loops of steps 6 and 7.
+        # ---- 4c. Pre-pad and pin all batches on CPU ----
         BatchEntry = Tuple[List[int], torch.Tensor, torch.Tensor, List[int], List[int]]
 
         def build_batch_cache(batches: List[List[int]]) -> List[BatchEntry]:
@@ -879,9 +806,11 @@ def main():
 
         t_pad = time.time()
 
-        # ---- 6. Compute old_logp and (optionally) base_logp [DISTRIBUTED] ----
-        model.eval()
-        old_logp_cpu = torch.zeros(N, dtype=torch.float32)  # zeros for all-reduce SUM trick
+        # ---- 5. Compute old_logp and old_v [DISTRIBUTED] ----
+        ac.eval()
+        # Zeros for all-reduce SUM trick: each rank writes disjoint indices
+        old_logp_cpu = torch.zeros(N, dtype=torch.float32)
+        old_v_cpu = torch.zeros(N, dtype=torch.float32)
         compute_base = args.kl_coef > 0
         base_logp_cpu = torch.zeros(N, dtype=torch.float32) if compute_base else None
 
@@ -890,57 +819,49 @@ def main():
         my_stats_indices, _ = shard_batches(all_stats_indices, rank, world_size)
 
         with torch.no_grad():
-            # -- Pass 1: old_logp (adapter ON) — each rank does its shard --
+            # -- Pass 1: old_logp + old_v (adapter ON) --
             for bi in my_stats_indices:
                 mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = stats_batch_cache[bi]
                 mb_ids = mb_ids_cpu.to(device, non_blocking=True)
                 mb_attn = mb_attn_cpu.to(device, non_blocking=True)
 
-                with autocast_ctx(device):
-                    outputs = model(
-                        input_ids=mb_ids,
-                        attention_mask=mb_attn,
-                        use_cache=False,
-                    )
-                logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+                logits, last_h = ac(input_ids=mb_ids, attention_mask=mb_attn)
 
                 mb_old_logp = logprob_action_tokens(
-                    logits, mb_ids, mb_pl, mb_al,
-                    normalize_by_len=args.normalize_by_len,
+                    logits, mb_ids, mb_pl, mb_al, normalize_by_len=True,
                 )
-                old_logp_cpu[mb_idx] = mb_old_logp.detach().cpu()
-                del logits, outputs, mb_old_logp, mb_ids, mb_attn
+                mb_old_v = values_from_hidden(last_h, ac.value_head, mb_pl)
 
-            # All-reduce: each rank wrote to disjoint indices (rest are 0), SUM assembles full vector
+                old_logp_cpu[mb_idx] = mb_old_logp.detach().cpu()
+                old_v_cpu[mb_idx] = mb_old_v.detach().cpu()
+                del logits, last_h, mb_old_logp, mb_old_v, mb_ids, mb_attn
+
+            # All-reduce: each rank wrote to disjoint indices, SUM assembles full vector
             if world_size > 1:
                 old_logp_gpu = old_logp_cpu.to(device)
+                old_v_gpu = old_v_cpu.to(device)
                 torch.distributed.all_reduce(old_logp_gpu, op=torch.distributed.ReduceOp.SUM)
+                torch.distributed.all_reduce(old_v_gpu, op=torch.distributed.ReduceOp.SUM)
                 old_logp_cpu = old_logp_gpu.cpu()
-                del old_logp_gpu
+                old_v_cpu = old_v_gpu.cpu()
+                del old_logp_gpu, old_v_gpu
 
             # -- Pass 2: base_logp (adapter OFF) — distributed --
             if compute_base:
-                model.disable_adapter_layers()
+                ac.lm.disable_adapter_layers()
                 try:
                     for bi in my_stats_indices:
                         mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = stats_batch_cache[bi]
                         mb_ids = mb_ids_cpu.to(device, non_blocking=True)
                         mb_attn = mb_attn_cpu.to(device, non_blocking=True)
 
-                        with autocast_ctx(device):
-                            outputs = model(
-                                input_ids=mb_ids,
-                                attention_mask=mb_attn,
-                                use_cache=False,
-                            )
-                        logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+                        logits, _ = ac(input_ids=mb_ids, attention_mask=mb_attn)
 
                         mb_base_logp = logprob_action_tokens(
-                            logits, mb_ids, mb_pl, mb_al,
-                            normalize_by_len=args.normalize_by_len,
+                            logits, mb_ids, mb_pl, mb_al, normalize_by_len=True,
                         )
                         base_logp_cpu[mb_idx] = mb_base_logp.detach().cpu()
-                        del logits, outputs, mb_base_logp, mb_ids, mb_attn
+                        del logits, mb_base_logp, mb_ids, mb_attn, _
 
                     if world_size > 1:
                         base_logp_gpu = base_logp_cpu.to(device)
@@ -948,7 +869,7 @@ def main():
                         base_logp_cpu = base_logp_gpu.cpu()
                         del base_logp_gpu
                 finally:
-                    model.enable_adapter_layers()
+                    ac.lm.enable_adapter_layers()
 
         # Free stats cache if separate from train cache
         if not unified_batches:
@@ -956,20 +877,26 @@ def main():
 
         t_stats = time.time()
 
-        # ---- 7. GRPO training [DISTRIBUTED: gradient accumulation + all-reduce] ----
-        model.train()
+        # ---- 6. Compute advantages: returns - old_v, then normalize ----
+        adv_cpu = returns_cpu - old_v_cpu
+        adv_std = adv_cpu.std(unbiased=False)
+        if adv_std > 1e-8:
+            adv_cpu = (adv_cpu - adv_cpu.mean()) / (adv_std + 1e-8)
+
+        # ---- 7. PPO training [DISTRIBUTED: gradient accumulation + all-reduce] ----
+        ac.train()
 
         policy_loss_acc = 0.0
+        value_loss_acc = 0.0
         kl_loss_acc = 0.0
         approx_kl_acc = 0.0
-        kl_base_acc = 0.0
         clip_frac_acc = 0.0
         ratio_mean_acc = 0.0
         local_updates = 0
 
-        for _epoch in range(args.epochs):
+        for _epoch in range(args.ppo_epochs):
             # Shuffle the ORDER of mini-batches — same seed on all ranks for
-            # deterministic sharding (each rank gets a disjoint subset).
+            # deterministic sharding
             batch_order = list(range(len(train_batch_cache)))
             rng = random.Random(it * 1000 + _epoch)
             rng.shuffle(batch_order)
@@ -986,71 +913,61 @@ def main():
                 mb_ids = mb_ids_cpu.to(device, non_blocking=True)
                 mb_attn = mb_attn_cpu.to(device, non_blocking=True)
                 mb_old_logp = old_logp_cpu[mb_idx].to(device)
-                mb_adv = advantages[mb_idx].to(device)
+                mb_returns = returns_cpu[mb_idx].to(device)
+                mb_adv = adv_cpu[mb_idx].to(device)
                 mb_base_logp = base_logp_cpu[mb_idx].to(device) if base_logp_cpu is not None else None
 
-                # Forward pass (always autocast to match step 6 precision)
-                with autocast_ctx(device):
-                    outputs = model(
-                        input_ids=mb_ids,
-                        attention_mask=mb_attn,
-                        use_cache=False,
-                    )
-                    logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
-                    new_logp = logprob_action_tokens(
-                        logits, mb_ids, mb_pl, mb_al,
-                        normalize_by_len=args.normalize_by_len,
-                    )
+                # Forward pass through actor-critic
+                logits, last_h = ac(input_ids=mb_ids, attention_mask=mb_attn)
 
-                # Importance sampling ratio
+                new_logp = logprob_action_tokens(
+                    logits, mb_ids, mb_pl, mb_al, normalize_by_len=True,
+                )
+                new_v = values_from_hidden(last_h, ac.value_head, mb_pl)
+
+                # PPO clipped surrogate
                 ratio = torch.exp(new_logp - mb_old_logp)
+                surr1 = ratio * mb_adv
+                surr2 = torch.clamp(
+                    ratio, 1.0 - args.clip_eps, 1.0 + args.clip_eps
+                ) * mb_adv
+                policy_loss = -torch.mean(torch.min(surr1, surr2))
 
-                # Policy loss
-                if args.use_clipping:
-                    surr1 = ratio * mb_adv
-                    surr2 = torch.clamp(
-                        ratio, 1.0 - args.clip_eps, 1.0 + args.clip_eps
-                    ) * mb_adv
-                    policy_loss = -torch.mean(torch.min(surr1, surr2))
-                else:
-                    policy_loss = -torch.mean(ratio * mb_adv)
+                # Value loss
+                value_loss = 0.5 * F.mse_loss(new_v, mb_returns)
 
-                # KL penalty against base model
+                # Optional KL penalty against base model
                 kl_loss = torch.tensor(0.0, device=device)
                 if args.kl_coef > 0 and mb_base_logp is not None:
                     kl_loss = args.kl_coef * torch.mean(new_logp - mb_base_logp)
 
-                # Scale loss for gradient accumulation: divide by total batches so
-                # accumulated gradient = (1/N) * sum(g_i), the full-batch gradient.
-                loss = (policy_loss + kl_loss) / n_total_batches
-                loss.backward()  # Gradients accumulate (no zero_grad per mini-batch)
+                # Scale loss for gradient accumulation
+                loss = (policy_loss + args.vf_coef * value_loss + kl_loss) / n_total_batches
+                loss.backward()
 
-                # Tracking (no grad, unscaled losses for logging)
+                # Tracking (no grad, unscaled losses)
                 with torch.no_grad():
                     approx_kl = torch.mean(mb_old_logp - new_logp)
                     clip_frac = torch.mean(
                         (torch.abs(ratio - 1.0) > args.clip_eps).float()
                     )
                     ratio_mean_val = torch.mean(ratio)
-                    if mb_base_logp is not None:
-                        approx_kl_base = torch.mean(new_logp - mb_base_logp)
-                    else:
-                        approx_kl_base = torch.tensor(0.0)
 
                 local_updates += 1
                 policy_loss_acc += float(policy_loss.item())
+                value_loss_acc += float(value_loss.item())
                 kl_loss_acc += float(kl_loss.item())
                 approx_kl_acc += float(approx_kl.item())
-                kl_base_acc += float(approx_kl_base.item())
                 clip_frac_acc += float(clip_frac.item())
                 ratio_mean_acc += float(ratio_mean_val.item())
 
-                del mb_ids, mb_attn, logits, outputs, new_logp, ratio, loss
+                del mb_ids, mb_attn, logits, last_h, new_logp, new_v, ratio, loss
+                del mb_old_logp, mb_returns, mb_adv, mb_base_logp
 
-            # All-reduce accumulated LoRA gradients across ranks
+            # All-reduce accumulated gradients across ranks
             allreduce_coalesced_grads(trainable_params)
 
-            # Single gradient clip + optimizer step (identical on all ranks)
+            # Single gradient clip + optimizer step
             torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)
             optim.step()
 
@@ -1059,24 +976,24 @@ def main():
             local_metrics = {
                 "approx_kl": approx_kl_acc,
                 "clip_frac": clip_frac_acc,
-                "kl_base": kl_base_acc,
                 "kl_loss": kl_loss_acc,
                 "n_updates": float(local_updates),
                 "policy_loss": policy_loss_acc,
                 "ratio_mean": ratio_mean_acc,
+                "value_loss": value_loss_acc,
             }
             agg = allreduce_scalars(local_metrics)
             total_updates = int(agg["n_updates"])
             policy_loss_acc = agg["policy_loss"]
+            value_loss_acc = agg["value_loss"]
             kl_loss_acc = agg["kl_loss"]
             approx_kl_acc = agg["approx_kl"]
-            kl_base_acc = agg["kl_base"]
             clip_frac_acc = agg["clip_frac"]
             ratio_mean_acc = agg["ratio_mean"]
         else:
             total_updates = local_updates
 
-        global_step += n_total_batches  # preserve approximate scale with original
+        global_step += n_total_batches
         updates = total_updates
 
         t_train1 = time.time()
@@ -1086,27 +1003,23 @@ def main():
 
         # ---- 8. Logging (rank 0 only) ----
         if is_main_rank():
-            avg_advantage = float(advantages.mean().item())
-            all_rewards = torch.tensor([s.reward for s in samples], dtype=torch.float32)
-            avg_reward = float(all_rewards.mean().item())
+            avg_return = float(returns_cpu.mean().item())
+            abs_return = float(returns_cpu.abs().mean().item())
 
             pad_eff = compute_padding_efficiency(seq_lens, train_batches)
 
             logs = {
                 "iter": it,
                 "global_step": global_step,
-                "grpo/policy_loss": policy_loss_acc / max(1, updates),
-                "grpo/kl_base_loss": kl_loss_acc / max(1, updates),
-                "grpo/approx_kl_rollout": approx_kl_acc / max(1, updates),
-                "grpo/approx_kl_base": kl_base_acc / max(1, updates),
-                "grpo/clip_frac": clip_frac_acc / max(1, updates),
-                "grpo/ratio_mean": ratio_mean_acc / max(1, updates),
-                "grpo/avg_reward": avg_reward,
-                "grpo/avg_advantage": avg_advantage,
-                "grpo/avg_abs_advantage": avg_abs_advantage,
-                "grpo/num_samples": N,
-                "grpo/constant_groups_filtered": num_filtered,
-                "grpo/skipped_zero_adv": 0,
+                "ppo/policy_loss": policy_loss_acc / max(1, updates),
+                "ppo/value_loss": value_loss_acc / max(1, updates),
+                "ppo/kl_loss": kl_loss_acc / max(1, updates),
+                "ppo/avg_return": avg_return,
+                "ppo/avg_abs_return": abs_return,
+                "ppo/approx_kl": approx_kl_acc / max(1, updates),
+                "ppo/clip_frac": clip_frac_acc / max(1, updates),
+                "ppo/ratio_mean": ratio_mean_acc / max(1, updates),
+                "ppo/num_samples": N,
                 "time/collect_sec": t_collect1 - t_collect0,
                 "time/train_sec": t_train1 - t_collect1,
                 "time/iter_sec": t_train1 - t_iter_start,
@@ -1123,13 +1036,13 @@ def main():
 
             print(
                 f"[iter {it}] step={global_step} "
-                f"reward={avg_reward:.3f} avg_r={env_metrics['env/avg_reward_p0']:.3f} "
-                f"abs_adv={avg_abs_advantage:.3f} "
-                f"invalid={env_metrics['env/invalid_move_rate']:.3f} "
-                f"samples={N} info_filt={dt_filtered} const_filt={num_filtered} "
+                f"avg_return={avg_return:.3f} abs_return={abs_return:.3f} "
+                f"win_p0={env_metrics.get('env/win_rate_p0', 0):.3f} "
+                f"invalid={env_metrics.get('env/invalid_move_rate', 0):.3f} "
+                f"samples={N} info_filt={dt_filtered} "
                 f"trunc={total_tool_results_truncated} "
-                f"KL_rollout={logs['grpo/approx_kl_rollout']:.4f} "
-                f"KL_base={logs['grpo/approx_kl_base']:.4f} "
+                f"KL={logs['ppo/approx_kl']:.4f} "
+                f"clip={logs['ppo/clip_frac']:.3f} "
                 f"collect={logs['time/collect_sec']:.1f}s train={logs['time/train_sec']:.1f}s "
                 f"(tok={t_tok1 - t_tok0:.1f}s pad={t_pad - t_tok1:.1f}s "
                 f"stats={t_stats - t_pad:.1f}s grad={t_train1 - t_stats:.1f}s "
@@ -1142,12 +1055,12 @@ def main():
         # ---- Math evaluation (rank 0 only) ----
         if args.math_eval_every and it % args.math_eval_every == 0 and it > 0:
             if is_main_rank():
-                model.eval()
+                ac.eval()
                 all_math_logs: Dict[str, float] = {}
                 for ds_name in Config.MATH_EVAL_DATASETS:
                     math_start = time.time()
                     math_logs = evaluate_math(
-                        model=model,
+                        model=ac.lm,
                         tokenizer=tokenizer,
                         data_path=math_eval_data_path,
                         dataset_name=ds_name,
@@ -1168,20 +1081,22 @@ def main():
         # ---- 9. Save checkpoint (rank 0 only) ----
         if it % args.save_every == 0:
             if is_main_rank():
-                ckpt_dir = output_dir_path / f"grpo_ckpt_iter_{it}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                ckpt_dir = output_dir_path / f"ppo_ckpt_iter_{it}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 ckpt_dir.mkdir(parents=True, exist_ok=True)
-                model.save_pretrained(str(ckpt_dir))
-                tokenizer.save_pretrained(str(ckpt_dir))
+                ac.lm.save_pretrained(str(ckpt_dir / "policy"))
+                tokenizer.save_pretrained(str(ckpt_dir / "policy"))
+                torch.save(ac.value_head.state_dict(), str(ckpt_dir / "value_head.pt"))
                 print(f"[checkpoint] Saved to {ckpt_dir}")
             barrier()
 
     # ---- Final save (rank 0 only) ----
     if is_main_rank():
-        final_dir = output_dir_path / f"grpo_{game}_final"
+        final_dir = output_dir_path / f"ppo_{game}_final"
         final_dir.mkdir(parents=True, exist_ok=True)
-        model.save_pretrained(str(final_dir))
-        tokenizer.save_pretrained(str(final_dir))
-        print(f"[GRPO] Training complete! Saved to {final_dir}")
+        ac.lm.save_pretrained(str(final_dir / "policy"))
+        tokenizer.save_pretrained(str(final_dir / "policy"))
+        torch.save(ac.value_head.state_dict(), str(final_dir / "value_head.pt"))
+        print(f"[PPO] Training complete! Saved to {final_dir}")
 
     dist_cleanup()
 
@@ -1194,4 +1109,3 @@ if __name__ == "__main__":
         traceback.print_exc()
     finally:
         dist_cleanup()
-
