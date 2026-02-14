@@ -37,7 +37,7 @@ seed: 42
 
 # Output Configuration
 output_dir: outputs
-save_to: qwen-3-30b-adv_v1_5iter-airline-qwen3-30b
+save_to: qwen-3-30b-airline-qwen3-30b
 
 # Advanced Options
 verbose: true                                                            # Enable verbose output
@@ -47,10 +47,10 @@ vllm:
   api_key: null                                                          # No API key needed for local
   # Agent servers (4B model) - ports 8090, 8091
   agent_base_urls:
-    - http://localhost:9000/v1
+    - http://localhost:8000/v1
   # User servers (30B model) - ports 9000, 9001
   user_base_urls:
-    - http://localhost:9000/v1
+    - http://localhost:8000/v1
 
 # Run evaluation:
 #   python main.py --config config-vllm.yml

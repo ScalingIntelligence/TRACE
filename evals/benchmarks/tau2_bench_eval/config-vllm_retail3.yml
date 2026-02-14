@@ -3,7 +3,7 @@
 # Example: vLLM local model for agent + OpenAI API for user simulator
 
 # Domain Configuration
-domain: airline                                                          # Domain to evaluate
+domain: retail                                                          # Domain to evaluate
 
 # Agent Configuration (4B model)
 # Use vllm:// prefix to indicate vLLM model
@@ -12,8 +12,8 @@ agent: null
 
 # LoRA Adapter Configuration (optional)
 # If specified, loads this adapter and uses it instead of base model
-lora_adapter_path: /root/workplace/games/outputs/grpo_ckpt_iter_10_20260213_182801
-lora_adapter_name: adv_iter_10
+lora_adapter_path: /root/workplace/games/outputs/grpo_ckpt_iter_15_20260213_205511
+lora_adapter_name: adv_iter_15
 
 # Agent LLM Arguments
 agent_llm_args:
@@ -41,7 +41,7 @@ seed: 42
 
 # Output Configuration
 output_dir: outputs
-save_to: qwen-3-30b-adv_iter_10-airline-qwen3-30b
+save_to: qwen-3-30b-adv_iter_15-retail-qwen3-30b
 
 # Advanced Options
 verbose: true                                                            # Enable verbose output
@@ -51,10 +51,10 @@ vllm:
   api_key: null                                                          # No API key needed for local
   # Agent servers (4B model) - ports 8090, 8091
   agent_base_urls:
-    - http://localhost:8080/v1
+    - http://localhost:9002/v1
   # User servers (30B model) - ports 9000, 9001
   user_base_urls:
-    - http://localhost:8080/v1
+    - http://localhost:9002/v1
 
 # Run evaluation:
 #   python main.py --config config-vllm.yml

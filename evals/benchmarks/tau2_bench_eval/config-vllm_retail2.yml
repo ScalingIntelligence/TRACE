@@ -12,8 +12,8 @@ agent: null
 
 # LoRA Adapter Configuration (optional)
 # If specified, loads this adapter and uses it instead of base model
-lora_adapter_path: tarsur909/adversarial_v1_10iter
-lora_adapter_name: adversarial_v1_10iter
+lora_adapter_path: /root/workplace/games/outputs/grpo_ckpt_iter_10_20260213_182801
+lora_adapter_name: adv_iter_10
 
 # Agent LLM Arguments
 agent_llm_args:
@@ -41,7 +41,7 @@ seed: 42
 
 # Output Configuration
 output_dir: outputs
-save_to: qwen-3-30b-adv_v1_10iter-retail-qwen3-30b
+save_to: qwen-3-30b-adv_iter_10-retail-qwen3-30b
 
 # Advanced Options
 verbose: true                                                            # Enable verbose output

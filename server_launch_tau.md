@@ -39,8 +39,39 @@ vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507 \
 
 conda activate games
 export VLLM_RPC_TIMEOUT=2000
+export CUDA_VISIBLE_DEVICES=4
+export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 8081   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
+
+
+
+conda activate games
+export VLLM_RPC_TIMEOUT=2000
+export CUDA_VISIBLE_DEVICES=5
+export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 9002   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
+
+
+conda activate games
+export VLLM_RPC_TIMEOUT=2000
 export CUDA_VISIBLE_DEVICES=6
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 8082   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
+
+
+
+conda activate games
+export VLLM_RPC_TIMEOUT=2000
+export CUDA_VISIBLE_DEVICES=7
+export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 9003   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
+
+
+8081
+5. 9002
+6. 8082
+7. 9003[6:05 PM]
+
 vllm serve Qwen/Qwen3-4B-Instruct-2507 \
   --host 0.0.0.0 \
   --port 9000 \
