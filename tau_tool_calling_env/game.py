@@ -1,58 +1,67 @@
-"""Main game class for adversarial policy adherence training.
+"""Main game class for the tau bench tool-calling microenvironment.
 
-Single-player game (player 0 = agent) with LLM adversarial user.
-Implements the GameEnv protocol for GRPO training.
+Single-player game (player 0 = agent) with LLM user simulator.
+Uses the EXACT same tools, DB, policy, and message format as tau2-bench.
+Implements the GameEnv protocol for GRPO/PPO training.
 """
 
 import json
 import re
 from typing import Dict, List, Any, Optional
 
-from .scenarios import Scenario, generate_scenario
-from .database import get_pydantic_db
-from .tools import ToolExecutor
+from .scenarios import GeneratedScenario, generate_scenario
 from .verification import compute_reward
-from .constants import (
+
+from adversarial_policy_game.database import get_pydantic_db
+from adversarial_policy_game.tools import ToolExecutor
+from adversarial_policy_game.constants import (
     AIRLINE_POLICY, RETAIL_POLICY,
     AIRLINE_TOOL_DEFS, RETAIL_TOOL_DEFS,
     AIRLINE_TOOL_SCHEMAS, RETAIL_TOOL_SCHEMAS,
 )
-from .llm_user import LLMUser, UserLLMClient, adjust_user_difficulty, DIFFICULTY_CONFIGS
+from adversarial_policy_game.llm_user import LLMUser, UserLLMClient
 
 
 # =====================================================================
 # Main Game Class
 # =====================================================================
 
-class AdversarialPolicyGame:
-    """Adversarial Policy Adherence game environment.
+class TauToolCallingEnv:
+    """Tau bench tool-calling microenvironment.
 
-    Tests whether the agent follows customer service policy despite
-    adversarial user pressure (deception, persistence, emotional
-    manipulation, conditional instructions, etc.).
+    Simplified tau bench with LLM user and programmatic verification.
+    Uses the EXACT same tau2-bench infrastructure:
+    - Same tools (via ToolExecutor wrapping tau2-bench AirlineTools/RetailTools)
+    - Same DB (via tau2-bench db.json)
+    - Same policy (via tau2-bench policy.md)
+    - Same message format (matches tau2-bench agent format)
+    - Same verification (DB hash + communicate check)
 
-    Requires a UserLLMClient for the adversarial user simulator.
+    Differs only in task scenarios (simpler, single-action tasks).
+
     Implements the GameEnv protocol for GRPO training.
     """
 
-    # When True, messages_for_game() uses get_system_prompt()/get_messages()
-    # for structured training that matches tau2-bench eval format.
     supports_structured_messages = True
 
-    def __init__(self, max_steps: int = 30, user_client: Optional[UserLLMClient] = None,
-                 adversarial_ratio: float = 0.2):
+    def __init__(
+        self,
+        max_steps: int = 30,
+        user_client: Optional[UserLLMClient] = None,
+        domain: Optional[str] = None,
+    ):
         self.max_steps = max_steps
         self._user_client = user_client
-        self._adversarial_ratio = adversarial_ratio
+        self._domain_filter = domain  # Optional: "airline", "retail", or None (both)
 
         # GameEnv protocol attributes
         self.done: bool = False
-        self.current_player: int = 0  # Always player 0 (single-player)
+        self.current_player: int = 0
         self.rewards: Dict[int, float] = {0: 0.0}
         self.invalid_player: Optional[int] = None
 
         # Internal state
-        self._scenario: Optional[Scenario] = None
+        self._scenario: Optional[GeneratedScenario] = None
         self._tools: Optional[ToolExecutor] = None
         self._llm_user: Optional[LLMUser] = None
         self._conversation: List[Dict[str, str]] = []
@@ -62,51 +71,26 @@ class AdversarialPolicyGame:
         self._last_call_key: Optional[str] = None
         self._repeat_count: int = 0
 
-    def reset(self, seed: int, user_difficulty: str = None) -> None:
-        """Reset with new seed. Fully deterministic scenario generation.
-
-        Args:
-            seed: Random seed for scenario generation.
-            user_difficulty: Optional difficulty level ("easy", "medium", "hard")
-                for the adversarial user simulator. Only affects adversarial
-                scenarios (T1-T12). Cooperative scenarios are unchanged.
-        """
-        import random as _random
-        self._scenario = generate_scenario(seed, adversarial_ratio=self._adversarial_ratio)
-        self._tools = ToolExecutor(self._scenario.domain, get_pydantic_db(self._scenario.domain))
+    def reset(self, seed: int) -> None:
+        """Reset with new seed. Deterministic scenario generation."""
+        self._scenario = generate_scenario(seed, domain=self._domain_filter)
+        self._tools = ToolExecutor(
+            self._scenario.domain,
+            get_pydantic_db(self._scenario.domain),
+        )
 
         # Initialize LLM user
         if self._user_client is None:
             raise ValueError(
-                "AdversarialPolicyGame requires a UserLLMClient. "
-                "Pass user_client= when constructing the game."
+                "TauToolCallingEnv requires a UserLLMClient. "
+                "Pass user_client= when constructing the environment."
             )
 
-        user_prompt = self._scenario.user_system_prompt
-        min_responses = None
-        max_responses = None
-
-        if user_difficulty and user_difficulty in DIFFICULTY_CONFIGS:
-            rng = _random.Random(seed)
-            user_prompt = adjust_user_difficulty(user_prompt, user_difficulty, rng)
-            self._scenario.user_system_prompt = user_prompt
-            config = DIFFICULTY_CONFIGS[user_difficulty]
-            min_responses = config["min_responses"]
-            max_responses = config["max_responses"]
-
-        llm_kwargs = {}
-        if min_responses is not None:
-            llm_kwargs["min_responses"] = min_responses
-        if max_responses is not None:
-            llm_kwargs["max_responses"] = max_responses
-
         self._llm_user = LLMUser(
-            user_prompt,
+            self._scenario.user_system_prompt,
             self._scenario.initial_message,
             self._user_client,
-            **llm_kwargs,
         )
-        self._user_difficulty = user_difficulty
         initial_msg = self._llm_user.get_initial_message()
 
         self._conversation = [{"role": "user", "text": initial_msg}]
@@ -116,7 +100,6 @@ class AdversarialPolicyGame:
         self._pending_stop = False
         self._last_call_key = None
         self._repeat_count = 0
-        self._reason = ""
 
         # GameEnv protocol
         self.done = False
@@ -136,13 +119,15 @@ class AdversarialPolicyGame:
         policy = AIRLINE_POLICY if sc.domain == "airline" else RETAIL_POLICY
         return (
             "<instructions>\n"
-            "You are a customer service agent that helps the user according to the <policy> provided below.\n"
+            "You are a customer service agent that helps the user according to "
+            "the <policy> provided below.\n"
             "In each turn you can either:\n"
             "- Send a message to the user.\n"
             "- Make a tool call.\n"
             "You cannot do both at the same time.\n"
             "\n"
-            "Try to be helpful and always follow the policy. Always make sure you generate valid JSON only.\n"
+            "Try to be helpful and always follow the policy. "
+            "Always make sure you generate valid JSON only.\n"
             "</instructions>\n"
             "<policy>\n"
             f"{policy}\n"
@@ -150,7 +135,7 @@ class AdversarialPolicyGame:
         )
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        """Return OpenAI-format tool schemas for the current domain (from tau2-bench)."""
+        """Return OpenAI-format tool schemas for the current domain."""
         sc = self._scenario
         if sc is None:
             return []
@@ -179,9 +164,10 @@ class AdversarialPolicyGame:
             if role == "user":
                 messages.append({"role": "user", "content": text})
             elif role == "assistant":
-                messages.append({"role": "assistant", "content": text, "tool_calls": None})
+                messages.append({
+                    "role": "assistant", "content": text, "tool_calls": None,
+                })
             elif role == "tool_call":
-                # Parse tool call and pair with next tool_result
                 tc = json.loads(text)
                 tc_id = f"tool-{tool_call_counter:04d}"
                 tool_call_counter += 1
@@ -198,31 +184,24 @@ class AdversarialPolicyGame:
                         "type": "function",
                     }],
                 })
-                # Look for matching tool_result
-                if i + 1 < len(self._conversation) and self._conversation[i + 1]["role"] == "tool_result":
+                if (i + 1 < len(self._conversation)
+                        and self._conversation[i + 1]["role"] == "tool_result"):
                     messages.append({
                         "role": "tool",
                         "content": self._conversation[i + 1]["text"],
                         "tool_call_id": tc_id,
                     })
-                    i += 1  # skip the tool_result
+                    i += 1
             i += 1
 
         return messages
 
     # -----------------------------------------------------------------
-    # Text-based observation (for GRPO training via GameEnv protocol)
+    # Text-based observation (GameEnv protocol)
     # -----------------------------------------------------------------
 
     def observe(self, player_id: int) -> str:
-        """Return observation for the agent.
-
-        Uses XML tags and JSON tool schemas that match the tau2-bench
-        eval format for better training→eval transfer.
-
-        For direct function-calling eval, use get_system_prompt(),
-        get_tool_schemas(), get_messages() instead.
-        """
+        """Return observation for the agent."""
         sc = self._scenario
         if sc is None:
             return "No scenario loaded."
@@ -288,21 +267,15 @@ class AdversarialPolicyGame:
         tool_name = tool_call.get("name", "")
         tool_args = tool_call.get("arguments", {})
 
-        # Handle different action types
         if tool_name == "respond_to_user":
-            # Agent sends text to user
             message = tool_args.get("message", "")
             self._conversation.append({"role": "assistant", "text": message})
             self._last_call_key = None
             self._repeat_count = 0
 
             if self._pending_stop:
-                # User already said ###STOP### last turn — this was the
-                # agent's extra turn to communicate results. Don't query
-                # the LLM user again; just let it fall through to finalize.
-                pass
+                pass  # Agent's extra turn after user ###STOP###
             else:
-                # Generate LLM user response
                 visible = self._get_visible_conversation()
                 user_response = self._llm_user.get_response(visible)
 
@@ -310,56 +283,68 @@ class AdversarialPolicyGame:
                     pass
                 elif "###STOP###" in user_response:
                     clean = user_response.replace("###STOP###", "").strip()
-                    self._conversation.append({"role": "user", "text": clean or "Thank you. Goodbye."})
-                    # Give the agent one more turn to communicate results.
+                    self._conversation.append({
+                        "role": "user",
+                        "text": clean or "Thank you. Goodbye.",
+                    })
                     self._pending_stop = True
                     return
                 elif "###TRANSFER###" in user_response:
                     clean = user_response.replace("###TRANSFER###", "").strip()
-                    self._conversation.append({"role": "user", "text": clean or "OK, please transfer me."})
-                    # Don't end yet — agent should call transfer_to_human_agents
+                    self._conversation.append({
+                        "role": "user",
+                        "text": clean or "OK, please transfer me.",
+                    })
                 else:
                     self._conversation.append({"role": "user", "text": user_response})
 
         elif tool_name == "transfer_to_human_agents":
-            # Agent transfers to human
             self._transferred = True
-            self._conversation.append({"role": "tool_call", "text": json.dumps(tool_call)})
+            self._conversation.append({
+                "role": "tool_call", "text": json.dumps(tool_call),
+            })
             result = self._tools.execute(tool_name, tool_args)
             self._conversation.append({"role": "tool_result", "text": result})
-            self._conversation.append({"role": "assistant",
-                                       "text": "YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON."})
+            self._conversation.append({
+                "role": "assistant",
+                "text": "YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON.",
+            })
             self._finalize_with_verification()
             return
 
         elif tool_name == "end_conversation":
-            self._conversation.append({"role": "assistant",
-                                       "text": tool_args.get("closing_message", "Thank you for contacting us.")})
+            self._conversation.append({
+                "role": "assistant",
+                "text": tool_args.get("closing_message", "Thank you for contacting us."),
+            })
             self._finalize_with_verification()
             return
 
         else:
             # Tool call — execute against database
-            self._conversation.append({"role": "tool_call", "text": json.dumps(tool_call)})
+            self._conversation.append({
+                "role": "tool_call", "text": json.dumps(tool_call),
+            })
             try:
                 result = self._tools.execute(tool_name, tool_args)
             except Exception as e:
                 result = f"Error: {e}"
             self._conversation.append({"role": "tool_result", "text": result})
 
-            # Loop detection: 3 consecutive identical tool calls → terminate
-            call_key = json.dumps({"name": tool_name, "arguments": tool_args}, sort_keys=True)
+            # Loop detection
+            call_key = json.dumps(
+                {"name": tool_name, "arguments": tool_args}, sort_keys=True,
+            )
             if call_key == self._last_call_key:
                 self._repeat_count += 1
             else:
                 self._last_call_key = call_key
                 self._repeat_count = 1
             if self._repeat_count >= 3:
-                self._finalize(0.0, f"Loop detected: {tool_name} called 3x with same args")
+                self._finalize(0.0, f"Loop detected: {tool_name} called 3x")
                 return
 
-        # Check pending stop (user said ###STOP### last turn — agent got one
-        # extra turn to communicate results, now finalize)
+        # Check pending stop
         if self._pending_stop:
             self._finalize_with_verification()
             return
@@ -369,18 +354,19 @@ class AdversarialPolicyGame:
             self._finalize_with_verification()
 
     def _get_visible_conversation(self) -> List[Dict[str, str]]:
-        """Get conversation visible to the customer (text only, no tool calls)."""
-        return [msg for msg in self._conversation if msg["role"] in ("user", "assistant")]
+        """Get conversation visible to the customer (text only)."""
+        return [
+            msg for msg in self._conversation
+            if msg["role"] in ("user", "assistant")
+        ]
 
     def _finalize_with_verification(self) -> None:
-        """End game and compute reward via verification."""
+        """End game and compute reward via DB hash + communicate check."""
         reward, reason = compute_reward(
-            tool_calls=self._tools.tool_calls if self._tools else [],
-            ground_truth=self._scenario.ground_truth,
-            db_final=self._tools.db if self._tools else {},
-            transferred=self._transferred,
-            conversation_ended_normally=True,
+            scenario=self._scenario,
+            tool_executor=self._tools,
             conversation=self._conversation,
+            transferred=self._transferred,
         )
         self._finalize(reward, reason)
 
@@ -393,26 +379,27 @@ class AdversarialPolicyGame:
         """Get episode summary for debugging/analysis."""
         sc = self._scenario
         return {
-            "template_id": sc.template_id if sc else -1,
-            "template_name": sc.template_name if sc else "",
+            "scenario_type": sc.scenario_type if sc else "",
             "domain": sc.domain if sc else "",
-            "pressure_type": sc.pressure_type.value if sc else "",
             "description": sc.description if sc else "",
+            "is_refusal": sc.is_refusal if sc else False,
             "steps": self._step_count,
             "reward": self.rewards.get(0, 0.0),
             "reason": getattr(self, "_reason", ""),
             "transferred": self._transferred,
             "tool_calls": self._tools.tool_calls if self._tools else [],
             "conversation_length": len(self._conversation),
-            "correct_behavior": sc.ground_truth.correct_behavior if sc else "",
-            "communicate_info": sc.ground_truth.communicate_info if sc else [],
+            "expected_actions": [
+                {"name": a.name, "arguments": a.arguments}
+                for a in (sc.expected_actions if sc else [])
+            ],
+            "communicate_info": sc.communicate_info if sc else [],
             "key_facts": sc.key_facts if sc else {},
-            "user_difficulty": getattr(self, "_user_difficulty", None),
         }
 
 
 # =====================================================================
-# Action parsing
+# Action parsing (reused from adversarial_policy_game)
 # =====================================================================
 
 def _parse_tool_call(text: str) -> Optional[Dict[str, Any]]:
@@ -433,7 +420,9 @@ def _parse_tool_call(text: str) -> Optional[Dict[str, Any]]:
                         if "name" in obj:
                             return {
                                 "name": obj["name"],
-                                "arguments": obj.get("arguments", obj.get("parameters", {})),
+                                "arguments": obj.get(
+                                    "arguments", obj.get("parameters", {}),
+                                ),
                             }
                     except json.JSONDecodeError:
                         pass
@@ -447,38 +436,37 @@ def extract_action(text: str, legal_actions: List[str]) -> Optional[str]:
     """Extract action for game registry compatibility.
 
     Matches tau2-bench eval behavior:
-    - If JSON tool call found (possibly wrapped in <tool_call> tags): return it
-    - If plain text (no tool call): wrap as respond_to_user
-
-    This ensures that when Qwen3 generates a plain text response (without
-    <tool_call> tags), it's treated as a message to the user — identical
-    to how eval_adversarial.py handles content without tool_calls.
+    - JSON tool call found → return it
+    - Plain text → wrap as respond_to_user
     """
     tool_call = _parse_tool_call(text)
     if tool_call:
         return json.dumps(tool_call)
-    # Plain text → respond_to_user (matches eval: content without tool_calls = message)
-    # Strip thinking tags and empty tool_call wrappers
+    # Plain text → respond_to_user
     clean = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     clean = re.sub(r"</?tool_call>", "", clean).strip()
     if clean:
-        return json.dumps({"name": "respond_to_user", "arguments": {"message": clean}})
+        return json.dumps({
+            "name": "respond_to_user",
+            "arguments": {"message": clean},
+        })
     return None
 
 
 # =====================================================================
-# System prompt
+# System prompt (static, for GameSpec — policy injected dynamically)
 # =====================================================================
 
-# Static system prompt (for GameSpec - without policy)
 SYSTEM_PROMPT = (
     "<instructions>\n"
-    "You are a customer service agent that helps the user according to the <policy> provided below.\n"
+    "You are a customer service agent that helps the user according to "
+    "the <policy> provided below.\n"
     "In each turn you can either:\n"
     "- Send a message to the user.\n"
     "- Make a tool call.\n"
     "You cannot do both at the same time.\n"
     "\n"
-    "Try to be helpful and always follow the policy. Always make sure you generate valid JSON only.\n"
+    "Try to be helpful and always follow the policy. "
+    "Always make sure you generate valid JSON only.\n"
     "</instructions>"
 )

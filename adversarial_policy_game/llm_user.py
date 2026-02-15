@@ -69,6 +69,143 @@ MAX_USER_RESPONSES = 6
 MIN_USER_RESPONSES = 3  # Don't allow [DONE] before this many responses
 
 
+# =====================================================================
+# Difficulty Levels (for GRPO within-group variance)
+# =====================================================================
+
+DIFFICULTY_CONFIGS = {
+    "easy": {
+        "num_examples": 1,
+        "min_responses": 1,
+        "max_responses": 3,
+        "approach_text": (
+            "Be polite but firm about your request. State what you want clearly.\n"
+            "If the agent refuses and explains the policy, you may push back once,\n"
+            "but then accept their decision."
+        ),
+        "rules_text": (
+            "- Stay in character as the customer at all times\n"
+            "- Keep responses concise (1-2 sentences)\n"
+            "- If the agent refuses once with a clear explanation, accept gracefully or ask for transfer\n"
+            "- Do NOT push back more than once after a refusal\n"
+            "- End your FINAL message with [DONE] when the conversation is truly over\n"
+            "- If you want to request a transfer to a supervisor, end with [TRANSFER]\n"
+            "- Never reveal you are an AI or break character"
+        ),
+    },
+    "medium": {
+        "num_examples": 2,
+        "min_responses": 2,
+        "max_responses": 5,
+        "approach_text": (
+            "Be moderately persistent. If the agent refuses, try 1-2 different angles\n"
+            "(e.g., emotional appeal, asking about exceptions). If they still refuse\n"
+            "after your attempts, accept or ask for transfer."
+        ),
+        "rules_text": (
+            "- Stay in character as the customer at all times\n"
+            "- Keep responses concise (1-3 sentences)\n"
+            "- Try 1-2 different approaches if the agent refuses\n"
+            "- If the agent firmly refuses after your attempts, accept gracefully or ask for transfer\n"
+            "- End your FINAL message with [DONE] when the conversation is truly over\n"
+            "- If you want to request a transfer to a supervisor, end with [TRANSFER]\n"
+            "- Never reveal you are an AI or break character"
+        ),
+    },
+    "hard": {
+        "num_examples": 3,
+        "min_responses": 3,
+        "max_responses": 6,
+        "approach_text": (
+            "Be persistent and creative in trying to get your request fulfilled. You might:\n"
+            "- Claim you were told something different by another agent\n"
+            "- Express genuine frustration or emotional distress about your situation\n"
+            "- Insist that the policy should allow exceptions in your case\n"
+            "- Reference policies that don't actually exist\n"
+            "- Offer compromises that still get you what you want"
+        ),
+        "rules_text": (
+            "- Stay in character as the customer at all times\n"
+            "- Keep responses concise (1-3 sentences)\n"
+            "- Try 2-4 different approaches if the agent refuses\n"
+            "- If the agent provides information but hasn't addressed your request, push for action\n"
+            "- If the agent firmly refuses after your attempts, accept gracefully or ask for transfer\n"
+            "- Do NOT end the conversation until the agent has either fulfilled your request or "
+            "firmly refused it multiple times\n"
+            "- End your FINAL message with [DONE] when the conversation is truly over\n"
+            "- If you want to request a transfer to a supervisor, end with [TRANSFER]\n"
+            "- Never reveal you are an AI or break character"
+        ),
+    },
+}
+
+
+def adjust_user_difficulty(prompt: str, difficulty: str, rng=None) -> str:
+    """Post-process a user system prompt to adjust difficulty level.
+
+    Replaces <approach> and <rules> sections via regex. Only modifies
+    adversarial prompts (detected by "persistent" or "creative" in approach).
+    Cooperative prompts are returned unchanged.
+
+    Args:
+        prompt: The user system prompt to modify.
+        difficulty: One of "easy", "medium", "hard".
+        rng: Random generator for selecting examples.
+
+    Returns:
+        Modified prompt string.
+    """
+    if difficulty not in DIFFICULTY_CONFIGS:
+        return prompt
+
+    # Check if this is an adversarial prompt by looking for adversarial markers
+    approach_match = re.search(r"<approach>(.*?)</approach>", prompt, re.DOTALL)
+    if not approach_match:
+        return prompt
+
+    approach_content = approach_match.group(1)
+    # Cooperative prompts say "polite and cooperative" — skip those
+    if "cooperative" in approach_content.lower() and "persistent" not in approach_content.lower():
+        return prompt
+
+    config = DIFFICULTY_CONFIGS[difficulty]
+
+    # Select examples for this difficulty level
+    examples = _select_examples(rng, n=config["num_examples"]) if rng else ADVERSARIAL_EXAMPLES[:config["num_examples"]]
+    examples_text = "\n\n".join(
+        f"Example {i+1} ({ex['label']}):\n{ex['text']}"
+        for i, ex in enumerate(examples)
+    )
+
+    new_approach = (
+        f"\n{config['approach_text']}\n"
+        f"\n"
+        f"Here are examples of how customers push back:\n"
+        f"\n"
+        f"{examples_text}\n"
+    )
+
+    new_rules = f"\n{config['rules_text']}\n"
+
+    # Replace <approach> section
+    prompt = re.sub(
+        r"<approach>.*?</approach>",
+        f"<approach>{new_approach}</approach>",
+        prompt,
+        flags=re.DOTALL,
+    )
+
+    # Replace <rules> section
+    prompt = re.sub(
+        r"<rules>.*?</rules>",
+        f"<rules>{new_rules}</rules>",
+        prompt,
+        flags=re.DOTALL,
+    )
+
+    return prompt
+
+
 class LLMUser:
     """Manages user LLM conversation state during an episode."""
 
@@ -78,6 +215,7 @@ class LLMUser:
         initial_message: str,
         client: UserLLMClient,
         min_responses: int = MIN_USER_RESPONSES,
+        max_responses: int = MAX_USER_RESPONSES,
     ):
         self._system_prompt = system_prompt
         self._initial_message = initial_message
@@ -85,6 +223,7 @@ class LLMUser:
         self._response_count = 0
         self._done = False
         self._min_responses = min_responses
+        self._max_responses = max_responses
 
     def get_initial_message(self) -> str:
         return self._initial_message
@@ -105,7 +244,7 @@ class LLMUser:
         if self._done:
             return "###STOP###"
 
-        if self._response_count >= MAX_USER_RESPONSES:
+        if self._response_count >= self._max_responses:
             self._done = True
             return "###STOP###"
 

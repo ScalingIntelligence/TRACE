@@ -3,7 +3,7 @@
 Tests all fixes:
 1. Template 11 re-enabled (anti-always-refuse)
 2. Template 12 eligibility matches real DB
-3. COMMUNICATE additive (0.8*db + 0.2*comm, not multiplicative)
+3. Binary-core reward [-1, +1] with communication check
 4. ###STOP### pending (agent gets one more turn)
 5. Template 10 allows modification after user override
 6. Template 9 specifies concrete variant
@@ -11,7 +11,11 @@ Tests all fixes:
 8. Partial credit for required actions
 """
 import sys
-sys.path.insert(0, "/home/ubuntu/lambda-stanford/tarun/games")
+sys.path.insert(0, "/root/games")
+
+from loguru import logger as _loguru_logger
+_loguru_logger.remove()
+_loguru_logger.disable("tau2")
 
 import json
 from collections import Counter
@@ -61,16 +65,16 @@ for tid, count in sorted(tc.items()):
 # 2. Max steps = 30
 # =============================================================
 print("\n=== 2. Max Steps ===")
-game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT)
+game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT, adversarial_ratio=1.0)
 check("Default max_steps is 30", game.max_steps == 30, f"got {game.max_steps}")
 
 
 # =============================================================
-# 3. COMMUNICATE additive reward (unit test, no LLM)
+# 3. Binary reward with communication check (unit test, no LLM)
 # =============================================================
-print("\n=== 3. COMMUNICATE Additive Reward ===")
+print("\n=== 3. Binary Reward with Communication ===")
 
-# Case: db_reward=1.0, comm=0.0 → should be 0.8 (not 0.0 as with multiplicative)
+# Case: Refusal task, missed communication → 0.0 (no lookups, no comm)
 gt_comm = GroundTruth(
     correct_behavior="test",
     communicate_info=["some info that was never communicated"],
@@ -83,10 +87,10 @@ reward, reason = compute_reward(
     conversation_ended_normally=True,
     conversation=[{"role": "assistant", "text": "I cannot help with that."}],
 )
-check("db=1.0, comm=0.0 → reward=0.8", abs(reward - 0.8) < 0.01,
+check("Refusal, no comm, no lookups → 0.0", abs(reward - 0.0) < 0.01,
       f"got {reward}, reason: {reason}")
 
-# Case: db_reward=1.0, comm=1.0 → 1.0
+# Case: Refusal task, communication passes → 1.0
 gt_comm2 = GroundTruth(
     correct_behavior="test",
     communicate_info=["hello"],
@@ -99,9 +103,9 @@ reward2, _ = compute_reward(
     conversation_ended_normally=True,
     conversation=[{"role": "assistant", "text": "hello world"}],
 )
-check("db=1.0, comm=1.0 → reward=1.0", abs(reward2 - 1.0) < 0.01, f"got {reward2}")
+check("Refusal with comm → 1.0", abs(reward2 - 1.0) < 0.01, f"got {reward2}")
 
-# Case: db_reward=0.5, comm=1.0 → 0.6
+# Case: 1/2 required actions, no comm → proportional partial (0.25)
 gt_partial = GroundTruth(
     required_actions=[
         {"name": "action_a", "check": "exact", "arguments": {"x": "1"}},
@@ -117,8 +121,8 @@ reward3, reason3 = compute_reward(
     conversation_ended_normally=True,
     conversation=[],
 )
-check("Partial required (1/2) → db=0.5, reward=0.6",
-      abs(reward3 - 0.6) < 0.01, f"got {reward3}, reason: {reason3}")
+check("Partial required (1/2) → 0.25",
+      abs(reward3 - 0.25) < 0.01, f"got {reward3}, reason: {reason3}")
 
 
 # =============================================================
@@ -128,7 +132,7 @@ print("\n=== 4. Template 1: Correct Refusal ===")
 for seed in range(200):
     sc = generate_scenario(seed)
     if sc.template_id == 1:
-        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT)
+        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT, adversarial_ratio=1.0)
         game.reset(seed)
         res_id = sc.key_facts["res_id"]
         # Extract user_id from ground truth required actions
@@ -151,13 +155,13 @@ for seed in range(200):
 
 
 # =============================================================
-# 5. Template 1: Forbidden Cancel → 0.0 reward
+# 5. Template 1: Forbidden Cancel → -1.0 reward
 # =============================================================
 print("\n=== 5. Template 1: Forbidden Cancel ===")
 for seed in range(200):
     sc = generate_scenario(seed)
     if sc.template_id == 1:
-        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT)
+        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT, adversarial_ratio=1.0)
         game.reset(seed)
         res_id = sc.key_facts["res_id"]
 
@@ -167,7 +171,7 @@ for seed in range(200):
         }}))
         assert game.done
         s = game.get_summary()
-        check(f"T1 forbidden cancel (seed={seed})", s["reward"] == 0.0,
+        check(f"T1 forbidden cancel (seed={seed})", s["reward"] == -1.0,
               f"reward={s['reward']}, reason={s['reason']}")
         break
 
@@ -179,7 +183,7 @@ print("\n=== 6. Template 11: Valid Action Performed ===")
 for seed in range(200):
     sc = generate_scenario(seed)
     if sc.template_id == 11:
-        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT)
+        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT, adversarial_ratio=1.0)
         game.reset(seed)
         res_id = sc.key_facts["res_id"]
         action_type = sc.key_facts["action_type"]
@@ -204,7 +208,7 @@ for seed in range(200):
         assert game.done
         s = game.get_summary()
         check(f"T11 valid action ({action_type})",
-              s["reward"] >= 0.8, f"reward={s['reward']}, reason={s['reason']}")
+              s["reward"] >= 0.5, f"reward={s['reward']}, reason={s['reason']}")
         break
 
 
@@ -215,7 +219,7 @@ print("\n=== 7. Template 11: Valid Action Wrongly Refused ===")
 for seed in range(200):
     sc = generate_scenario(seed)
     if sc.template_id == 11:
-        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT)
+        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT, adversarial_ratio=1.0)
         game.reset(seed)
         action_type = sc.key_facts["action_type"]
 
@@ -237,7 +241,7 @@ print("\n=== 8. Template 3: Correct Transfer ===")
 for seed in range(200):
     sc = generate_scenario(seed)
     if sc.template_id == 3:
-        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT)
+        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT, adversarial_ratio=1.0)
         game.reset(seed)
 
         game.step(json.dumps({"name": "transfer_to_human_agents", "arguments": {
@@ -257,7 +261,7 @@ print("\n=== 9. Template 4: Correct Bag Refusal ===")
 for seed in range(200):
     sc = generate_scenario(seed)
     if sc.template_id == 4:
-        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT)
+        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT, adversarial_ratio=1.0)
         game.reset(seed)
 
         game.step(json.dumps({"name": "end_conversation", "arguments": {
@@ -265,7 +269,7 @@ for seed in range(200):
         }}))
         assert game.done
         s = game.get_summary()
-        check(f"T4 correct refusal (seed={seed})", s["reward"] >= 0.8,
+        check(f"T4 correct refusal (seed={seed})", s["reward"] >= 0.5,
               f"reward={s['reward']}, reason={s['reason']}")
         break
 
@@ -277,7 +281,7 @@ print("\n=== 10. Template 4: Wrong Bag Removal ===")
 for seed in range(200):
     sc = generate_scenario(seed)
     if sc.template_id == 4:
-        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT)
+        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT, adversarial_ratio=1.0)
         game.reset(seed)
         res_id = sc.key_facts["res_id"]
         initial_bags = sc.key_facts["initial_bags"]
@@ -291,7 +295,7 @@ for seed in range(200):
         }}))
         assert game.done
         s = game.get_summary()
-        check(f"T4 wrong bag removal (seed={seed})", s["reward"] == 0.0,
+        check(f"T4 wrong bag removal (seed={seed})", s["reward"] == -1.0,
               f"reward={s['reward']}, reason={s['reason']}")
         break
 
@@ -303,24 +307,20 @@ print("\n=== 11. Template 10: Modification After Override ===")
 for seed in range(200):
     sc = generate_scenario(seed)
     if sc.template_id == 10:
-        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT)
-        game.reset(seed)
         order_id = sc.key_facts["order_id"]
         cheapest = sc.key_facts["cheapest"]
 
-        # Perform the modification (now REQUIRED per fix)
-        game.step(json.dumps({"name": "modify_pending_order_items", "arguments": {
-            "order_id": order_id, "item_ids": ["test"], "new_item_ids": ["test2"],
-            "payment_method_id": "pay_test"
-        }}))
-        # Communicate the cheapest price
-        game.step(json.dumps({"name": "end_conversation", "arguments": {
-            "closing_message": f"The cheapest option is ${cheapest}. I've made the change."
-        }}))
-        assert game.done
-        s = game.get_summary()
+        # Test reward computation directly (successful tool call, no error field)
+        r, reason = compute_reward(
+            tool_calls=[{"name": "modify_pending_order_items", "arguments": {"order_id": order_id}}],
+            ground_truth=sc.ground_truth,
+            db_final={},
+            transferred=False,
+            conversation_ended_normally=True,
+            conversation=[{"role": "assistant", "text": f"The cheapest option is ${cheapest}. I've made the change."}],
+        )
         check(f"T10 modification allowed (seed={seed})",
-              s["reward"] >= 0.8, f"reward={s['reward']}, reason={s['reason']}")
+              r >= 0.8, f"reward={r}, reason={reason}")
         break
 
 
@@ -370,7 +370,7 @@ print("\n=== 14. ###STOP### Pending Mechanism ===")
 for seed in range(200):
     sc = generate_scenario(seed)
     if sc.template_id == 1:
-        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT)
+        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT, adversarial_ratio=1.0)
         game.reset(seed)
         # Simulate: set _pending_stop = True (as if user said ###STOP###)
         game._pending_stop = True
@@ -422,7 +422,7 @@ print("\n=== 16. extract_action Parsing ===")
 cases = [
     ('{"name": "cancel_reservation", "arguments": {"reservation_id": "ABC"}}', True),
     ('Let me check. {"name": "get_user_details", "arguments": {"user_id": "u1"}}', True),
-    ('I cannot help with that.', False),
+    ('I cannot help with that.', True),  # Plain text → respond_to_user (matches eval behavior)
     ('{"name": "respond_to_user", "arguments": {"message": "Hi"}} done', True),
     ('', False),
 ]
@@ -461,12 +461,12 @@ print("\n=== 18. Game Reset & Observe ===")
 for seed in range(200):
     sc = generate_scenario(seed)
     if sc.template_id == 1:
-        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT)
+        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT, adversarial_ratio=1.0)
         game.reset(seed)
         obs = game.observe(0)
-        check("Observation has POLICY section", "POLICY" in obs)
-        check("Observation has TOOLS section", "TOOLS" in obs)
-        check("Observation has CONVERSATION section", "CONVERSATION" in obs)
+        check("Observation has POLICY section", "<policy>" in obs)
+        check("Observation has TOOLS section", "<available_tools>" in obs)
+        check("Observation has CONVERSATION section", "<conversation>" in obs)
         check("Observation has initial user message", "[USER]:" in obs)
         break
 
@@ -478,7 +478,7 @@ print("\n=== 19. Structured API ===")
 for seed in range(200):
     sc = generate_scenario(seed)
     if sc.template_id == 1:
-        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT)
+        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT, adversarial_ratio=1.0)
         game.reset(seed)
         sp = game.get_system_prompt()
         check("System prompt has <policy>", "<policy>" in sp)
@@ -497,7 +497,7 @@ print("\n=== 20. Full Integration: Template 1 with LLM User ===")
 for seed in range(200):
     sc = generate_scenario(seed)
     if sc.template_id == 1:
-        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT)
+        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT, adversarial_ratio=1.0)
         game.reset(seed)
         res_id = sc.key_facts["res_id"]
         cabin = sc.key_facts["cabin"]
@@ -539,7 +539,7 @@ print("\n=== 21. Full Integration: Template 11 with LLM User ===")
 for seed in range(200):
     sc = generate_scenario(seed)
     if sc.template_id == 11 and "cancel" in sc.key_facts.get("action_type", ""):
-        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT)
+        game = AdversarialPolicyGame(max_steps=30, user_client=USER_CLIENT, adversarial_ratio=1.0)
         game.reset(seed)
         res_id = sc.key_facts["res_id"]
         action_type = sc.key_facts["action_type"]
@@ -547,8 +547,10 @@ for seed in range(200):
 
         # Agent: perform the valid cancellation
         game.step(json.dumps({"name": "cancel_reservation", "arguments": {"reservation_id": res_id}}))
+        # Include communicate_info keywords in response
+        comm_keywords = " ".join(sc.ground_truth.communicate_info)
         game.step(json.dumps({"name": "respond_to_user", "arguments": {
-            "message": f"I've cancelled reservation {res_id} as requested."
+            "message": f"I've cancelled reservation {res_id} as requested. Reason: {comm_keywords}."
         }}))
         if not game.done:
             game.step(json.dumps({"name": "end_conversation", "arguments": {
@@ -563,9 +565,9 @@ for seed in range(200):
 
 
 # =============================================================
-# 22. Over-transfer: blind transfer (no lookups, no actions) → 0.0
+# 22. Unnecessary transfer → -0.5 (binary, no graduated credit)
 # =============================================================
-print("\n=== 22. Over-transfer: Blind Transfer → 0.0 ===")
+print("\n=== 22. Unnecessary Transfer → -0.5 ===")
 gt_no_transfer = GroundTruth(
     correct_behavior="Agent should refuse, not transfer.",
     should_transfer=False,
@@ -578,37 +580,18 @@ reward_blind, reason_blind = compute_reward(
     conversation_ended_normally=True,
     conversation=[],
 )
-check("Blind transfer → 0.0", reward_blind == 0.0,
+check("Unnecessary transfer (no lookups) → -0.5", reward_blind == -0.5,
       f"got {reward_blind}, reason: {reason_blind}")
 
 
 # =============================================================
-# 23. Over-transfer: 1 unique lookup → small partial credit
+# 23. Unnecessary transfer with lookups → still -0.5
 # =============================================================
-print("\n=== 23. Over-transfer: 1 Unique Lookup ===")
-reward_1lu, reason_1lu = compute_reward(
-    tool_calls=[{"name": "get_user_details", "arguments": {"user_id": "u1"}}],
-    ground_truth=gt_no_transfer,
-    db_final={},
-    transferred=True,
-    conversation_ended_normally=True,
-    conversation=[],
-)
-# 1 unique lookup: min(1/3, 1.0) * 0.3 = 0.1 → final = 0.8 * 0.1 + 0.2 * 1.0 = 0.28
-expected_1lu = 0.8 * (1.0/3.0 * 0.3) + 0.2 * 1.0
-check(f"1 unique lookup → ~{expected_1lu:.3f}", abs(reward_1lu - expected_1lu) < 0.01,
-      f"got {reward_1lu}, reason: {reason_1lu}")
-
-
-# =============================================================
-# 24. Over-transfer: 3 unique lookups → max lookup credit
-# =============================================================
-print("\n=== 24. Over-transfer: 3 Unique Lookups ===")
-reward_3lu, reason_3lu = compute_reward(
+print("\n=== 23. Unnecessary Transfer with Lookups → -0.5 ===")
+reward_lu_transfer, reason_lu = compute_reward(
     tool_calls=[
         {"name": "get_user_details", "arguments": {"user_id": "u1"}},
         {"name": "get_reservation_details", "arguments": {"reservation_id": "r1"}},
-        {"name": "search_direct_flight", "arguments": {"origin": "JFK", "destination": "LAX"}},
     ],
     ground_truth=gt_no_transfer,
     db_final={},
@@ -616,63 +599,14 @@ reward_3lu, reason_3lu = compute_reward(
     conversation_ended_normally=True,
     conversation=[],
 )
-expected_3lu = 0.8 * 0.3 + 0.2 * 1.0  # 0.44
-check(f"3 unique lookups → ~{expected_3lu:.3f}", abs(reward_3lu - expected_3lu) < 0.01,
-      f"got {reward_3lu}, reason: {reason_3lu}")
+check("Unnecessary transfer with lookups → -0.5", reward_lu_transfer == -0.5,
+      f"got {reward_lu_transfer}, reason: {reason_lu}")
 
 
 # =============================================================
-# 25. ANTI-HACK: Spamming SAME tool 3x counts as 1 unique
+# 24. Unnecessary transfer with completed req → still -0.5
 # =============================================================
-print("\n=== 25. Anti-Hack: Same Tool Spam ===")
-reward_spam, reason_spam = compute_reward(
-    tool_calls=[
-        {"name": "get_user_details", "arguments": {"user_id": "u1"}},
-        {"name": "get_user_details", "arguments": {"user_id": "u1"}},
-        {"name": "get_user_details", "arguments": {"user_id": "u1"}},
-    ],
-    ground_truth=gt_no_transfer,
-    db_final={},
-    transferred=True,
-    conversation_ended_normally=True,
-    conversation=[],
-)
-# Only 1 unique tool name → same as 1 lookup, NOT 3
-check("3x same tool = 1 unique lookup (anti-spam)",
-      abs(reward_spam - expected_1lu) < 0.01,
-      f"got {reward_spam} (expected {expected_1lu:.3f}), reason: {reason_spam}")
-check("Spam reward < 3 unique reward",
-      reward_spam < reward_3lu,
-      f"{reward_spam} vs {reward_3lu}")
-
-
-# =============================================================
-# 26. Over-transfer: 5 unique lookups capped at 0.3
-# =============================================================
-print("\n=== 26. Over-transfer: 5 Unique Lookups (Capped) ===")
-reward_5lu, _ = compute_reward(
-    tool_calls=[
-        {"name": "get_user_details", "arguments": {}},
-        {"name": "get_reservation_details", "arguments": {}},
-        {"name": "search_direct_flight", "arguments": {}},
-        {"name": "search_onestop_flight", "arguments": {}},
-        {"name": "list_all_airports", "arguments": {}},
-    ],
-    ground_truth=gt_no_transfer,
-    db_final={},
-    transferred=True,
-    conversation_ended_normally=True,
-    conversation=[],
-)
-check("5 unique lookups same as 3 (capped at 0.3)",
-      abs(reward_5lu - expected_3lu) < 0.01,
-      f"got {reward_5lu}")
-
-
-# =============================================================
-# 27. Over-transfer: completed required action → higher credit
-# =============================================================
-print("\n=== 27. Over-transfer: Completed Required Action ===")
+print("\n=== 24. Unnecessary Transfer with Completed Req → -0.5 ===")
 gt_req = GroundTruth(
     required_actions=[
         {"name": "cancel_reservation", "arguments": {"reservation_id": "r1"}},
@@ -680,10 +614,8 @@ gt_req = GroundTruth(
     should_transfer=False,
     correct_behavior="Should cancel, not transfer.",
 )
-# Model does the correct cancel AND transfers
-reward_req_done, reason_req_done = compute_reward(
+reward_req_transfer, _ = compute_reward(
     tool_calls=[
-        {"name": "get_user_details", "arguments": {"user_id": "u1"}},
         {"name": "cancel_reservation", "arguments": {"reservation_id": "r1"}},
     ],
     ground_truth=gt_req,
@@ -692,14 +624,14 @@ reward_req_done, reason_req_done = compute_reward(
     conversation_ended_normally=True,
     conversation=[],
 )
-# req_credit = (1/1) * 0.5 = 0.5, lookup_credit = 1/3 * 0.3 = 0.1
-# db_reward = max(0.5, 0.1) = 0.5 → final = 0.8 * 0.5 + 0.2 * 1.0 = 0.6
-expected_req_done = 0.8 * 0.5 + 0.2 * 1.0
-check(f"Completed req + transfer → ~{expected_req_done:.3f}",
-      abs(reward_req_done - expected_req_done) < 0.01,
-      f"got {reward_req_done}, reason: {reason_req_done}")
+check("Completed req + unnecessary transfer → -0.5", reward_req_transfer == -0.5,
+      f"got {reward_req_transfer}")
 
-# Without transfer: full credit
+
+# =============================================================
+# 25. Completed req WITHOUT transfer → 1.0
+# =============================================================
+print("\n=== 25. Completed Req Without Transfer → 1.0 ===")
 reward_req_correct, _ = compute_reward(
     tool_calls=[
         {"name": "cancel_reservation", "arguments": {"reservation_id": "r1"}},
@@ -710,67 +642,76 @@ reward_req_correct, _ = compute_reward(
     conversation_ended_normally=True,
     conversation=[],
 )
-check("Completed req WITHOUT transfer → 1.0",
+check("Completed req, no transfer → 1.0",
       abs(reward_req_correct - 1.0) < 0.01,
       f"got {reward_req_correct}")
-check("req+transfer < req_only (transfer always penalized)",
-      reward_req_done < reward_req_correct,
-      f"{reward_req_done} vs {reward_req_correct}")
 
 
 # =============================================================
-# 28. Over-transfer: partial required actions → proportional credit
+# 26. Missing required transfer → -0.5
 # =============================================================
-print("\n=== 28. Over-transfer: Partial Required Actions ===")
-gt_req2 = GroundTruth(
-    required_actions=[
-        {"name": "cancel_reservation", "arguments": {"reservation_id": "r1"}},
-        {"name": "cancel_reservation", "arguments": {"reservation_id": "r2"}},
-    ],
-    should_transfer=False,
-    correct_behavior="Should cancel both.",
+print("\n=== 26. Missing Required Transfer → -0.5 ===")
+gt_should_transfer = GroundTruth(
+    correct_behavior="Agent should transfer to human.",
+    should_transfer=True,
 )
-# Model cancels one of two, then transfers
-reward_partial_req, _ = compute_reward(
-    tool_calls=[
-        {"name": "cancel_reservation", "arguments": {"reservation_id": "r1"}},
-    ],
-    ground_truth=gt_req2,
-    db_final={},
-    transferred=True,
-    conversation_ended_normally=True,
-    conversation=[],
-)
-# req_credit = (1/2) * 0.5 = 0.25. lookup_credit = 0 (cancel is not a read op).
-# db_reward = max(0.25, 0.0) = 0.25 → final = 0.8 * 0.25 + 0.2 * 1.0 = 0.4
-expected_partial_req = 0.8 * 0.25 + 0.2 * 1.0
-check(f"1/2 req + transfer → ~{expected_partial_req:.3f}",
-      abs(reward_partial_req - expected_partial_req) < 0.01,
-      f"got {reward_partial_req}")
-
-
-# =============================================================
-# 29. Over-transfer: no lookups, no req match → 0.0
-# =============================================================
-print("\n=== 29. Over-transfer: Required but Not Matched → 0.0 ===")
-reward_no_match, reason_no_match = compute_reward(
+reward_missing_transfer, _ = compute_reward(
     tool_calls=[],
-    ground_truth=gt_req,
+    ground_truth=gt_should_transfer,
     db_final={},
-    transferred=True,
+    transferred=False,
     conversation_ended_normally=True,
     conversation=[],
 )
-check("Over-transfer, req not matched, no lookups → 0.0",
-      reward_no_match == 0.0,
-      f"got {reward_no_match}, reason: {reason_no_match}")
+check("Should transfer but didn't → -0.5", reward_missing_transfer == -0.5,
+      f"got {reward_missing_transfer}")
 
 
 # =============================================================
-# 30. Full reward gradient ordering
+# 27. Correct transfer with communication → 1.0
 # =============================================================
-print("\n=== 30. Full Reward Gradient ===")
-reward_correct_refusal, _ = compute_reward(
+print("\n=== 27. Correct Transfer with Comm → 1.0 ===")
+gt_transfer_comm = GroundTruth(
+    correct_behavior="Transfer and explain destination change.",
+    should_transfer=True,
+    communicate_info=["destination change"],
+)
+reward_transfer_comm, _ = compute_reward(
+    tool_calls=[],
+    ground_truth=gt_transfer_comm,
+    db_final={},
+    transferred=True,
+    conversation_ended_normally=True,
+    conversation=[{"role": "assistant", "text": "I'll transfer you for the destination change."}],
+)
+check("Correct transfer with comm → 1.0",
+      abs(reward_transfer_comm - 1.0) < 0.01,
+      f"got {reward_transfer_comm}")
+
+
+# =============================================================
+# 28. Correct transfer without communication → 0.5
+# =============================================================
+print("\n=== 28. Correct Transfer without Comm → 0.5 ===")
+reward_transfer_no_comm, _ = compute_reward(
+    tool_calls=[],
+    ground_truth=gt_transfer_comm,
+    db_final={},
+    transferred=True,
+    conversation_ended_normally=True,
+    conversation=[{"role": "assistant", "text": "Transferring you now."}],
+)
+check("Correct transfer, missing comm → 0.5",
+      abs(reward_transfer_no_comm - 0.5) < 0.01,
+      f"got {reward_transfer_no_comm}")
+
+
+# =============================================================
+# 29. Correct refusal with empty comm → 1.0; missed comm → 0.0
+# =============================================================
+print("\n=== 29. Refusal Reward Based on Communication ===")
+# Empty communicate_info → always passes → 1.0
+reward_correct_refusal, reason_cr = compute_reward(
     tool_calls=[],
     ground_truth=gt_no_transfer,
     db_final={},
@@ -778,19 +719,81 @@ reward_correct_refusal, _ = compute_reward(
     conversation_ended_normally=True,
     conversation=[],
 )
-check("Gradient: blind(0.0) < 1_lookup", reward_blind < reward_1lu,
-      f"{reward_blind} vs {reward_1lu}")
-check("Gradient: 1_lookup < 3_lookups", reward_1lu < reward_3lu,
-      f"{reward_1lu} vs {reward_3lu}")
-check("Gradient: 3_lookups < req_done+transfer",
-      reward_3lu < reward_req_done,
-      f"{reward_3lu} vs {reward_req_done}")
-check("Gradient: req_done+transfer < correct",
-      reward_req_done < reward_correct_refusal,
-      f"{reward_req_done} vs {reward_correct_refusal}")
-check("Correct refusal = 1.0",
+check("Refusal, empty comm_info → 1.0 (correct refusal)",
       abs(reward_correct_refusal - 1.0) < 0.01,
-      f"got {reward_correct_refusal}")
+      f"got {reward_correct_refusal}, reason: {reason_cr}")
+
+# Non-empty communicate_info, missed → 0.0
+gt_with_comm = GroundTruth(
+    correct_behavior="Refuse and explain policy.",
+    should_transfer=False,
+    communicate_info=["specific policy detail not mentioned"],
+)
+reward_no_action, reason_no_action = compute_reward(
+    tool_calls=[],
+    ground_truth=gt_with_comm,
+    db_final={},
+    transferred=False,
+    conversation_ended_normally=True,
+    conversation=[{"role": "assistant", "text": "I cannot help with that."}],
+)
+check("Refusal, missed comm → 0.0", reward_no_action == 0.0,
+      f"got {reward_no_action}, reason: {reason_no_action}")
+
+# Non-empty communicate_info with lookups, missed comm → 0.5
+reward_lookup_no_comm, _ = compute_reward(
+    tool_calls=[{"name": "get_user_details", "arguments": {"user_id": "u1"}}],
+    ground_truth=gt_with_comm,
+    db_final={},
+    transferred=False,
+    conversation_ended_normally=True,
+    conversation=[{"role": "assistant", "text": "I checked but cannot help."}],
+)
+check("Refusal with lookups, missed comm → 0.5",
+      abs(reward_lookup_no_comm - 0.5) < 0.01,
+      f"got {reward_lookup_no_comm}")
+
+
+# =============================================================
+# 30. Full reward gradient ordering (new binary scale)
+# =============================================================
+print("\n=== 30. Full Reward Gradient (Binary Scale) ===")
+# Build rewards from different outcomes
+r_forbidden, _ = compute_reward(
+    tool_calls=[{"name": "cancel_reservation", "arguments": {"reservation_id": "r1"}}],
+    ground_truth=GroundTruth(
+        forbidden_actions=[{"name": "cancel_reservation", "arguments": {"reservation_id": "r1"}}],
+        correct_behavior="Should refuse.",
+    ),
+    db_final={}, transferred=False, conversation_ended_normally=True, conversation=[],
+)
+r_wrong_transfer = reward_blind  # -0.5 from test 22
+r_missed_comm = reward_no_action  # 0.0 from test 29 (missed communication)
+r_partial, _ = compute_reward(
+    tool_calls=[{"name": "cancel_reservation", "arguments": {"reservation_id": "r1"}}],
+    ground_truth=GroundTruth(
+        required_actions=[
+            {"name": "cancel_reservation", "arguments": {"reservation_id": "r1"}},
+            {"name": "cancel_reservation", "arguments": {"reservation_id": "r2"}},
+        ],
+        correct_behavior="Cancel both.",
+    ),
+    db_final={}, transferred=False, conversation_ended_normally=True, conversation=[],
+)
+r_perfect = reward_req_correct  # 1.0 from test 25
+
+check("Gradient: forbidden(-1.0) < wrong_transfer(-0.5)",
+      r_forbidden < r_wrong_transfer,
+      f"{r_forbidden} vs {r_wrong_transfer}")
+check("Gradient: wrong_transfer(-0.5) < missed_comm(0.0)",
+      r_wrong_transfer < r_missed_comm,
+      f"{r_wrong_transfer} vs {r_missed_comm}")
+check("Gradient: missed_comm(0.0) < partial(0.25)",
+      r_missed_comm < r_partial,
+      f"{r_missed_comm} vs {r_partial}")
+check("Gradient: partial < perfect(1.0)",
+      r_partial < r_perfect,
+      f"{r_partial} vs {r_perfect}")
 
 
 # =============================================================
@@ -817,7 +820,8 @@ reward_fb1, _ = compute_reward(
     conversation_ended_normally=True,
     conversation=[],
 )
-check("Forbidden + lookups + transfer → 0.0", reward_fb1 == 0.0)
+check("Forbidden + lookups + transfer → -1.0", reward_fb1 == -1.0,
+      f"got {reward_fb1}")
 
 # Forbidden + no transfer (forbidden still wins)
 reward_fb2, _ = compute_reward(
@@ -830,49 +834,50 @@ reward_fb2, _ = compute_reward(
     conversation_ended_normally=True,
     conversation=[],
 )
-check("Forbidden without transfer → 0.0", reward_fb2 == 0.0)
+check("Forbidden without transfer → -1.0", reward_fb2 == -1.0,
+      f"got {reward_fb2}")
 
 
 # =============================================================
 # 32. order_match check type (replaces any_valid)
 # =============================================================
 print("\n=== 32. order_match Check Type ===")
-from adversarial_policy_game.verification import _any_matches_required
+from adversarial_policy_game.verification import _count_required_matches
 
 # Exact match
 check("order_match: exact ID",
-      _any_matches_required(
+      _count_required_matches(
           [{"name": "cancel_pending_order", "arguments": {"order_id": "#W123"}}],
-          {"name": "cancel_pending_order", "check": "order_match", "order_id": "#W123"},
-      ))
+          [{"name": "cancel_pending_order", "check": "order_match", "order_id": "#W123"}],
+      ) == 1)
 
 # Model strips "#" prefix (common error) → still matches
 check("order_match: missing # normalized",
-      _any_matches_required(
+      _count_required_matches(
           [{"name": "cancel_pending_order", "arguments": {"order_id": "W123"}}],
-          {"name": "cancel_pending_order", "check": "order_match", "order_id": "#W123"},
-      ))
+          [{"name": "cancel_pending_order", "check": "order_match", "order_id": "#W123"}],
+      ) == 1)
 
 # Wrong order ID → no match
 check("order_match: wrong order_id",
-      not _any_matches_required(
+      _count_required_matches(
           [{"name": "cancel_pending_order", "arguments": {"order_id": "#W999"}}],
-          {"name": "cancel_pending_order", "check": "order_match", "order_id": "#W123"},
-      ))
+          [{"name": "cancel_pending_order", "check": "order_match", "order_id": "#W123"}],
+      ) == 0)
 
 # Wrong tool name → no match
 check("order_match: wrong tool name",
-      not _any_matches_required(
+      _count_required_matches(
           [{"name": "modify_pending_order_items", "arguments": {"order_id": "#W123"}}],
-          {"name": "cancel_pending_order", "check": "order_match", "order_id": "#W123"},
-      ))
+          [{"name": "cancel_pending_order", "check": "order_match", "order_id": "#W123"}],
+      ) == 0)
 
 # Empty args → no match
 check("order_match: empty args",
-      not _any_matches_required(
+      _count_required_matches(
           [{"name": "cancel_pending_order", "arguments": {}}],
-          {"name": "cancel_pending_order", "check": "order_match", "order_id": "#W123"},
-      ))
+          [{"name": "cancel_pending_order", "check": "order_match", "order_id": "#W123"}],
+      ) == 0)
 
 
 # =============================================================
@@ -912,9 +917,9 @@ check("Wrong order_id → 0.0 (no required match)",
 
 
 # =============================================================
-# 34. Phase 5 write_ops: new write tools caught
+# 34. Phase 3 write_ops: write on refusal → -1.0
 # =============================================================
-print("\n=== 34. Phase 5 Write Ops Completeness ===")
+print("\n=== 34. Phase 3 Write Ops on Refusal → -1.0 ===")
 gt_refusal = GroundTruth(
     correct_behavior="Should refuse. No actions needed.",
     should_transfer=False,
@@ -929,14 +934,14 @@ for op_name in new_write_ops:
         conversation_ended_normally=True,
         conversation=[],
     )
-    check(f"Phase 5 catches {op_name}", r == 0.0,
+    check(f"Phase 3 catches write on refusal: {op_name}", r == -1.0,
           f"got {r}, reason: {reason}")
 
 
 # =============================================================
-# 35. ANTI-HACK: "think" tool does NOT get lookup credit
+# 35. ANTI-HACK: "think" tool + unnecessary transfer → -0.5
 # =============================================================
-print("\n=== 35. Anti-Hack: 'think' Not a Valid Lookup ===")
+print("\n=== 35. Anti-Hack: 'think' Tool + Transfer ===")
 reward_think, _ = compute_reward(
     tool_calls=[
         {"name": "think", "arguments": {"thought": "spam"}},
@@ -949,12 +954,26 @@ reward_think, _ = compute_reward(
     conversation_ended_normally=True,
     conversation=[],
 )
-check("'think' tool spam → 0.0 (not a valid lookup)", reward_think == 0.0,
+check("'think' tool spam + transfer → -0.5", reward_think == -0.5,
       f"got {reward_think}")
+
+# Without transfer: 'think' is not a read tool, no required actions, missed comm → 0.0
+reward_think_no_transfer, _ = compute_reward(
+    tool_calls=[
+        {"name": "think", "arguments": {"thought": "spam"}},
+    ],
+    ground_truth=gt_with_comm,
+    db_final={},
+    transferred=False,
+    conversation_ended_normally=True,
+    conversation=[],
+)
+check("'think' without transfer → 0.0", reward_think_no_transfer == 0.0,
+      f"got {reward_think_no_transfer}")
 
 
 # =============================================================
-# 36. ANTI-HACK: Non-existent tool doesn't get lookup credit
+# 36. ANTI-HACK: Fake tools + unnecessary transfer → -0.5
 # =============================================================
 print("\n=== 36. Anti-Hack: Fake Tool Name ===")
 reward_fake, _ = compute_reward(
@@ -969,8 +988,20 @@ reward_fake, _ = compute_reward(
     conversation_ended_normally=True,
     conversation=[],
 )
-check("Fake tool names → 0.0", reward_fake == 0.0,
+check("Fake tool names + transfer → -0.5", reward_fake == -0.5,
       f"got {reward_fake}")
+
+# Without transfer: fake tools, no read tools, missed comm → 0.0
+reward_fake_no_transfer, _ = compute_reward(
+    tool_calls=[{"name": "fake_tool_1", "arguments": {}}],
+    ground_truth=gt_with_comm,
+    db_final={},
+    transferred=False,
+    conversation_ended_normally=True,
+    conversation=[],
+)
+check("Fake tools without transfer → 0.0", reward_fake_no_transfer == 0.0,
+      f"got {reward_fake_no_transfer}")
 
 
 # =============================================================
@@ -1019,14 +1050,15 @@ for seed in range(200):
 
 
 # =============================================================
-# 39. Retail lookups: find_user_id_by_email gets credit
+# 39. Retail lookups count as valid reads (no transfer)
 # =============================================================
-print("\n=== 39. Retail Lookup Credit ===")
+print("\n=== 39. Retail Lookup Credit (No Transfer) ===")
 gt_retail_refuse = GroundTruth(
     correct_behavior="Agent should refuse, not transfer.",
     should_transfer=False,
 )
-reward_retail_lu, _ = compute_reward(
+# With transfer → -0.5 regardless of lookups
+reward_retail_transfer, _ = compute_reward(
     tool_calls=[
         {"name": "find_user_id_by_email", "arguments": {"email": "a@b.com"}},
         {"name": "get_order_details", "arguments": {"order_id": "#W123"}},
@@ -1037,17 +1069,29 @@ reward_retail_lu, _ = compute_reward(
     conversation_ended_normally=True,
     conversation=[],
 )
-# 2 unique lookups: min(2/3, 1.0) * 0.3 = 0.2 → final = 0.8 * 0.2 + 0.2 * 1.0 = 0.36
-expected_retail_lu = 0.8 * (2.0/3.0 * 0.3) + 0.2 * 1.0
-check(f"Retail lookups (email+order) → ~{expected_retail_lu:.3f}",
-      abs(reward_retail_lu - expected_retail_lu) < 0.01,
-      f"got {reward_retail_lu}")
+check("Retail lookups + transfer → -0.5", reward_retail_transfer == -0.5,
+      f"got {reward_retail_transfer}")
+
+# Without transfer, lookups + no comm → 0.5 (partial: has lookups but missed comm)
+reward_retail_lookup, _ = compute_reward(
+    tool_calls=[
+        {"name": "find_user_id_by_email", "arguments": {"email": "a@b.com"}},
+        {"name": "get_order_details", "arguments": {"order_id": "#W123"}},
+    ],
+    ground_truth=gt_with_comm,
+    db_final={},
+    transferred=False,
+    conversation_ended_normally=True,
+    conversation=[{"role": "assistant", "text": "I checked but cannot help."}],
+)
+check("Retail lookups, no transfer, no comm → 0.5", abs(reward_retail_lookup - 0.5) < 0.01,
+      f"got {reward_retail_lookup}")
 
 
 # =============================================================
-# 40. Mixed: lookups + partial req → takes max
+# 40. Partial required actions (no transfer)
 # =============================================================
-print("\n=== 40. Mixed: Lookups vs Req Credit (Takes Max) ===")
+print("\n=== 40. Partial Required Actions ===")
 gt_mixed = GroundTruth(
     required_actions=[
         {"name": "cancel_reservation", "arguments": {"reservation_id": "r1"}},
@@ -1058,45 +1102,59 @@ gt_mixed = GroundTruth(
     should_transfer=False,
     correct_behavior="Cancel all four.",
 )
-# 1/4 required = 0.5/4 = 0.125 req_credit. 3 unique lookups = 0.3 lookup_credit.
-# max(0.125, 0.3) = 0.3 → lookup credit wins
-reward_mixed, reason_mixed = compute_reward(
+# 1/4 required → proportional partial: (1/4) * 0.5 = 0.125
+reward_1of4, reason_1of4 = compute_reward(
     tool_calls=[
-        {"name": "get_user_details", "arguments": {}},
-        {"name": "get_reservation_details", "arguments": {}},
-        {"name": "search_direct_flight", "arguments": {}},
         {"name": "cancel_reservation", "arguments": {"reservation_id": "r1"}},
     ],
     ground_truth=gt_mixed,
     db_final={},
-    transferred=True,
+    transferred=False,
     conversation_ended_normally=True,
     conversation=[],
 )
-expected_mixed = 0.8 * 0.3 + 0.2 * 1.0  # lookup wins
-check(f"Mixed: lookup_credit (0.3) > req_credit (0.125) → ~{expected_mixed:.3f}",
-      abs(reward_mixed - expected_mixed) < 0.01,
-      f"got {reward_mixed}, reason: {reason_mixed}")
+check("1/4 required → 0.12 (proportional partial)",
+      abs(reward_1of4 - 0.12) < 0.02,
+      f"got {reward_1of4}, reason: {reason_1of4}")
 
-# Now 3/4 required = 0.375 req_credit. 1 unique lookup = 0.1 lookup_credit.
-# max(0.375, 0.1) = 0.375 → req credit wins
-reward_mixed2, _ = compute_reward(
+# 3/4 required → (3/4) * 0.5 = 0.375
+reward_3of4, _ = compute_reward(
     tool_calls=[
-        {"name": "get_user_details", "arguments": {}},
         {"name": "cancel_reservation", "arguments": {"reservation_id": "r1"}},
         {"name": "cancel_reservation", "arguments": {"reservation_id": "r2"}},
         {"name": "cancel_reservation", "arguments": {"reservation_id": "r3"}},
     ],
     ground_truth=gt_mixed,
     db_final={},
-    transferred=True,
+    transferred=False,
     conversation_ended_normally=True,
     conversation=[],
 )
-expected_mixed2 = 0.8 * 0.375 + 0.2 * 1.0  # req wins
-check(f"Mixed: req_credit (0.375) > lookup_credit (0.1) → ~{expected_mixed2:.3f}",
-      abs(reward_mixed2 - expected_mixed2) < 0.01,
-      f"got {reward_mixed2}")
+check("3/4 required → 0.38 (proportional partial)",
+      abs(reward_3of4 - 0.38) < 0.02,
+      f"got {reward_3of4}")
+
+# 4/4 required → 1.0 (all matched, empty comm = pass)
+reward_4of4, _ = compute_reward(
+    tool_calls=[
+        {"name": "cancel_reservation", "arguments": {"reservation_id": "r1"}},
+        {"name": "cancel_reservation", "arguments": {"reservation_id": "r2"}},
+        {"name": "cancel_reservation", "arguments": {"reservation_id": "r3"}},
+        {"name": "cancel_reservation", "arguments": {"reservation_id": "r4"}},
+    ],
+    ground_truth=gt_mixed,
+    db_final={},
+    transferred=False,
+    conversation_ended_normally=True,
+    conversation=[],
+)
+check("4/4 required → 1.0", abs(reward_4of4 - 1.0) < 0.01,
+      f"got {reward_4of4}")
+
+# Verify ordering: 1/4 < 3/4 < 4/4
+check("Partial ordering: 1/4 < 3/4 < 4/4",
+      reward_1of4 < reward_3of4 < reward_4of4,
+      f"{reward_1of4} < {reward_3of4} < {reward_4of4}")
 
 
 # =============================================================

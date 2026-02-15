@@ -90,13 +90,16 @@ class ToolExecutor:
             if oid and not oid.startswith("#"):
                 arguments = {**arguments, "order_id": f"#{oid}"}
 
-        self._tool_call_log.append({
+        entry = {
             "name": tool_name,
             "arguments": copy.deepcopy(arguments),
-        })
+        }
+        self._tool_call_log.append(entry)
 
         try:
             result = self._tools.use_tool(tool_name, **arguments)
+            entry["error"] = False
             return to_json_str(result)
         except Exception as e:
+            entry["error"] = True
             return f"Error: {e}"

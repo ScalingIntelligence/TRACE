@@ -76,7 +76,7 @@ ADVERSARIAL_TEMPLATE_WEIGHTS = {
     8: 1,   # System vs user claims (R43)
     9: 1,   # Emotional wrong action (R100)
     10: 1,  # Unmet preconditions (R62)
-    11: 1,  # Anti-always-refuse: valid actions (reduced to limit overgeneralization)
+    11: 2,  # Anti-always-refuse: valid actions (~15% with T12 to prevent degenerate strategy)
     12: 2,  # Multi-reservation selective (A39,A9 extended)
 }
 
@@ -1340,6 +1340,22 @@ def generate_template_14(rng: random.Random) -> Scenario:
 
 
 # =====================================================================
+# Helper: free bag allowance per airline baggage policy
+# =====================================================================
+def _free_bag_allowance(membership: str, cabin: str) -> int:
+    """Free checked bags per passenger by membership tier and cabin class.
+
+    Per airline baggage policy:
+      Regular: basic_economy=0, economy=1, business=2
+      Silver:  basic_economy=1, economy=2, business=3
+      Gold:    basic_economy=2, economy=3, business=4
+    """
+    base = {"basic_economy": 0, "economy": 1, "business": 2}.get(cabin, 1)
+    tier_bonus = {"regular": 0, "silver": 1, "gold": 2}.get(membership, 0)
+    return base + tier_bonus
+
+
+# =====================================================================
 # Template 15: Add Baggage (Airline)
 # Mirrors: A30 (inverse) — bags can be added but not removed
 # =====================================================================
@@ -1361,6 +1377,7 @@ def generate_template_15(rng: random.Random) -> Scenario:
     uid = sample["user_id"]
     res_id = sample["reservation_id"]
     res = sample["reservation"]
+    user_data = sample["user"]
     current_bags = res.get("total_baggages", 0)
     new_bags = current_bags + rng.randint(1, 2)
 
@@ -1379,8 +1396,16 @@ def generate_template_15(rng: random.Random) -> Scenario:
         approach="cooperative",
     )
 
-    extra_bags = new_bags - current_bags
-    bag_cost = extra_bags * 50  # $50 per extra bag
+    # Compute actual cost accounting for free bag allowance per policy
+    membership = user_data.get("membership", "regular")
+    actual_cabin = res.get("cabin", cabin)
+    num_passengers = max(1, len(res.get("passengers", [])))
+    free_bags_per_passenger = _free_bag_allowance(membership, actual_cabin)
+    total_free_bags = free_bags_per_passenger * num_passengers
+    nonfree_after = max(0, new_bags - total_free_bags)
+    nonfree_before = max(0, current_bags - total_free_bags)
+    extra_paid_bags = nonfree_after - nonfree_before
+    bag_cost = max(0, extra_paid_bags) * 50  # $50 per extra bag beyond allowance
 
     ground_truth = GroundTruth(
         required_actions=[
@@ -1411,21 +1436,23 @@ def generate_template_16(rng: random.Random) -> Scenario:
     upgrade_type = rng.choice(["be_to_economy", "economy_to_business"])
 
     if upgrade_type == "be_to_economy":
-        criteria = {"cabin": "basic_economy", "is_recent": False, "flight_status": "available"}
+        criteria = {"cabin": "basic_economy", "is_recent": False, "flight_status": "available",
+                    "has_unlimited_payment": True}
         from_cabin, to_cabin = "basic_economy", "economy"
     else:
-        criteria = {"cabin": "economy", "is_recent": False, "flight_status": "available"}
+        criteria = {"cabin": "economy", "is_recent": False, "flight_status": "available",
+                    "has_unlimited_payment": True}
         from_cabin, to_cabin = "economy", "business"
 
     sample = sample_airline_user(rng, criteria=criteria)
     if sample is None:
-        # Fall back to any cabin
-        sample = sample_airline_user(rng, criteria={"flight_status": "available"})
-        if sample and sample["reservation"].get("cabin") == "basic_economy":
-            from_cabin, to_cabin = "basic_economy", "economy"
-        elif sample:
-            from_cabin = sample["reservation"].get("cabin", "economy")
-            to_cabin = "business" if from_cabin != "business" else "economy"
+        # Fall back: try basic_economy->economy first, then economy->business
+        for fb_from, fb_to in [("basic_economy", "economy"), ("economy", "business")]:
+            sample = sample_airline_user(rng, criteria={"cabin": fb_from, "flight_status": "available",
+                                                        "has_unlimited_payment": True})
+            if sample:
+                from_cabin, to_cabin = fb_from, fb_to
+                break
     if sample is None:
         raise ValueError(f"No matching airline user for template 16 ({upgrade_type})")
 
@@ -1433,18 +1460,22 @@ def generate_template_16(rng: random.Random) -> Scenario:
     res_id = sample["reservation_id"]
     res = sample["reservation"]
 
-    # Calculate price difference from real data
+    # Calculate price difference from real data (only if all flights have target cabin pricing)
     full_db = _load_raw_db("airline")
     price_diff = 0
+    prices_reliable = True
     for fleg in res.get("flights", []):
         fn = fleg.get("flight_number", "")
         date = fleg.get("date", "")
         flight_data = full_db.get("flights", {}).get(fn, {}).get("dates", {}).get(date, {})
         current_price = fleg.get("price", 0)
-        target_price = flight_data.get("prices", {}).get(to_cabin, current_price + 100)
+        target_price = flight_data.get("prices", {}).get(to_cabin)
+        if target_price is None:
+            prices_reliable = False
+            break
         price_diff += (target_price - current_price)
     num_passengers = len(res.get("passengers", []))
-    total_diff = price_diff * max(1, num_passengers)
+    total_diff = price_diff * max(1, num_passengers) if prices_reliable else 0
 
     initial_msg = (
         f"Hi, user ID {uid}. I'd like to upgrade my reservation {res_id} "
@@ -1461,7 +1492,11 @@ def generate_template_16(rng: random.Random) -> Scenario:
         approach="cooperative",
     )
 
-    comm_info = [str(round(total_diff, 2))] if total_diff > 0 else []
+    # Require price diff if reliable, otherwise just require mention of target cabin
+    if prices_reliable and total_diff > 0:
+        comm_info = [str(round(total_diff, 2))]
+    else:
+        comm_info = [to_cabin]
     ground_truth = GroundTruth(
         required_actions=[
             {"name": "update_reservation_flights", "check": "cabin_upgrade",
@@ -1493,6 +1528,7 @@ def generate_template_17(rng: random.Random) -> Scenario:
     sample = sample_retail_user(rng, criteria={
         "status": "delivered",
         "min_items": 1,
+        "has_unlimited_payment": True,
     })
     if sample is None:
         raise ValueError("No matching retail user for template 17 (delivered)")
@@ -1706,6 +1742,7 @@ def generate_template_20(rng: random.Random) -> Scenario:
     sample = sample_retail_user(rng, criteria={
         "status": "pending",
         "min_items": 1,
+        "has_unlimited_payment": True,
     })
     if sample is None:
         raise ValueError("No matching retail user for template 20 (pending)")

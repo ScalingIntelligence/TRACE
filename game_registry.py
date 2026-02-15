@@ -89,6 +89,15 @@ except ImportError:
     AdversarialPolicyGame = None
     UserLLMClient = None
 
+try:
+    from tau_tool_calling_env import (
+        TauToolCallingEnv,
+        extract_action as extract_action_tau_tool,
+        SYSTEM_PROMPT as SYSTEM_PROMPT_TAU_TOOL,
+    )
+except ImportError:
+    TauToolCallingEnv = None
+
 from pathlib import Path
 
 
@@ -433,7 +442,7 @@ def _register_builtin_games() -> None:
     # Trains policy adherence under adversarial user pressure
     # adversarial_ratio controls mix: 0.2 = 20% adversarial, 80% cooperative
     if AdversarialPolicyGame is not None:
-        def make_adversarial_policy(user_client=None, adversarial_ratio=1.0) -> AdversarialPolicyGame:
+        def make_adversarial_policy(user_client=None, adversarial_ratio=0.2) -> AdversarialPolicyGame:
             return AdversarialPolicyGame(
                 max_steps=30, user_client=user_client,
                 adversarial_ratio=adversarial_ratio,
@@ -447,6 +456,27 @@ def _register_builtin_games() -> None:
                 action_space=[],
                 stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
                 system_prompt=SYSTEM_PROMPT_ADVERSARIAL,
+                max_gen_tokens=1024,
+            )
+        )
+
+    # Tau Bench Tool-Calling Microenvironment — targets Skill 2 failures
+    # Trains tool-calling competence on simplified single-action tau bench tasks
+    # Uses EXACT same tools, DB, policy as tau2-bench with DB hash verification
+    if TauToolCallingEnv is not None:
+        def make_tau_tool_calling(user_client=None, domain=None) -> TauToolCallingEnv:
+            return TauToolCallingEnv(
+                max_steps=30, user_client=user_client, domain=domain,
+            )
+
+        register_game(
+            GameSpec(
+                name="tau_tool_calling",
+                make_env=make_tau_tool_calling,
+                extract_action=extract_action_tau_tool,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_TAU_TOOL,
                 max_gen_tokens=1024,
             )
         )

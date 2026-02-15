@@ -49,6 +49,11 @@ import json
 import os
 import random
 import time
+
+from loguru import logger as _loguru_logger
+_loguru_logger.remove()
+_loguru_logger.disable("tau2")
+
 import torch
 import torch.nn.functional as F
 from collections import defaultdict
@@ -143,6 +148,27 @@ def compute_padding_efficiency(seq_lens: List[int], batches: List[List[int]]) ->
         for batch in batches
     )
     return total_real / max(1, total_padded)
+
+
+def pad_batch(
+    batch_idx: List[int],
+    seqs_cpu: List[torch.Tensor],
+    prompt_lens: List[int],
+    action_lens: List[int],
+    pad_id: int,
+) -> Tuple[torch.Tensor, torch.Tensor, List[int], List[int]]:
+    """Pad a single mini-batch on-the-fly (no pre-caching).
+
+    Returns (input_ids, attention_mask, prompt_lens, action_lens).
+    Input tensors are on CPU with pinned memory for fast GPU transfer.
+    Used instead of pre-caching all batches so each rank only allocates
+    memory for batches it actually processes (multi-GPU memory parity).
+    """
+    mb_seqs = [seqs_cpu[j] for j in batch_idx]
+    mb_ids, mb_attn = pad_and_pin(mb_seqs, pad_id)
+    mb_pl = [prompt_lens[j] for j in batch_idx]
+    mb_al = [action_lens[j] for j in batch_idx]
+    return mb_ids, mb_attn, mb_pl, mb_al
 
 
 # ============================================================================
@@ -360,6 +386,11 @@ def parse_grpo_args_optimized():
              "At 0.2, 20%% adversarial (T1-T12) and 80%% cooperative (T13-T21). "
              "Reflects real tau2-bench distribution (~16%% adversarial).")
 
+    # -- Tau tool-calling game --
+    parser.add_argument("--tau-domain", type=str, default=None,
+        choices=["airline", "retail"],
+        help="Domain filter for tau_tool_calling game (default: both)")
+
     # -- Training sample optimizations --
     parser.add_argument("--filter-info-turns", action="store_true", default=True,
         help="Filter out info-gathering tool calls from training samples")
@@ -422,7 +453,7 @@ def main():
     elif game_spec.name == "liars_dice":
         env_kwargs["num_dice"] = Config.NUM_DICE
 
-    if args.user_llm_url and game_spec.name == "adversarial_policy":
+    if args.user_llm_url and game_spec.name in ("adversarial_policy", "tau_tool_calling"):
         from adversarial_policy_game import UserLLMClient
         user_client = UserLLMClient(
             base_url=args.user_llm_url,
@@ -436,6 +467,11 @@ def main():
     # Wire up adversarial_ratio for adversarial_policy game
     if game_spec.name == "adversarial_policy":
         env_kwargs["adversarial_ratio"] = args.adversarial_ratio
+
+    # Wire up domain filter for tau_tool_calling game
+    if game_spec.name == "tau_tool_calling" and hasattr(args, "tau_domain"):
+        if args.tau_domain:
+            env_kwargs["domain"] = args.tau_domain
 
     # Set dynamic rollout log name
     args.rollout_log = f"rollouts_grpo_{game_spec.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
@@ -466,6 +502,8 @@ def main():
     print(f"  Temperature:         {args.temperature}")
     if game_spec.name == "adversarial_policy":
         print(f"  Adversarial ratio:   {args.adversarial_ratio}")
+    if game_spec.name == "tau_tool_calling":
+        print(f"  Domain filter:       {args.tau_domain or 'both'}")
     print(f"  Max gen tokens:      {max_gen_tokens}")
     print(f"  Device:              {device}")
     print(f"  Output dir:          {output_dir_path}")
@@ -703,55 +741,20 @@ def main():
             t_collect0 = t_collect1 = time.time()
             samples, env_metrics = [], {}
 
-        # ---- 4. Compute advantages + filter (rank 0), then broadcast ----
-        # broadcast_data layout: [skip_flag, samples, advantages, num_filtered,
-        #   dt_filtered, env_metrics, avg_abs_advantage, t_collect0, t_collect1]
-        # skip_flag: True = skip this iteration, False = proceed
+        # ---- 4. Broadcast raw samples, compute advantages on all ranks ----
+        # Broadcast only the raw samples from rank 0; each rank independently
+        # computes advantages, filters, and normalizes.  These functions are
+        # deterministic so every rank arrives at identical results while:
+        #   - reducing broadcast payload (no advantages tensor / metadata)
+        #   - eliminating idle time on non-zero ranks
         if is_main_rank():
             if not samples:
-                broadcast_data = [True, None, None, 0, 0, {}, 0.0, t_collect0, t_collect1]
                 print(f"[iter {it}] No samples collected, skipping")
+                broadcast_data = [True, None, None, 0.0, 0.0]
             else:
-                # Compute group-relative advantages
-                advantages = compute_group_advantages(samples)
-
-                # 4b. Filter constant-reward groups
-                num_filtered = 0
-                if args.filter_constant_groups:
-                    pre_filter_count = len(samples)
-                    samples, advantages, num_filtered = filter_constant_reward_groups(
-                        samples, advantages,
-                    )
-                    if num_filtered > 0:
-                        print(
-                            f"[iter {it}] Filtered {num_filtered} constant-reward groups "
-                            f"({pre_filter_count} -> {len(samples)} samples)"
-                        )
-
-                # 4b2. Filter info-gathering turns
-                dt_filtered = 0
-                samples_before_dt_filter = len(samples)
-                if args.filter_info_turns:
-                    samples, advantages, dt_filtered = filter_info_gathering_turns(
-                        samples, advantages,
-                    )
-                    if dt_filtered > 0:
-                        print(
-                            f"[iter {it}] Filtered {dt_filtered} info-gathering turns "
-                            f"({samples_before_dt_filter} -> {len(samples)} samples)"
-                        )
-
-                # 4c. Normalize advantages
-                adv_std = advantages.std()
-                if adv_std > 1e-8:
-                    advantages = (advantages - advantages.mean()) / (adv_std + 1e-8)
-
-                avg_abs_advantage = float(advantages.abs().mean().item())
-
-                broadcast_data = [False, samples, advantages, num_filtered, dt_filtered,
-                                  env_metrics, avg_abs_advantage, t_collect0, t_collect1]
+                broadcast_data = [False, samples, env_metrics, t_collect0, t_collect1]
         else:
-            broadcast_data = [None] * 9
+            broadcast_data = [None] * 5
 
         broadcast_data = broadcast_objects(broadcast_data)
         skip_flag = broadcast_data[0]
@@ -759,8 +762,43 @@ def main():
         if skip_flag:
             continue
 
-        _, samples, advantages, num_filtered, dt_filtered, \
-            env_metrics, avg_abs_advantage, t_collect0, t_collect1 = broadcast_data
+        _, samples, env_metrics, t_collect0, t_collect1 = broadcast_data
+
+        # All ranks compute advantages in parallel (deterministic, identical results)
+        advantages = compute_group_advantages(samples)
+
+        # 4b. Filter constant-reward groups (all ranks, deterministic)
+        num_filtered = 0
+        if args.filter_constant_groups:
+            pre_filter_count = len(samples)
+            samples, advantages, num_filtered = filter_constant_reward_groups(
+                samples, advantages,
+            )
+            if num_filtered > 0 and is_main_rank():
+                print(
+                    f"[iter {it}] Filtered {num_filtered} constant-reward groups "
+                    f"({pre_filter_count} -> {len(samples)} samples)"
+                )
+
+        # 4b2. Filter info-gathering turns (all ranks, deterministic)
+        dt_filtered = 0
+        samples_before_dt_filter = len(samples)
+        if args.filter_info_turns:
+            samples, advantages, dt_filtered = filter_info_gathering_turns(
+                samples, advantages,
+            )
+            if dt_filtered > 0 and is_main_rank():
+                print(
+                    f"[iter {it}] Filtered {dt_filtered} info-gathering turns "
+                    f"({samples_before_dt_filter} -> {len(samples)} samples)"
+                )
+
+        # 4c. Normalize advantages (all ranks, deterministic)
+        adv_std = advantages.std()
+        if adv_std > 1e-8:
+            advantages = (advantages - advantages.mean()) / (adv_std + 1e-8)
+
+        avg_abs_advantage = float(advantages.abs().mean().item())
 
         # ---- 4d. Early skip when all advantages are zero ----
         if avg_abs_advantage == 0.0:
@@ -866,27 +904,9 @@ def main():
         else:
             stats_batches = make_sorted_batches(seq_lens, args.stats_chunk_size)
 
-        # ---- 5c. Pre-pad and pin all batches on CPU ----
-        # Also pre-compute per-batch prompt_lens/action_lens to avoid repeated
-        # list comprehensions in the hot loops of steps 6 and 7.
-        BatchEntry = Tuple[List[int], torch.Tensor, torch.Tensor, List[int], List[int]]
-
-        def build_batch_cache(batches: List[List[int]]) -> List[BatchEntry]:
-            cache = []
-            for mb_idx in batches:
-                mb_seqs = [seqs_cpu[j] for j in mb_idx]
-                mb_ids, mb_attn = pad_and_pin(mb_seqs, tokenizer.pad_token_id)
-                mb_pl = [prompt_lens[j] for j in mb_idx]
-                mb_al = [action_lens[j] for j in mb_idx]
-                cache.append((mb_idx, mb_ids, mb_attn, mb_pl, mb_al))
-            return cache
-
-        train_batch_cache = build_batch_cache(train_batches)
-        if unified_batches:
-            stats_batch_cache = train_batch_cache
-        else:
-            stats_batch_cache = build_batch_cache(stats_batches)
-
+        # ---- 5c. Batch lists ready (padding done on-the-fly per batch) ----
+        # Each rank only materializes padded tensors for batches it processes,
+        # ensuring multi-GPU memory per rank matches single-GPU memory.
         t_pad = time.time()
 
         # ---- 6. Compute old_logp and (optionally) base_logp [DISTRIBUTED] ----
@@ -896,13 +916,16 @@ def main():
         base_logp_cpu = torch.zeros(N, dtype=torch.float32) if compute_base else None
 
         # Shard stats batches across ranks
-        all_stats_indices = list(range(len(stats_batch_cache)))
+        all_stats_indices = list(range(len(stats_batches)))
         my_stats_indices, _ = shard_batches(all_stats_indices, rank, world_size)
 
         with torch.no_grad():
             # -- Pass 1: old_logp (adapter ON) — each rank does its shard --
             for bi in my_stats_indices:
-                mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = stats_batch_cache[bi]
+                mb_idx = stats_batches[bi]
+                mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = pad_batch(
+                    mb_idx, seqs_cpu, prompt_lens, action_lens, tokenizer.pad_token_id
+                )
                 mb_ids = mb_ids_cpu.to(device, non_blocking=True)
                 mb_attn = mb_attn_cpu.to(device, non_blocking=True)
 
@@ -919,7 +942,7 @@ def main():
                     normalize_by_len=args.normalize_by_len,
                 )
                 old_logp_cpu[mb_idx] = mb_old_logp.detach().cpu()
-                del logits, outputs, mb_old_logp, mb_ids, mb_attn
+                del logits, outputs, mb_old_logp, mb_ids, mb_attn, mb_ids_cpu, mb_attn_cpu
 
             # All-reduce: each rank wrote to disjoint indices (rest are 0), SUM assembles full vector
             if world_size > 1:
@@ -933,7 +956,10 @@ def main():
                 model.disable_adapter_layers()
                 try:
                     for bi in my_stats_indices:
-                        mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = stats_batch_cache[bi]
+                        mb_idx = stats_batches[bi]
+                        mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = pad_batch(
+                            mb_idx, seqs_cpu, prompt_lens, action_lens, tokenizer.pad_token_id
+                        )
                         mb_ids = mb_ids_cpu.to(device, non_blocking=True)
                         mb_attn = mb_attn_cpu.to(device, non_blocking=True)
 
@@ -950,7 +976,7 @@ def main():
                             normalize_by_len=args.normalize_by_len,
                         )
                         base_logp_cpu[mb_idx] = mb_base_logp.detach().cpu()
-                        del logits, outputs, mb_base_logp, mb_ids, mb_attn
+                        del logits, outputs, mb_base_logp, mb_ids, mb_attn, mb_ids_cpu, mb_attn_cpu
 
                     if world_size > 1:
                         base_logp_gpu = base_logp_cpu.to(device)
@@ -959,10 +985,6 @@ def main():
                         del base_logp_gpu
                 finally:
                     model.enable_adapter_layers()
-
-        # Free stats cache if separate from train cache
-        if not unified_batches:
-            del stats_batch_cache
 
         t_stats = time.time()
 
@@ -980,7 +1002,7 @@ def main():
         for _epoch in range(args.epochs):
             # Shuffle the ORDER of mini-batches — same seed on all ranks for
             # deterministic sharding (each rank gets a disjoint subset).
-            batch_order = list(range(len(train_batch_cache)))
+            batch_order = list(range(len(train_batches)))
             rng = random.Random(it * 1000 + _epoch)
             rng.shuffle(batch_order)
 
@@ -991,7 +1013,10 @@ def main():
             optim.zero_grad(set_to_none=True)
 
             for bi in my_batch_order:
-                mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = train_batch_cache[bi]
+                mb_idx = train_batches[bi]
+                mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = pad_batch(
+                    mb_idx, seqs_cpu, prompt_lens, action_lens, tokenizer.pad_token_id
+                )
 
                 mb_ids = mb_ids_cpu.to(device, non_blocking=True)
                 mb_attn = mb_attn_cpu.to(device, non_blocking=True)
@@ -1055,7 +1080,7 @@ def main():
                 clip_frac_acc += float(clip_frac.item())
                 ratio_mean_acc += float(ratio_mean_val.item())
 
-                del mb_ids, mb_attn, logits, outputs, new_logp, ratio, loss
+                del mb_ids, mb_attn, mb_ids_cpu, mb_attn_cpu, logits, outputs, new_logp, ratio, loss
 
             # All-reduce accumulated LoRA gradients across ranks
             allreduce_coalesced_grads(trainable_params)
@@ -1091,8 +1116,8 @@ def main():
 
         t_train1 = time.time()
 
-        # Free pre-padded batch cache
-        del train_batch_cache
+        # Free tokenized sequences (padded tensors are freed per-batch)
+        del seqs_cpu
 
         # ---- 8. Logging (rank 0 only) ----
         if is_main_rank():

@@ -91,11 +91,18 @@ def sample_airline_user(
     if isinstance(membership, str):
         membership = [membership]
 
+    has_unlimited_payment = criteria.get("has_unlimited_payment", False)
+
     for uid in user_ids:
         user = full_db["users"][uid]
 
         if membership and user.get("membership") not in membership:
             continue
+
+        if has_unlimited_payment:
+            pm = user.get("payment_methods", {})
+            if not any(v.get("source") in ("credit_card", "paypal") for v in pm.values()):
+                continue
 
         res_ids = user.get("reservations", [])
         if len(res_ids) < min_reservations:
@@ -225,6 +232,7 @@ def sample_retail_user(
     min_orders = criteria.get("min_orders", 1)
     has_gift_card = criteria.get("has_gift_card")
     has_multiple_payment_types = criteria.get("has_multiple_payment_types")
+    has_unlimited_payment = criteria.get("has_unlimited_payment", False)
 
     for uid in user_ids:
         user = full_db["users"][uid]
@@ -232,6 +240,11 @@ def sample_retail_user(
         order_ids = user.get("orders", [])
         if len(order_ids) < min_orders:
             continue
+
+        if has_unlimited_payment:
+            pm = user.get("payment_methods", {})
+            if not any(v.get("source") in ("credit_card", "paypal") for v in pm.values()):
+                continue
 
         if has_gift_card:
             pm = user.get("payment_methods", {})

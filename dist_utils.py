@@ -146,9 +146,16 @@ def broadcast_objects(obj: Any) -> Any:
 
     dist.broadcast(data_tensor, src=0)
 
-    if dist.get_rank() != 0:
-        obj = pickle.loads(data_tensor.cpu().numpy().tobytes())
+    # Move to CPU and free CUDA tensor immediately to avoid GPU memory
+    # fragmentation.  Without this, the serialized payload stays in the
+    # CUDA caching allocator and inflates peak GPU memory vs single-GPU.
+    cpu_bytes = data_tensor.cpu().numpy().tobytes()
+    del data_tensor, size
 
+    if dist.get_rank() != 0:
+        obj = pickle.loads(cpu_bytes)
+
+    del cpu_bytes
     return obj
 
 

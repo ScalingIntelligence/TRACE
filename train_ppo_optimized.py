@@ -75,7 +75,7 @@ from ppo import (
 )
 from evaluation import evaluate_vs_base, evaluate_math, evaluate_tau2_bench
 from dist_utils import (
-    dist_init, dist_cleanup, is_main_rank, broadcast_objects,
+    dist_pre_init, dist_nccl_init, dist_cleanup, is_main_rank, broadcast_objects,
     shard_batches, allreduce_coalesced_grads, allreduce_scalars,
     barrier, suppress_print,
 )
@@ -124,6 +124,27 @@ def pad_and_pin(seqs: List[torch.Tensor], pad_id: int) -> Tuple[torch.Tensor, to
         ids = ids.pin_memory()
         attn = attn.pin_memory()
     return ids, attn
+
+
+def pad_batch(
+    batch_idx: List[int],
+    seqs_cpu: List[torch.Tensor],
+    prompt_lens: List[int],
+    action_lens: List[int],
+    pad_id: int,
+) -> Tuple[torch.Tensor, torch.Tensor, List[int], List[int]]:
+    """Pad a single mini-batch on-the-fly (no pre-caching).
+
+    Returns (input_ids, attention_mask, prompt_lens, action_lens).
+    Input tensors are on CPU with pinned memory for fast GPU transfer.
+    Used instead of pre-caching all batches so each rank only allocates
+    memory for batches it actually processes (multi-GPU memory parity).
+    """
+    mb_seqs = [seqs_cpu[j] for j in batch_idx]
+    mb_ids, mb_attn = pad_and_pin(mb_seqs, pad_id)
+    mb_pl = [prompt_lens[j] for j in batch_idx]
+    mb_al = [action_lens[j] for j in batch_idx]
+    return mb_ids, mb_attn, mb_pl, mb_al
 
 
 def compute_padding_efficiency(seq_lens: List[int], batches: List[List[int]]) -> float:
@@ -272,7 +293,7 @@ def parse_ppo_args_optimized():
         help="Number of self-play games per iteration")
 
     # -- LoRA --
-    parser.add_argument("--lora-rank", type=int, default=8,
+    parser.add_argument("--lora-rank", type=int, default=16,
         help="LoRA rank")
     parser.add_argument("--lora-alpha", type=int, default=16,
         help="LoRA alpha scaling factor")
@@ -315,7 +336,7 @@ def parse_ppo_args_optimized():
         help="Path to checkpoint directory to resume from")
     parser.add_argument("--rollout-log", type=str, default="selfplay_rollouts_ppo.jsonl",
         help="Filename for rollout logs")
-    parser.add_argument("--save-every", type=int, default=5,
+    parser.add_argument("--save-every", type=int, default=10,
         help="Save checkpoint every N iterations")
     parser.add_argument("--eval-every", type=int, default=100000,
         help="Eval vs base model every N iterations")
@@ -368,8 +389,10 @@ def main():
     # (see train_grpo_optimized.py for details)
     from unsloth import FastLanguageModel
 
-    # ---- Distributed init ----
-    rank, world_size, local_rank = dist_init()
+    # ---- Distributed init (Phase 1: CUDA device only, no NCCL yet) ----
+    # NCCL is deferred until after model loading to prevent from_pretrained /
+    # accelerate from triggering rogue collectives that cause NCCL deadlocks.
+    rank, world_size, local_rank = dist_pre_init()
     if not is_main_rank():
         suppress_print()
 
@@ -466,9 +489,18 @@ def main():
         offload_embedding=True,
         use_exact_model_name=True,
         cache_dir=str(hf_hub),
+        device_map={"": local_rank},
     )
-    print(f"[Model] Rank {rank}: Model loaded successfully")
+    print(f"[Model] Rank {rank}: Model loaded successfully", flush=True)
+
+    # ---- Distributed init (Phase 2: NCCL after model loading) ----
+    # Now safe to initialize NCCL — no more from_pretrained calls that could
+    # trigger rogue collectives causing asymmetric NCCL hangs.
+    print(f"[NCCL] Rank {rank}: Initializing NCCL process group...", flush=True)
+    dist_nccl_init()
+    print(f"[NCCL] Rank {rank}: NCCL initialized", flush=True)
     barrier()
+
     model = FastLanguageModel.get_peft_model(
         model,
         r=args.lora_rank,
@@ -507,8 +539,6 @@ def main():
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
-    model = model.to(device)
 
     # ---- Wrap with value head (PPO-specific) ----
     ac = PolicyWithValueHead(model, device=device).to(device)
@@ -785,43 +815,32 @@ def main():
         else:
             stats_batches = make_sorted_batches(seq_lens, args.stats_chunk_size)
 
-        # ---- 4c. Pre-pad and pin all batches on CPU ----
-        BatchEntry = Tuple[List[int], torch.Tensor, torch.Tensor, List[int], List[int]]
-
-        def build_batch_cache(batches: List[List[int]]) -> List[BatchEntry]:
-            cache = []
-            for mb_idx in batches:
-                mb_seqs = [seqs_cpu[j] for j in mb_idx]
-                mb_ids, mb_attn = pad_and_pin(mb_seqs, tokenizer.pad_token_id)
-                mb_pl = [prompt_lens[j] for j in mb_idx]
-                mb_al = [action_lens[j] for j in mb_idx]
-                cache.append((mb_idx, mb_ids, mb_attn, mb_pl, mb_al))
-            return cache
-
-        train_batch_cache = build_batch_cache(train_batches)
-        if unified_batches:
-            stats_batch_cache = train_batch_cache
-        else:
-            stats_batch_cache = build_batch_cache(stats_batches)
-
+        # ---- 4c. Batch lists ready (padding done on-the-fly per batch) ----
+        # Each rank only materializes padded tensors for batches it processes,
+        # ensuring multi-GPU memory per rank matches single-GPU memory.
         t_pad = time.time()
 
-        # ---- 5. Compute old_logp and old_v [DISTRIBUTED] ----
+        # ---- 5. Compute old_logp and old_v [DISTRIBUTED, ON GPU] ----
         ac.eval()
-        # Zeros for all-reduce SUM trick: each rank writes disjoint indices
-        old_logp_cpu = torch.zeros(N, dtype=torch.float32)
-        old_v_cpu = torch.zeros(N, dtype=torch.float32)
+        # Zeros for all-reduce SUM trick: each rank writes disjoint indices.
+        # Tensors live on the training device (GPU) — avoids CPU↔GPU roundtrips
+        # during stats, advantage computation, and training mini-batch indexing.
+        old_logp_dev = torch.zeros(N, dtype=torch.float32, device=device)
+        old_v_dev = torch.zeros(N, dtype=torch.float32, device=device)
         compute_base = args.kl_coef > 0
-        base_logp_cpu = torch.zeros(N, dtype=torch.float32) if compute_base else None
+        base_logp_dev = torch.zeros(N, dtype=torch.float32, device=device) if compute_base else None
 
         # Shard stats batches across ranks
-        all_stats_indices = list(range(len(stats_batch_cache)))
+        all_stats_indices = list(range(len(stats_batches)))
         my_stats_indices, _ = shard_batches(all_stats_indices, rank, world_size)
 
         with torch.no_grad():
             # -- Pass 1: old_logp + old_v (adapter ON) --
             for bi in my_stats_indices:
-                mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = stats_batch_cache[bi]
+                mb_idx = stats_batches[bi]
+                mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = pad_batch(
+                    mb_idx, seqs_cpu, prompt_lens, action_lens, tokenizer.pad_token_id
+                )
                 mb_ids = mb_ids_cpu.to(device, non_blocking=True)
                 mb_attn = mb_attn_cpu.to(device, non_blocking=True)
 
@@ -832,26 +851,26 @@ def main():
                 )
                 mb_old_v = values_from_hidden(last_h, ac.value_head, mb_pl)
 
-                old_logp_cpu[mb_idx] = mb_old_logp.detach().cpu()
-                old_v_cpu[mb_idx] = mb_old_v.detach().cpu()
+                old_logp_dev[mb_idx] = mb_old_logp.detach()
+                old_v_dev[mb_idx] = mb_old_v.detach()
                 del logits, last_h, mb_old_logp, mb_old_v, mb_ids, mb_attn
+                del mb_ids_cpu, mb_attn_cpu
 
-            # All-reduce: each rank wrote to disjoint indices, SUM assembles full vector
+            # All-reduce: each rank wrote to disjoint indices, SUM assembles full vector.
+            # Tensors already on GPU — all-reduce in-place, no CPU↔GPU transfer.
             if world_size > 1:
-                old_logp_gpu = old_logp_cpu.to(device)
-                old_v_gpu = old_v_cpu.to(device)
-                torch.distributed.all_reduce(old_logp_gpu, op=torch.distributed.ReduceOp.SUM)
-                torch.distributed.all_reduce(old_v_gpu, op=torch.distributed.ReduceOp.SUM)
-                old_logp_cpu = old_logp_gpu.cpu()
-                old_v_cpu = old_v_gpu.cpu()
-                del old_logp_gpu, old_v_gpu
+                torch.distributed.all_reduce(old_logp_dev, op=torch.distributed.ReduceOp.SUM)
+                torch.distributed.all_reduce(old_v_dev, op=torch.distributed.ReduceOp.SUM)
 
             # -- Pass 2: base_logp (adapter OFF) — distributed --
             if compute_base:
                 ac.lm.disable_adapter_layers()
                 try:
                     for bi in my_stats_indices:
-                        mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = stats_batch_cache[bi]
+                        mb_idx = stats_batches[bi]
+                        mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = pad_batch(
+                            mb_idx, seqs_cpu, prompt_lens, action_lens, tokenizer.pad_token_id
+                        )
                         mb_ids = mb_ids_cpu.to(device, non_blocking=True)
                         mb_attn = mb_attn_cpu.to(device, non_blocking=True)
 
@@ -860,28 +879,25 @@ def main():
                         mb_base_logp = logprob_action_tokens(
                             logits, mb_ids, mb_pl, mb_al, normalize_by_len=True,
                         )
-                        base_logp_cpu[mb_idx] = mb_base_logp.detach().cpu()
+                        base_logp_dev[mb_idx] = mb_base_logp.detach()
                         del logits, mb_base_logp, mb_ids, mb_attn, _
+                        del mb_ids_cpu, mb_attn_cpu
 
                     if world_size > 1:
-                        base_logp_gpu = base_logp_cpu.to(device)
-                        torch.distributed.all_reduce(base_logp_gpu, op=torch.distributed.ReduceOp.SUM)
-                        base_logp_cpu = base_logp_gpu.cpu()
-                        del base_logp_gpu
+                        torch.distributed.all_reduce(base_logp_dev, op=torch.distributed.ReduceOp.SUM)
                 finally:
                     ac.lm.enable_adapter_layers()
 
-        # Free stats cache if separate from train cache
-        if not unified_batches:
-            del stats_batch_cache
-
         t_stats = time.time()
 
-        # ---- 6. Compute advantages: returns - old_v, then normalize ----
-        adv_cpu = returns_cpu - old_v_cpu
-        adv_std = adv_cpu.std(unbiased=False)
+        # ---- 6. Compute advantages on GPU [DISTRIBUTED: all ranks in parallel] ----
+        # After all-reduce, every rank has identical old_v_dev → identical advantages.
+        returns_dev = returns_cpu.to(device)
+        adv_dev = returns_dev - old_v_dev
+        adv_std = adv_dev.std(unbiased=False)
         if adv_std > 1e-8:
-            adv_cpu = (adv_cpu - adv_cpu.mean()) / (adv_std + 1e-8)
+            adv_dev = (adv_dev - adv_dev.mean()) / (adv_std + 1e-8)
+        del old_v_dev  # No longer needed after advantage computation
 
         # ---- 7. PPO training [DISTRIBUTED: gradient accumulation + all-reduce] ----
         ac.train()
@@ -897,7 +913,7 @@ def main():
         for _epoch in range(args.ppo_epochs):
             # Shuffle the ORDER of mini-batches — same seed on all ranks for
             # deterministic sharding
-            batch_order = list(range(len(train_batch_cache)))
+            batch_order = list(range(len(train_batches)))
             rng = random.Random(it * 1000 + _epoch)
             rng.shuffle(batch_order)
 
@@ -908,14 +924,18 @@ def main():
             optim.zero_grad(set_to_none=True)
 
             for bi in my_batch_order:
-                mb_idx, mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = train_batch_cache[bi]
+                mb_idx = train_batches[bi]
+                mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = pad_batch(
+                    mb_idx, seqs_cpu, prompt_lens, action_lens, tokenizer.pad_token_id
+                )
 
                 mb_ids = mb_ids_cpu.to(device, non_blocking=True)
                 mb_attn = mb_attn_cpu.to(device, non_blocking=True)
-                mb_old_logp = old_logp_cpu[mb_idx].to(device)
-                mb_returns = returns_cpu[mb_idx].to(device)
-                mb_adv = adv_cpu[mb_idx].to(device)
-                mb_base_logp = base_logp_cpu[mb_idx].to(device) if base_logp_cpu is not None else None
+                mb_idx_dev = torch.tensor(mb_idx, dtype=torch.long, device=device)
+                mb_old_logp = old_logp_dev[mb_idx_dev]
+                mb_returns = returns_dev[mb_idx_dev]
+                mb_adv = adv_dev[mb_idx_dev]
+                mb_base_logp = base_logp_dev[mb_idx_dev] if base_logp_dev is not None else None
 
                 # Forward pass through actor-critic
                 logits, last_h = ac(input_ids=mb_ids, attention_mask=mb_attn)
@@ -962,7 +982,8 @@ def main():
                 ratio_mean_acc += float(ratio_mean_val.item())
 
                 del mb_ids, mb_attn, logits, last_h, new_logp, new_v, ratio, loss
-                del mb_old_logp, mb_returns, mb_adv, mb_base_logp
+                del mb_old_logp, mb_returns, mb_adv, mb_base_logp, mb_idx_dev
+                del mb_ids_cpu, mb_attn_cpu
 
             # All-reduce accumulated gradients across ranks
             allreduce_coalesced_grads(trainable_params)
@@ -998,8 +1019,9 @@ def main():
 
         t_train1 = time.time()
 
-        # Free pre-padded batch cache
-        del train_batch_cache
+        # Free GPU stat tensors and CPU sequence cache
+        del old_logp_dev, adv_dev, returns_dev, seqs_cpu
+        base_logp_dev = None  # Free GPU memory if allocated
 
         # ---- 8. Logging (rank 0 only) ----
         if is_main_rank():

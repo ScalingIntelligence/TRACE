@@ -155,14 +155,22 @@ def collect_grpo_rollouts(
         # Each step tuple: (msgs, act, pid, completion, tools)
         episode_steps: List[List[Tuple[list, Optional[str], int, str, Optional[list]]]] = []
 
+        difficulties: List[Optional[str]] = []
         for g_idx, g_seed in enumerate(group_seeds):
             for s_idx in range(group_size):
                 env = game_spec.make_env(**env_kwargs)
-                env.reset(g_seed)  # Same seed within group!
+                # Assign random difficulty for adversarial_policy game
+                difficulty = None
+                if game_spec.name == "adversarial_policy":
+                    difficulty = rng.choice(["easy", "medium", "hard"])
+                    env.reset(g_seed, user_difficulty=difficulty)
+                else:
+                    env.reset(g_seed)  # Same seed within group!
                 envs.append(env)
                 g_ids.append(g_idx)
                 gm_ids.append(base_seed * 1_000_000 + g_idx * 1000 + s_idx)
                 episode_steps.append([])
+                difficulties.append(difficulty)
 
         # Play all games in parallel
         while True:
@@ -230,7 +238,7 @@ def collect_grpo_rollouts(
             invalid_games += 1 if env.invalid_player is not None else 0
             p0_reward_sum += float(env.rewards.get(0, 0.0))
 
-            logger.log({
+            log_entry = {
                 "type": "game_end",
                 "game": game_spec.name,
                 "game_id": gm_ids[i],
@@ -238,7 +246,10 @@ def collect_grpo_rollouts(
                 "rewards": env.rewards,
                 "invalid_player": env.invalid_player,
                 "timestamp": time.time(),
-            })
+            }
+            if difficulties[i] is not None:
+                log_entry["user_difficulty"] = difficulties[i]
+            logger.log(log_entry)
 
             for msgs, act, pid, completion, tools in episode_steps[i]:
                 samples.append(GRPOSample(
@@ -257,7 +268,12 @@ def collect_grpo_rollouts(
             for s_idx in range(group_size):
                 game_id = base_seed * 1_000_000 + g_idx * 1000 + s_idx
                 env = game_spec.make_env(**env_kwargs)
-                env.reset(g_seed)
+                # Assign random difficulty for adversarial_policy game
+                if game_spec.name == "adversarial_policy":
+                    difficulty = rng.choice(["easy", "medium", "hard"])
+                    env.reset(g_seed, user_difficulty=difficulty)
+                else:
+                    env.reset(g_seed)
 
                 ep_steps: List[Tuple[list, Optional[str], int, str, Optional[list]]] = []
                 while not env.done:
