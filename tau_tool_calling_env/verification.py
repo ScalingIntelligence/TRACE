@@ -7,8 +7,7 @@ Uses the EXACT same verification mechanism as tau2-bench:
 
 Reward: DB_check × COMMUNICATE_check (same as tau bench).
   1.0 = both pass
-  0.5 = one passes (partial)
-  0.0 = both fail
+  0.0 = either fails
 """
 
 import sys
@@ -156,9 +155,9 @@ def _compute_action_reward(
     if db_pass and comm_pass:
         return 1.0, "Success: DB correct + communication complete"
     elif db_pass and not comm_pass:
-        return 0.5, "Partial: DB correct but missing communication"
+        return 0.0, "Failure: DB correct but missing communication"
     elif not db_pass and comm_pass:
-        return 0.0, f"Failure: DB mismatch (communicated correctly)"
+        return 0.0, "Failure: DB mismatch (communicated correctly)"
     else:
         return 0.0, "Failure: DB mismatch + missing communication"
 
@@ -186,23 +185,13 @@ def _compute_refusal_reward(
     if writes:
         return -1.0, f"Failure: Made write action ({writes[0]['name']}) on refusal task"
 
-    # No writes — correct refusal
+    # No writes — correct refusal. Check communication.
     comm_pass = check_communicate_info(scenario.communicate_info, conversation)
 
     if comm_pass:
         return 1.0, "Success: Correct refusal with explanation"
 
-    # Check if agent at least looked up info
-    read_tools = {
-        "get_user_details", "get_reservation_details", "get_order_details",
-        "get_product_details", "find_user_id_by_email", "find_user_id_by_name_zip",
-    }
-    has_lookup = any(tc.get("name") in read_tools for tc in tool_calls)
-
-    if has_lookup:
-        return 0.5, "Partial: Correct refusal with lookups but missing communication"
-
-    return 0.0, "No meaningful action taken on refusal task"
+    return 0.0, "Failure: Refused correctly but missing communication"
 
 
 def _compute_info_reward(

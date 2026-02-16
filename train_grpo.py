@@ -120,6 +120,9 @@ def collect_grpo_rollouts(
     base_seed: int,
     logger: JSONLLogger,
     env_kwargs: Optional[Dict[str, Any]] = None,
+    temperature_range: Optional[List[float]] = None,
+    prefix_ratio: float = 0.0,
+    compact_tools: bool = False,
 ) -> Tuple[List[GRPOSample], Dict[str, float]]:
     """
     Collect rollouts with the GRPO inner/outer loop structure.
@@ -128,6 +131,14 @@ def collect_grpo_rollouts(
     played from the SAME random seed.  Within a group, games differ only
     because of temperature sampling — the model explores different strategies
     from an identical starting position.
+
+    Args:
+        temperature_range: If set, each game gets a random temperature from
+            this list (e.g. [0.5, 0.7, 1.0]) instead of the single `temperature`.
+        prefix_ratio: Probability (0-1) of auto-playing lookup prefix per group
+            (adversarial_policy game only). 0.0 = never, 1.0 = always.
+        compact_tools: If True, use compressed tool schemas (descriptions stripped)
+            for both generation and training. Reduces prompt length by ~60%.
 
     Returns:
         samples:  List of GRPOSample with group membership tagged.
@@ -156,7 +167,14 @@ def collect_grpo_rollouts(
         episode_steps: List[List[Tuple[list, Optional[str], int, str, Optional[list]]]] = []
 
         difficulties: List[Optional[str]] = []
+        game_temps: List[float] = []       # per-game temperature
+        prefix_turns: List[int] = []       # per-game prefix count
         for g_idx, g_seed in enumerate(group_seeds):
+            # Per-group prefix decision (same for all rollouts in group)
+            use_prefix = False
+            if game_spec.name == "adversarial_policy" and prefix_ratio > 0:
+                use_prefix = rng.random() < prefix_ratio
+
             for s_idx in range(group_size):
                 env = game_spec.make_env(**env_kwargs)
                 # Assign random difficulty for adversarial_policy game
@@ -166,11 +184,24 @@ def collect_grpo_rollouts(
                     env.reset(g_seed, user_difficulty=difficulty)
                 else:
                     env.reset(g_seed)  # Same seed within group!
+
+                # Auto-play prefix lookups if enabled for this group
+                n_prefix = 0
+                if use_prefix and hasattr(env, "auto_play_prefix"):
+                    n_prefix = env.auto_play_prefix()
+
                 envs.append(env)
                 g_ids.append(g_idx)
                 gm_ids.append(base_seed * 1_000_000 + g_idx * 1000 + s_idx)
                 episode_steps.append([])
                 difficulties.append(difficulty)
+
+                # Assign per-game temperature
+                if temperature_range:
+                    game_temps.append(rng.choice(temperature_range))
+                else:
+                    game_temps.append(temperature)
+                prefix_turns.append(n_prefix)
 
         # Play all games in parallel
         while True:
@@ -187,17 +218,32 @@ def collect_grpo_rollouts(
                 obs = env.observe(pid)
                 legal = env.legal_actions()
                 msgs = messages_for_game(pid, obs, game_spec, env=env)
-                tools = tools_for_game(env)
+                tools = tools_for_game(env, compact=compact_tools)
                 prompts.append(build_prompt_text(tokenizer, msgs, tools=tools))
                 meta.append((i, pid, obs, legal, msgs, tools))
 
             t0 = time.time()
-            completions = backend.generate(
-                prompts,
-                temperature=temperature,
-                max_new_tokens=max_new_tokens,
-                game_spec=game_spec,
-            )
+
+            # Group active games by temperature for sub-batch generation
+            temp_groups: Dict[float, List[Tuple[int, str]]] = {}
+            for j, (i, pid, obs, legal, msgs, tools) in enumerate(meta):
+                t = game_temps[i]
+                if t not in temp_groups:
+                    temp_groups[t] = []
+                temp_groups[t].append((j, prompts[j]))
+
+            completions: List[Optional[str]] = [None] * len(prompts)
+            for t, items in temp_groups.items():
+                batch_prompts = [p for _, p in items]
+                results = backend.generate(
+                    batch_prompts,
+                    temperature=t,
+                    max_new_tokens=max_new_tokens,
+                    game_spec=game_spec,
+                )
+                for k, (j, _) in enumerate(items):
+                    completions[j] = results[k]
+
             t1 = time.time()
 
             # Phase 1: Extract actions + bookkeeping (sequential)
@@ -245,6 +291,8 @@ def collect_grpo_rollouts(
                 "group_id": g_ids[i],
                 "rewards": env.rewards,
                 "invalid_player": env.invalid_player,
+                "temperature": game_temps[i],
+                "prefix_turns": prefix_turns[i],
                 "timestamp": time.time(),
             }
             if difficulties[i] is not None:
@@ -265,6 +313,11 @@ def collect_grpo_rollouts(
     else:
         # --- Sequential mode (HF local) ---
         for g_idx, g_seed in enumerate(group_seeds):
+            # Per-group prefix decision
+            use_prefix = False
+            if game_spec.name == "adversarial_policy" and prefix_ratio > 0:
+                use_prefix = rng.random() < prefix_ratio
+
             for s_idx in range(group_size):
                 game_id = base_seed * 1_000_000 + g_idx * 1000 + s_idx
                 env = game_spec.make_env(**env_kwargs)
@@ -274,6 +327,14 @@ def collect_grpo_rollouts(
                     env.reset(g_seed, user_difficulty=difficulty)
                 else:
                     env.reset(g_seed)
+
+                # Auto-play prefix lookups if enabled
+                n_prefix = 0
+                if use_prefix and hasattr(env, "auto_play_prefix"):
+                    n_prefix = env.auto_play_prefix()
+
+                # Assign per-game temperature
+                game_temp = rng.choice(temperature_range) if temperature_range else temperature
 
                 ep_steps: List[Tuple[list, Optional[str], int, str, Optional[list]]] = []
                 while not env.done:
@@ -286,18 +347,19 @@ def collect_grpo_rollouts(
                         backend.tokenizer,
                         pid,
                         obs,
-                        temperature=temperature,
+                        temperature=game_temp,
                         max_new_tokens=max_new_tokens,
                         device=backend.device,
                         game_spec=game_spec,
                         env=env,
+                        compact_tools=compact_tools,
                     )
 
                     act = game_spec.extract_action(completion, legal)
                     if act is None:
                         extraction_failures += 1
 
-                    tools = tools_for_game(env)
+                    tools = tools_for_game(env, compact=compact_tools)
                     response_lengths.append(len(completion))
                     ep_steps.append((messages_for_game(pid, obs, game_spec, env=env), act, pid, completion, tools))
                     env.step(act)
@@ -473,6 +535,13 @@ def parse_grpo_args():
     # -- Generation --
     parser.add_argument("--temperature", type=float, default=0.7,
         help="Sampling temperature for rollouts")
+    parser.add_argument("--temperature-range", type=str, default=None,
+        help="Comma-separated temperatures for per-game variation (e.g. '0.5,0.7,1.0'). "
+             "Overrides --temperature when set.")
+    parser.add_argument("--prefix-ratio", type=float, default=0.0,
+        help="Probability of auto-playing lookup prefix per group (0.0-1.0, adversarial_policy only)")
+    parser.add_argument("--compact-tools", action="store_true", default=False,
+        help="Use compressed tool schemas for training (strips descriptions, ~60%% smaller prompts)")
     parser.add_argument("--normalize-by-len", action="store_true", default=False,
         help="Normalize logprobs by action length (NOT recommended per rl4rl analysis)")
 
@@ -562,6 +631,11 @@ def main():
     output_dir_path = env_config["output_dir_path"]
     rollout_log_path = env_config["rollout_log_path"]
 
+    # Parse temperature range
+    temperature_range: Optional[List[float]] = None
+    if args.temperature_range:
+        temperature_range = [float(t.strip()) for t in args.temperature_range.split(",")]
+
     total_games_per_iter = args.group_size * args.groups_per_batch
 
     print("=" * 60)
@@ -579,8 +653,12 @@ def main():
     print(f"  Use clipping:        {args.use_clipping}")
     print(f"  Normalize by len:    {args.normalize_by_len}")
     print(f"  Temperature:         {args.temperature}")
+    if temperature_range:
+        print(f"  Temperature range:   {temperature_range}")
     if game_spec.name == "adversarial_policy":
         print(f"  Adversarial ratio:   {args.adversarial_ratio}")
+        print(f"  Prefix ratio:        {args.prefix_ratio}")
+    print(f"  Compact tools:       {args.compact_tools}")
     print(f"  Max gen tokens:      {max_gen_tokens}")
     print(f"  Device:              {device}")
     print(f"  Output dir:          {output_dir_path}")
@@ -669,6 +747,9 @@ def main():
             "kl_coef": args.kl_coef,
             "use_clipping": args.use_clipping,
             "temperature": args.temperature,
+            "temperature_range": temperature_range,
+            "prefix_ratio": args.prefix_ratio,
+            "compact_tools": args.compact_tools,
         })
         print("[wandb] Initialized")
 
@@ -765,6 +846,9 @@ def main():
             base_seed=it,
             logger=rollout_logger,
             env_kwargs=env_kwargs,
+            temperature_range=temperature_range,
+            prefix_ratio=args.prefix_ratio,
+            compact_tools=args.compact_tools,
         )
         t_collect1 = time.time()
 

@@ -4,6 +4,7 @@ venv/
 env/
 .env/
 ENV/
+game_rollouts/
 
 # Python
 __pycache__/

@@ -52,6 +52,15 @@ export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
 vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 9010   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.85   --enable-auto-tool-choice   --tool-call-parser hermes 
 
 
+
+
+
+export VLLM_RPC_TIMEOUT=2000
+export CUDA_VISIBLE_DEVICES=2
+export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 9090   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.85   --enable-auto-tool-choice   --tool-call-parser hermes 
+
+
 conda activate games
 export VLLM_RPC_TIMEOUT=2000
 export CUDA_VISIBLE_DEVICES=6
@@ -88,16 +97,16 @@ vllm serve Qwen/Qwen3-4B-Instruct-2507 \
 
 
 
-  CUDA_VISIBLE_DEVICES=2,3,4,5,6,7 \
+  CUDA_VISIBLE_DEVICES=6,7 \
   NCCL_P2P_DISABLE=1 \
   WANDB_API_KEY=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 \
-  VLLM_BASE_URLS=http://localhost:8000 \
+  VLLM_BASE_URLS=http://localhost:8090 \
   VLLM_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507 \
   VLLM_TIMEOUT_S=2000 \
   VLLM_ALLOW_RUNTIME_LORA_UPDATING=True \
   VLLM_RPC_TIMEOUT=2000 \
   PYTHONUNBUFFERED=1 \
-  torchrun --nproc_per_node=6 train_grpo_optimized.py \
-    --game adversarial_policy \
-    --user-llm-url http://localhost:9000/v1 \
+  torchrun --nproc_per_node=2 train_grpo_optimized.py \
+    --game tau_tool_calling \
+    --user-llm-url http://localhost:9010/v1 \
     --user-llm-model "Qwen/Qwen3-30B-A3B-Instruct-2507"

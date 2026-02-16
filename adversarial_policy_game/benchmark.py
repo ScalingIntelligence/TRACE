@@ -317,7 +317,7 @@ def main():
                         help="Starting seed")
     parser.add_argument("--max-tokens", type=int, default=512,
                         help="Max tokens per generation")
-    parser.add_argument("--adversarial-ratio", type=float, default=0.4,
+    parser.add_argument("--adversarial-ratio", type=float, default=0.8,
                         help="Fraction adversarial vs cooperative (0.0=all coop, 1.0=all adv)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Print per-episode details")
@@ -347,7 +347,7 @@ def main():
     )
 
     game = AdversarialPolicyGame(
-        max_steps=30,
+        max_steps=20,
         user_client=user_client,
         adversarial_ratio=args.adversarial_ratio,
     )

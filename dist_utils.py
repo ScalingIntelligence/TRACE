@@ -26,7 +26,11 @@ def dist_init() -> Tuple[int, int, int]:
         world_size = int(os.environ["WORLD_SIZE"])
         local_rank = int(os.environ.get("LOCAL_RANK", rank))
         torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend="nccl")
+        timeout_mins = int(os.environ.get("NCCL_TIMEOUT_MINS", "180"))
+        dist.init_process_group(
+            backend="nccl",
+            timeout=timedelta(minutes=timeout_mins),
+        )
         return rank, world_size, local_rank
     return 0, 1, 0
 
@@ -88,13 +92,18 @@ def dist_nccl_init() -> None:
     Call after model loading is complete, paired with dist_pre_init().
     Passes device_id to avoid the 'Guessing device ID' NCCL warning/hang.
     No-op if already initialized or not running under torchrun.
+
+    Timeout must be long enough to cover rank 0's rollout collection phase,
+    during which non-zero ranks idle at broadcast_objects(). Default 180 min;
+    override with NCCL_TIMEOUT_MINS env var.
     """
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ and not dist.is_initialized():
         local_rank = int(os.environ.get("LOCAL_RANK", os.environ["RANK"]))
+        timeout_mins = int(os.environ.get("NCCL_TIMEOUT_MINS", "180"))
         dist.init_process_group(
             backend="nccl",
             device_id=torch.device(f"cuda:{local_rank}"),
-            timeout=timedelta(minutes=30),
+            timeout=timedelta(minutes=timeout_mins),
         )
 
 

@@ -358,7 +358,7 @@ def parse_ppo_args_optimized():
         help="Max tokens for user LLM generation")
 
     # -- Adversarial policy game --
-    parser.add_argument("--adversarial-ratio", type=float, default=0.2,
+    parser.add_argument("--adversarial-ratio", type=float, default=0.6,
         help="Ratio of adversarial vs cooperative scenarios (0.0-1.0)")
 
     # -- Training sample optimizations --

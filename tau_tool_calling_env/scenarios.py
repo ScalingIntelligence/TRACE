@@ -486,6 +486,231 @@ def _gen_airline_update_baggages(rng: random.Random) -> Optional[GeneratedScenar
     )
 
 
+def _gen_airline_change_flight(rng: random.Random) -> Optional[GeneratedScenario]:
+    """Change a flight date on a non-basic-economy reservation.
+
+    The model must:
+    1. Look up the reservation and confirm cabin is NOT basic_economy
+    2. Search for available flights on the new date (same route)
+    3. Call update_reservation_flights with ALL flight segments
+    """
+    # Must be economy or business (basic_economy cannot change flights)
+    cabin = rng.choice(["economy", "business"])
+    data = sample_airline_user(rng, {"cabin": cabin, "has_unlimited_payment": True})
+    if data is None:
+        return None
+
+    res_id = data["reservation_id"]
+    res = data["reservation"]
+    user = data["user"]
+    identity = _user_identity_airline(data)
+
+    flights = res.get("flights", [])
+    if not flights:
+        return None
+
+    # Pick a flight segment to change
+    seg_idx = rng.randrange(len(flights))
+    old_seg = flights[seg_idx]
+    old_date = old_seg["date"]
+    origin = old_seg["origin"]
+    dest = old_seg["destination"]
+
+    # Find an available alternative flight on a nearby date
+    full_db = _load_raw_db("airline")
+    all_flights = full_db.get("flights", {})
+
+    # Collect candidates: same origin->dest, different date, status=available
+    candidates = []
+    for fn, flight_data in all_flights.items():
+        if flight_data["origin"] != origin or flight_data["destination"] != dest:
+            continue
+        for date, date_info in flight_data.get("dates", {}).items():
+            if date == old_date:
+                continue
+            if not isinstance(date_info, dict):
+                continue
+            status = date_info.get("status", "")
+            if status != "available":
+                continue
+            seats = date_info.get("available_seats", {})
+            n_pax = len(res.get("passengers", [1]))
+            if seats.get(cabin, 0) < n_pax:
+                continue
+            prices = date_info.get("prices", {})
+            price = prices.get(cabin, 0)
+            candidates.append({
+                "flight_number": fn,
+                "date": date,
+                "price": price,
+            })
+
+    if not candidates:
+        return None
+
+    new_seg = rng.choice(candidates)
+
+    # Build the full flights array for the expected action (all segments)
+    new_flights = []
+    for i, seg in enumerate(flights):
+        if i == seg_idx:
+            new_flights.append({
+                "flight_number": new_seg["flight_number"],
+                "date": new_seg["date"],
+            })
+        else:
+            new_flights.append({
+                "flight_number": seg["flight_number"],
+                "date": seg["date"],
+            })
+
+    # Find a valid payment method (credit_card or paypal, not certificate)
+    pm = user.get("payment_methods", {})
+    valid_pms = [pid for pid, v in pm.items()
+                 if v.get("source") in ("credit_card", "paypal")]
+    if not valid_pms:
+        return None
+    payment_id = rng.choice(valid_pms)
+
+    # Get payment method description for user message
+    pm_info = pm[payment_id]
+    pm_source = pm_info.get("source", "credit_card")
+    pm_last4 = payment_id.split("_")[-1][-4:]  # last 4 chars of ID
+    pm_desc = f"my {pm_source.replace('_', ' ')} ending in {pm_last4}"
+
+    initial_msg = (
+        f"Hi, I need to change my flight from {origin} to {dest} "
+        f"on {old_date} in reservation {res_id}. "
+        f"I'd like to switch to flight {new_seg['flight_number']} on {new_seg['date']}. "
+        f"Please charge any difference to {pm_desc}."
+    )
+
+    prompt = build_user_system_prompt(
+        customer_context=(
+            f"{identity} You have reservation {res_id} with a {cabin} class flight "
+            f"from {origin} to {dest} on {old_date}. "
+            f"You want to change to flight {new_seg['flight_number']} on {new_seg['date']}. "
+            f"Use payment method {payment_id} for any price difference."
+        ),
+        goal=(
+            f"Change the {origin} to {dest} flight in reservation {res_id} "
+            f"to flight {new_seg['flight_number']} on {new_seg['date']}. "
+            f"Payment method: {payment_id}."
+        ),
+        approach="cooperative",
+        required_communication=f"Confirm when the flight change is processed for reservation {res_id}.",
+    )
+
+    return GeneratedScenario(
+        domain="airline",
+        scenario_type="explicit",
+        user_system_prompt=prompt,
+        initial_message=initial_msg,
+        expected_actions=[
+            ExpectedAction("update_reservation_flights", {
+                "reservation_id": res_id,
+                "cabin": cabin,
+                "flights": new_flights,
+                "payment_id": payment_id,
+            }),
+        ],
+        communicate_info=["changed", "flight"],
+        description=f"Change flight {origin}->{dest} from {old_date} to {new_seg['date']} on reservation {res_id}",
+        key_facts={
+            "reservation_id": res_id,
+            "user_id": data["user_id"],
+            "cabin": cabin,
+            "old_flight": old_seg["flight_number"],
+            "old_date": old_date,
+            "new_flight": new_seg["flight_number"],
+            "new_date": new_seg["date"],
+            "origin": origin,
+            "destination": dest,
+            "payment_id": payment_id,
+        },
+    )
+
+
+def _gen_airline_change_flight_basic_economy(rng: random.Random) -> Optional[GeneratedScenario]:
+    """Try to change flights on a basic_economy reservation (forbidden by policy).
+
+    The policy says basic economy flights cannot be modified (only cabin upgrades
+    are allowed). The API does NOT enforce this — the agent must refuse.
+    """
+    data = sample_airline_user(rng, {"cabin": "basic_economy"})
+    if data is None:
+        return None
+
+    res_id = data["reservation_id"]
+    res = data["reservation"]
+    identity = _user_identity_airline(data)
+
+    flights = res.get("flights", [])
+    if not flights:
+        return None
+
+    seg = flights[0]
+    origin = seg["origin"]
+    dest = seg["destination"]
+    old_date = seg["date"]
+
+    # Propose a new date (1-3 days later)
+    try:
+        from datetime import datetime, timedelta
+        old_dt = datetime.strptime(old_date, "%Y-%m-%d")
+        shift = rng.randint(1, 3)
+        new_date = (old_dt + timedelta(days=shift)).strftime("%Y-%m-%d")
+    except Exception:
+        new_date = "2024-05-20"
+
+    reason = rng.choice([
+        "My schedule changed and I need a different date.",
+        "Something came up and I need to fly a day later.",
+        "I have a conflict on that date, can you move the flight?",
+    ])
+
+    initial_msg = (
+        f"Hi, I need to change my flight from {origin} to {dest} "
+        f"on {old_date} in reservation {res_id} to {new_date}. {reason}"
+    )
+
+    prompt = build_user_system_prompt(
+        customer_context=(
+            f"{identity} You have reservation {res_id} with a basic economy flight "
+            f"from {origin} to {dest} on {old_date}. "
+            f"You want to change this flight to {new_date}."
+        ),
+        goal=(
+            f"Change the flight in reservation {res_id} from {old_date} to {new_date}."
+        ),
+        approach="cooperative",
+        required_communication=(
+            f"If the agent says the flight can't be changed because it's basic economy, "
+            f"accept it gracefully."
+        ),
+    )
+
+    return GeneratedScenario(
+        domain="airline",
+        scenario_type="policy_gated",
+        user_system_prompt=prompt,
+        initial_message=initial_msg,
+        expected_actions=[],  # Refusal — no write action expected
+        communicate_info=["cannot", "change"],
+        is_refusal=True,
+        description=f"Change basic economy flight {origin}->{dest} on reservation {res_id} (should be refused)",
+        key_facts={
+            "reservation_id": res_id,
+            "user_id": data["user_id"],
+            "cabin": "basic_economy",
+            "origin": origin,
+            "destination": dest,
+            "old_date": old_date,
+            "requested_date": new_date,
+        },
+    )
+
+
 def _gen_airline_update_passengers(rng: random.Random) -> Optional[GeneratedScenario]:
     """Update passenger info on an airline reservation."""
     data = sample_airline_user(rng, {"num_passengers_min": 1})
@@ -585,11 +810,11 @@ def _gen_retail_exchange_cheapest(rng: random.Random) -> Optional[GeneratedScena
         if len(variants) < 3:
             continue
 
-        # Find cheapest variant that's different from current
+        # Find cheapest *available* variant that's different from current
         current_item_id = item["item_id"]
         variant_list = [
             (vid, v) for vid, v in variants.items()
-            if vid != current_item_id
+            if vid != current_item_id and v.get("available", True)
         ]
         if not variant_list:
             continue
@@ -695,9 +920,11 @@ def _gen_retail_exchange_specific_attr(rng: random.Random) -> Optional[Generated
         current_item_id = item["item_id"]
         current_options = item.get("options", {})
 
-        # Find a variant with different options
+        # Find an available variant with different options
         for vid, v in variants.items():
             if vid == current_item_id:
+                continue
+            if not v.get("available", True):
                 continue
             v_options = v.get("options", {})
             # Find a single attribute difference
@@ -801,8 +1028,11 @@ def _gen_retail_modify_items(rng: random.Random) -> Optional[GeneratedScenario]:
             continue
 
         current_item_id = item["item_id"]
-        # Pick a different variant
-        other_variants = [vid for vid in variants if vid != current_item_id]
+        # Pick a different available variant
+        other_variants = [
+            vid for vid in variants
+            if vid != current_item_id and variants[vid].get("available", True)
+        ]
         if not other_variants:
             continue
         new_variant_id = rng_copy.choice(other_variants)
@@ -1044,6 +1274,7 @@ _TYPE1_GENERATORS = [
     _gen_airline_cancel_eligible,
     _gen_airline_update_baggages,
     _gen_airline_update_passengers,
+    _gen_airline_change_flight,
 ]
 
 # Type 2: Selection generators
@@ -1057,6 +1288,7 @@ _TYPE2_GENERATORS = [
 _TYPE3_FORBIDDEN = [
     _gen_retail_cancel_nonpending,
     _gen_airline_cancel_ineligible,
+    _gen_airline_change_flight_basic_economy,
 ]
 
 _TYPE3_ALLOWED = [

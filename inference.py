@@ -36,15 +36,22 @@ def messages_for_game(player_id: int, observation: str, game_spec: GameSpec, env
     ]
 
 
-def tools_for_game(env=None) -> Optional[list]:
+def tools_for_game(env=None, compact: bool = False) -> Optional[list]:
     """Get OpenAI-format tool schemas from env if it supports structured messages.
 
     When tools are returned, they should be passed to apply_chat_template(tools=...)
     so the tokenizer formats them identically to how vLLM's /chat/completions
     endpoint formats them during evaluation.
+
+    Args:
+        compact: If True, return compressed schemas (descriptions stripped) for
+            training. Reduces prompt length by ~60% with no loss of structural info.
     """
     if env is not None and getattr(env, 'supports_structured_messages', False):
-        schemas = env.get_tool_schemas()
+        if compact and hasattr(env, 'get_tool_schemas_compact'):
+            schemas = env.get_tool_schemas_compact()
+        else:
+            schemas = env.get_tool_schemas()
         return schemas if schemas else None
     return None
 
@@ -96,6 +103,7 @@ def generate_completion(
     device: str,
     game_spec: Optional[GameSpec] = None,
     env=None,
+    compact_tools: bool = False,
 ) -> str:
     """
     HF local generation. Returns the full completion text.
@@ -109,7 +117,7 @@ def generate_completion(
         max_gen_tokens=max_new_tokens,
     )
     msgs = messages_for_game(player_id, observation, game_spec, env=env)
-    tools = tools_for_game(env)
+    tools = tools_for_game(env, compact=compact_tools)
     kwargs = dict(
         add_generation_prompt=True,
         return_tensors="pt",

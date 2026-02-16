@@ -20,6 +20,44 @@ from .constants import (
 from .llm_user import LLMUser, UserLLMClient, adjust_user_difficulty, DIFFICULTY_CONFIGS
 
 
+# Read-only tools that can be safely auto-played from ground truth
+_PREFIX_TOOLS = frozenset({
+    "get_user_details", "get_reservation_details",
+    "get_order_details", "find_user_id_by_email",
+    "find_user_id_by_name_zip",
+})
+
+
+def _strip_descriptions(obj):
+    """Recursively strip 'description' and 'title' keys from a schema dict.
+
+    Keeps all structural info (types, required, enum, $defs/$ref) intact.
+    """
+    if isinstance(obj, dict):
+        return {
+            k: _strip_descriptions(v)
+            for k, v in obj.items()
+            if k not in ("description", "title")
+        }
+    if isinstance(obj, list):
+        return [_strip_descriptions(item) for item in obj]
+    return obj
+
+
+def compress_tool_schemas(schemas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Compress OpenAI-format tool schemas for training by stripping descriptions.
+
+    Removes verbose description/title fields while keeping all structural info
+    (parameter names, types, required, enums, $defs/$ref). This cuts schema size
+    by ~60% without losing information the model needs to generate valid tool calls.
+    """
+    return _strip_descriptions(schemas)
+
+
+# Cache compressed schemas per domain to avoid recomputing
+_COMPACT_SCHEMAS_CACHE: Dict[str, List[Dict[str, Any]]] = {}
+
+
 # =====================================================================
 # Main Game Class
 # =====================================================================
@@ -124,6 +162,37 @@ class AdversarialPolicyGame:
         self.rewards = {0: 0.0}
         self.invalid_player = None
 
+    def auto_play_prefix(self) -> int:
+        """Auto-execute lookup actions from ground truth to skip past boilerplate.
+
+        Only auto-plays read-only lookups (get_user_details, get_reservation_details,
+        etc.) that appear in ground_truth.required_actions with concrete arguments.
+        Does NOT increment _step_count — these are "free" turns, not agent decisions.
+
+        Returns number of actions auto-played.
+        """
+        if self._scenario is None or self.done:
+            return 0
+
+        count = 0
+        for action in self._scenario.ground_truth.required_actions:
+            name = action.get("name", "")
+            args = action.get("arguments")
+            if name not in _PREFIX_TOOLS or args is None:
+                continue
+
+            # Execute the lookup
+            tool_call = {"name": name, "arguments": args}
+            self._conversation.append({"role": "tool_call", "text": json.dumps(tool_call)})
+            try:
+                result = self._tools.execute(name, args)
+            except Exception as e:
+                result = f"Error: {e}"
+            self._conversation.append({"role": "tool_result", "text": result})
+            count += 1
+
+        return count
+
     # -----------------------------------------------------------------
     # Structured access for function-calling eval
     # -----------------------------------------------------------------
@@ -157,6 +226,19 @@ class AdversarialPolicyGame:
         if sc.domain == "airline":
             return AIRLINE_TOOL_SCHEMAS
         return RETAIL_TOOL_SCHEMAS
+
+    def get_tool_schemas_compact(self) -> List[Dict[str, Any]]:
+        """Return compressed tool schemas for training (descriptions stripped).
+
+        Cached per domain so compression only happens once.
+        """
+        sc = self._scenario
+        if sc is None:
+            return []
+        domain = sc.domain
+        if domain not in _COMPACT_SCHEMAS_CACHE:
+            _COMPACT_SCHEMAS_CACHE[domain] = compress_tool_schemas(self.get_tool_schemas())
+        return _COMPACT_SCHEMAS_CACHE[domain]
 
     def get_messages(self) -> List[Dict[str, Any]]:
         """Return conversation as list of chat-API-format messages.

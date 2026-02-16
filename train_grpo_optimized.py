@@ -351,6 +351,13 @@ def parse_grpo_args_optimized():
     # -- Generation --
     parser.add_argument("--temperature", type=float, default=1.0,
         help="Sampling temperature for rollouts")
+    parser.add_argument("--temperature-range", type=str, default=None,
+        help="Comma-separated temperatures for per-game variation (e.g. '0.5,0.7,1.0'). "
+             "Overrides --temperature when set.")
+    parser.add_argument("--prefix-ratio", type=float, default=0.0,
+        help="Probability of auto-playing lookup prefix per group (0.0-1.0, adversarial_policy only)")
+    parser.add_argument("--compact-tools", action="store_true", default=False,
+        help="Use compressed tool schemas for training (strips descriptions, ~60%% smaller prompts)")
     parser.add_argument("--normalize-by-len", action="store_true",
         help="Normalize logprobs by action length")
 
@@ -381,7 +388,7 @@ def parse_grpo_args_optimized():
         help="Max tokens for user LLM generation")
 
     # -- Adversarial policy game --
-    parser.add_argument("--adversarial-ratio", type=float, default=0.2,
+    parser.add_argument("--adversarial-ratio", type=float, default=0.6,
         help="Ratio of adversarial vs cooperative scenarios (0.0-1.0). "
              "At 0.2, 20%% adversarial (T1-T12) and 80%% cooperative (T13-T21). "
              "Reflects real tau2-bench distribution (~16%% adversarial).")
@@ -483,6 +490,11 @@ def main():
     output_dir_path = env_config["output_dir_path"]
     rollout_log_path = env_config["rollout_log_path"]
 
+    # Parse temperature range
+    temperature_range: Optional[List[float]] = None
+    if args.temperature_range:
+        temperature_range = [float(t.strip()) for t in args.temperature_range.split(",")]
+
     total_games_per_iter = args.group_size * args.groups_per_batch
 
     print("=" * 60)
@@ -500,10 +512,14 @@ def main():
     print(f"  Use clipping:        {args.use_clipping}")
     print(f"  Normalize by len:    {args.normalize_by_len}")
     print(f"  Temperature:         {args.temperature}")
+    if temperature_range:
+        print(f"  Temperature range:   {temperature_range}")
     if game_spec.name == "adversarial_policy":
         print(f"  Adversarial ratio:   {args.adversarial_ratio}")
+        print(f"  Prefix ratio:        {args.prefix_ratio}")
     if game_spec.name == "tau_tool_calling":
         print(f"  Domain filter:       {args.tau_domain or 'both'}")
+    print(f"  Compact tools:       {args.compact_tools}")
     print(f"  Max gen tokens:      {max_gen_tokens}")
     print(f"  Device:              {device}")
     print(f"  Output dir:          {output_dir_path}")
@@ -735,6 +751,9 @@ def main():
                 base_seed=it,
                 logger=rollout_logger,
                 env_kwargs=env_kwargs,
+                temperature_range=temperature_range,
+                prefix_ratio=args.prefix_ratio,
+                compact_tools=args.compact_tools,
             )
             t_collect1 = time.time()
         else:
