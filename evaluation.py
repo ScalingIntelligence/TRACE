@@ -566,6 +566,7 @@ def evaluate_tau2_bench(
     out_root.mkdir(parents=True, exist_ok=True)
 
     logs: Dict[str, float] = {}
+    saved_eval_files: List[Path] = []  # paths of copied simulation artifacts
 
     # ---- Run domains ----
     for domain in domains:
@@ -702,6 +703,7 @@ def evaluate_tau2_bench(
                 try:
                     shutil.copy2(src, dst)
                     copied += 1
+                    saved_eval_files.append(dst)
                 except Exception:
                     pass
 
@@ -716,4 +718,4 @@ def evaluate_tau2_bench(
             f"(total={int(total)}), time={t1-t0:.1f}s, copied={copied}"
         )
 
-    return logs
+    return logs, saved_eval_files

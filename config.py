@@ -71,10 +71,10 @@ def setup_environment(args):
     else:
         root = Path.home()
     
-    # Setup HuggingFace cache directories — always use local storage (not NFS)
-    # to avoid slow model loading over network filesystem
+    # Setup HuggingFace cache directories — respect HF_HOME env var if set,
+    # otherwise use local storage (not NFS) to avoid slow model loading
     local_home = Path.home()
-    hf_home = local_home / ".cache" / "huggingface"
+    hf_home = Path(os.environ.get("HF_HOME", str(local_home / ".cache" / "huggingface")))
     hf_hub = hf_home / "hub"
     hf_datasets = hf_home / "datasets"
     
@@ -93,8 +93,10 @@ def setup_environment(args):
     os.environ.setdefault("WANDB_PROJECT", "games")
     
     
-    # Setup output directory
-    output_dir_path = root / "workplace" / "games" / "outputs"
+    # Setup output directory — use HF_HOME for checkpoints so they land on
+    # the path the user configured (e.g. /workspace/.cache/huggingface)
+    game_name = getattr(args, 'game', 'default')
+    output_dir_path = hf_home / game_name
     output_dir_path.mkdir(parents=True, exist_ok=True)
     
     # Rollout log path

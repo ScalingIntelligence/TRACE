@@ -76,6 +76,7 @@ from ppo import (
     logprob_action_tokens,
 )
 from evaluation import evaluate_vs_base, evaluate_math, evaluate_tau2_bench
+from sft_buffer import SFTBuffer
 
 try:
     import wandb
@@ -537,8 +538,8 @@ def parse_grpo_args():
         help="Sampling temperature for rollouts")
     parser.add_argument("--temperature-range", type=str, default=None,
         help="Comma-separated temperatures for per-game variation (e.g. '0.5,0.7,1.0'). "
-             "Overrides --temperature when set.")
-    parser.add_argument("--prefix-ratio", type=float, default=0.0,
+             "If not set, uses single --temperature value.")
+    parser.add_argument("--prefix-ratio", type=float, default=0.4,
         help="Probability of auto-playing lookup prefix per group (0.0-1.0, adversarial_policy only)")
     parser.add_argument("--compact-tools", action="store_true", default=False,
         help="Use compressed tool schemas for training (strips descriptions, ~60%% smaller prompts)")
@@ -562,9 +563,9 @@ def parse_grpo_args():
         help="Tau2-bench eval every N iterations (0 to disable)")
 
     # -- Adversarial policy game --
-    parser.add_argument("--adversarial-ratio", type=float, default=0.2,
+    parser.add_argument("--adversarial-ratio", type=float, default=0.6,
         help="Ratio of adversarial vs cooperative scenarios (0.0-1.0). "
-             "At 0.2, 20%% adversarial (T1-T17) and 80%% cooperative (T18-T24).")
+             "At 0.6, 60%% adversarial (T1-T17) and 40%% cooperative (T18-T24).")
 
     # -- User LLM (for adversarial_policy game) --
     parser.add_argument("--user-llm-url", type=str, default=None,
@@ -575,6 +576,14 @@ def parse_grpo_args():
         help="Temperature for user LLM generation")
     parser.add_argument("--user-llm-max-tokens", type=int, default=1024,
         help="Max tokens for user LLM generation")
+
+    # -- SFT joint training --
+    parser.add_argument("--sft-data", type=str, default=None,
+        help="Comma-separated paths to tau2-bench eval JSON files for SFT joint training")
+    parser.add_argument("--sft-coef", type=float, default=0.1,
+        help="SFT loss weight (scales per-token NLL before adding to RL loss)")
+    parser.add_argument("--sft-per-step", type=int, default=2,
+        help="SFT samples per RL mini-batch step")
 
     # -- Root directory (passed through to setup_environment) --
     parser.add_argument("--root", type=str, default=None,
@@ -633,7 +642,7 @@ def main():
 
     # Parse temperature range
     temperature_range: Optional[List[float]] = None
-    if args.temperature_range:
+    if args.temperature_range and args.temperature_range.lower() != "none":
         temperature_range = [float(t.strip()) for t in args.temperature_range.split(",")]
 
     total_games_per_iter = args.group_size * args.groups_per_batch
@@ -764,6 +773,15 @@ def main():
     global_step = start_iter * 25 if args.resume else 0
     math_eval_data_path = Path(__file__).resolve().parent / "data"
 
+    # ---- SFT buffer initialization ----
+    sft_buffer = None
+    if args.sft_data:
+        sft_paths = [p.strip() for p in args.sft_data.split(",") if p.strip()]
+        if sft_paths:
+            sft_buffer = SFTBuffer(sft_paths, tokenizer, compact_tools=args.compact_tools)
+            print(f"[SFT] Initialized buffer: {len(sft_buffer)} samples from {len(sft_paths)} files")
+            print(f"[SFT] coef={args.sft_coef}, per_step={args.sft_per_step}")
+
     # ======================================================================
     # Main GRPO loop
     # ======================================================================
@@ -816,7 +834,7 @@ def main():
 
             print(f"\n[eval {it}] Starting tau2-bench evaluation...")
             t_tau2_0 = time.time()
-            tau2_logs = evaluate_tau2_bench(
+            tau2_logs, tau2_eval_files = evaluate_tau2_bench(
                 backend=inference_backend,
                 output_dir=output_dir_path,
                 iteration=it,
@@ -832,6 +850,11 @@ def main():
                 print(f"[eval {it}] tau2-bench done ({t_tau2_1 - t_tau2_0:.1f}s)")
                 if wandb:
                     wandb.log(tau2_logs, step=global_step)
+
+            # Add newly successful tasks to SFT buffer
+            if sft_buffer is not None and tau2_eval_files:
+                sft_buffer.refresh(tau2_eval_files)
+                print(f"[SFT] Refreshed: {len(sft_buffer)} samples")
 
         # ---- 3. Collect group-based rollouts ----
         t_collect0 = time.time()
@@ -1009,6 +1032,7 @@ def main():
         idxs = list(range(N))
 
         policy_loss_acc = 0.0
+        sft_loss_acc = 0.0
         kl_loss_acc = 0.0
         approx_kl_acc = 0.0
         kl_base_acc = 0.0
@@ -1070,6 +1094,27 @@ def main():
 
                 optim.zero_grad(set_to_none=True)
                 loss.backward()
+
+                # ---- SFT forward + backward (separate graph to avoid OOM) ----
+                # Backward SFT independently so RL and SFT activation graphs
+                # never coexist in memory. Gradients still accumulate correctly.
+                sft_loss_val = torch.tensor(0.0, device=device)
+                if sft_buffer is not None and len(sft_buffer) > 0:
+                    sft_ids, sft_attn, sft_pl, sft_al = sft_buffer.sample_batch(
+                        args.sft_per_step, device
+                    )
+                    sft_out = model(
+                        input_ids=sft_ids, attention_mask=sft_attn, use_cache=False
+                    )
+                    sft_logits = sft_out.logits if hasattr(sft_out, "logits") else sft_out[0]
+                    sft_logp = logprob_action_tokens(
+                        sft_logits, sft_ids, sft_pl, sft_al, normalize_by_len=True
+                    )
+                    sft_loss_val = -sft_logp.mean()
+                    sft_scaled = args.sft_coef * sft_loss_val
+                    sft_scaled.backward()
+                    del sft_ids, sft_attn, sft_logits, sft_out, sft_logp, sft_scaled
+
                 torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)
                 optim.step()
 
@@ -1088,6 +1133,7 @@ def main():
                 global_step += 1
                 updates += 1
                 policy_loss_acc += float(policy_loss.item())
+                sft_loss_acc += float(sft_loss_val.item())
                 kl_loss_acc += float(kl_loss.item())
                 approx_kl_acc += float(approx_kl.item())
                 kl_base_acc += float(approx_kl_base.item())
@@ -1107,6 +1153,8 @@ def main():
             "iter": it,
             "global_step": global_step,
             "grpo/policy_loss": policy_loss_acc / max(1, updates),
+            "grpo/sft_loss": sft_loss_acc / max(1, updates),
+            "grpo/sft_buffer_size": len(sft_buffer) if sft_buffer is not None else 0,
             "grpo/kl_base_loss": kl_loss_acc / max(1, updates),
             "grpo/approx_kl_rollout": approx_kl_acc / max(1, updates),
             "grpo/approx_kl_base": kl_base_acc / max(1, updates),

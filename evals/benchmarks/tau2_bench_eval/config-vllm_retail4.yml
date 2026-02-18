@@ -7,19 +7,16 @@ domain: retail                                                          # Domain
 
 # Agent Configuration (4B model)
 # Use vllm:// prefix to indicate vLLM model
-agent_llm: vllm://Qwen/Qwen3-30B-A3B-Instruct-2507
+agent_llm: vllm://tarsur909/Qwen3-30B-A3B-Instruct-2507-adv-sft-v1-5 
 agent: null
 
-# LoRA Adapter Configuration (optional)
-# If specified, loads this adapter and uses it instead of base model
-lora_adapter_path: /root/workplace/games/outputs/grpo_ckpt_iter_20_20260213_222635
-lora_adapter_name: adv_iter_20
+
 
 # Agent LLM Arguments
 agent_llm_args:
   temperature: 0.0
   max_context_length: 32000                                             # Truncate if context exceeds this
-  tokenizer_model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507             # Base model tokenizer for LoRA adapter
+  tokenizer_model: openai/tarsur909/Qwen3-30B-A3B-Instruct-2507-adv-sft-v1-5              # Base model tokenizer for LoRA adapter
 
 # User Simulator Configuration (30B model)
 user_llm: vllm://Qwen/Qwen3-30B-A3B-Instruct-2507
@@ -41,7 +38,7 @@ seed: 42
 
 # Output Configuration
 output_dir: outputs
-save_to: qwen-3-30b-adv_iter_20-retail-qwen3-30b
+save_to: qwen-3-30b-adv_sft_iter_5_run1-retail-qwen3-30b
 
 # Advanced Options
 verbose: true                                                            # Enable verbose output
@@ -51,10 +48,10 @@ vllm:
   api_key: null                                                          # No API key needed for local
   # Agent servers (4B model) - ports 8090, 8091
   agent_base_urls:
-    - http://localhost:9003/v1
+    - http://localhost:9000/v1
   # User servers (30B model) - ports 9000, 9001
   user_base_urls:
-    - http://localhost:9003/v1
+    - http://localhost:8080/v1
 
 # Run evaluation:
 #   python main.py --config config-vllm.yml

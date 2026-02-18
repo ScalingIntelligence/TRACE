@@ -690,7 +690,7 @@ def main():
 
                 print(f"\n[eval {it}] Starting tau2-bench evaluation...")
                 t_tau2_0 = time.time()
-                tau2_logs = evaluate_tau2_bench(
+                tau2_logs, _ = evaluate_tau2_bench(
                     backend=inference_backend,
                     output_dir=output_dir_path,
                     iteration=it,
