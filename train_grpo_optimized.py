@@ -389,7 +389,7 @@ def parse_grpo_args_optimized():
         help="Max tokens for user LLM generation")
 
     # -- Adversarial policy game --
-    parser.add_argument("--adversarial-ratio", type=float, default=0.6,
+    parser.add_argument("--adversarial-ratio", type=float, default=1.0,
         help="Ratio of adversarial vs cooperative scenarios (0.0-1.0). "
              "At 0.2, 20%% adversarial (T1-T12) and 80%% cooperative (T13-T21). "
              "Reflects real tau2-bench distribution (~16%% adversarial).")
@@ -929,6 +929,7 @@ def main():
         N = len(seqs_cpu)
         if N == 0:
             print(f"  [iter {it}] All samples exceeded max_seq_len — skipping training step")
+            barrier()
             continue
         seq_lens = [s.shape[0] for s in seqs_cpu]
 

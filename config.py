@@ -100,9 +100,12 @@ def setup_environment(args):
     output_dir_path.mkdir(parents=True, exist_ok=True)
     
     # Rollout log path
-    gameplay_dir = Path(__file__).resolve().parent / "gameplay_rollouts"
-    gameplay_dir.mkdir(exist_ok=True)
-    rollout_log_path = gameplay_dir / args.rollout_log
+    if hasattr(args, 'rollout_log'):
+        gameplay_dir = Path(__file__).resolve().parent / "gameplay_rollouts"
+        gameplay_dir.mkdir(exist_ok=True)
+        rollout_log_path = gameplay_dir / args.rollout_log
+    else:
+        rollout_log_path = None
     
     # Optional: allocator fragmentation guard
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
