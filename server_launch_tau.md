@@ -167,11 +167,11 @@ vllm serve Qwen/Qwen3-4B-Instruct-2507 \
       --sft-coef 0.5 --sft-per-step 2
 
   export HF_HOME=/workspace/.cache/huggingface
-  CUDA_VISIBLE_DEVICES=2,3 \
+  CUDA_VISIBLE_DEVICES=6,7 \
   NCCL_P2P_DISABLE=1 \
   WANDB_API_KEY=f4ef099e7073d103963e5c986e4f818f5a526ee8 \
   PYTHONUNBUFFERED=1 \
-  torchrun --nproc_per_node=2 --master-port 29501 train_sft.py --sft-data "/root/games/evals/benchmarks/tau2_bench_eval/data/simulations/qwen-3-30b-airline-qwen3-30b.json,/root/games/evals/benchmarks/tau2_bench_eval/data/simulations/qwen-3-30b-retail-qwen3-30b.json"
+  torchrun --nproc_per_node=2 --master-port 29502 train_sft.py --num-epochs 10 --sft-data "/root/games/evals/benchmarks/tau2_bench_eval/data/simulations/qwen-3-30b-airline-qwen3-30b.json,/root/games/evals/benchmarks/tau2_bench_eval/data/simulations/qwen-3-30b-retail-qwen3-30b.json"
 
     
 

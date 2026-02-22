@@ -454,7 +454,10 @@ def main():
                 if is_main_rank():
                     print(f"[OOM] batch {step_in_epoch+1} — retrying {len(mb_idx)} samples individually")
 
-                for si in range(len(mb_idx)):
+                n_samples = len(mb_idx)
+                batch_loss_acc = 0.0
+                batch_tokens_acc = 0
+                for si in range(n_samples):
                     s_ids, s_attn, s_pl, s_al = pad_batch(
                         [mb_idx[si]], epoch_seqs, epoch_pls, epoch_als,
                         tokenizer.pad_token_id,
@@ -465,13 +468,16 @@ def main():
                         out = model(input_ids=s_ids, attention_mask=s_attn, use_cache=False)
                         lg = out.logits if hasattr(out, "logits") else out[0]
                         lp = logprob_action_tokens(lg, s_ids, s_pl, s_al, normalize_by_len=True)
-                    loss_i = -lp.mean() / n_total_batches
+                    loss_i = -lp.mean() / (n_total_batches * n_samples)
                     loss_i.backward()
                     with torch.no_grad():
-                        epoch_loss_acc += float((-lp.mean()).item())
-                        epoch_tokens_acc += s_al[0]
+                        batch_loss_acc += float((-lp.mean()).item())
+                        batch_tokens_acc += s_al[0]
                     del s_ids, s_attn, out, lg, lp, loss_i
                     torch.cuda.empty_cache()
+                with torch.no_grad():
+                    epoch_loss_acc += batch_loss_acc / n_samples
+                    epoch_tokens_acc += batch_tokens_acc
                 local_updates += 1
 
             del mb_ids_cpu, mb_attn_cpu

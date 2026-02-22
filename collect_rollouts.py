@@ -1,22 +1,21 @@
 """Collect agent-user trajectories for tau_tool_calling or adversarial_policy environments.
 
-Runs a vLLM-served agent model and user model through random seeds in parallel,
-saving trajectories as JSONL compatible with sft_train.py.
+Runs a vLLM-served agent model and user model through seeds in parallel,
+saving trajectories as JSON in tau2-bench eval format compatible with
+train_sft.py (via SFTBuffer).
 
-Each trajectory produces two SFT training entries (agent perspective + user perspective).
-With --num-samples and --select-topk, multiple attempts per seed are run and
-the top-k by reward are kept. Seeds where no sample meets --reward-threshold are
-discarded and new seeds are tried until --num-seeds passing seeds are collected.
+Seeds [start_seed, start_seed + num_seeds) are run once. Trajectories
+meeting --reward-threshold are kept; the rest are discarded.
 
 Usage:
-    # Collect 100 perfect (reward>=1.0) trajectories:
+    # Collect trajectories for 100 seeds:
     python collect_rollouts.py \
         --env tau_tool_calling \
         --base-url http://localhost:9090/v1 \
         --model Qwen/Qwen3-30B-A3B-Instruct-2507 \
         --num-seeds 100
 
-    # Sample 5 attempts per seed, keep top 2 passing ones:
+    # Sample 5 attempts per seed, keep top 2 by reward:
     python collect_rollouts.py \
         --env tau_tool_calling \
         --model Qwen/Qwen3-30B-A3B-Instruct-2507 \
@@ -33,8 +32,8 @@ Usage:
         --reward-threshold 0.5
 
 Output:
-    JSONL file (one JSON per line), each line has {"messages": [...], ...metadata}.
-    Compatible with sft_train.py: python sft_train.py --train-file <output.jsonl>
+    JSON file(s) in tau2-bench eval format (one per domain), directly
+    loadable by SFTBuffer: python train_sft.py --sft-data <output.json>
 """
 
 import sys
@@ -43,6 +42,7 @@ import time
 import random
 import argparse
 import threading
+from collections import defaultdict
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Any, Optional
@@ -54,6 +54,7 @@ _loguru_logger.disable("tau2")
 import requests
 
 from adversarial_policy_game.llm_user import UserLLMClient
+from adversarial_policy_game.constants import AIRLINE_POLICY, RETAIL_POLICY
 
 
 # ---------------------------------------------------------------------------
@@ -100,19 +101,20 @@ class VLLMClient:
 
 
 # ---------------------------------------------------------------------------
-# Conversation format converters
+# Conversation format converter: internal -> tau2-bench message format
 # ---------------------------------------------------------------------------
 
-def conversation_to_agent_messages(
-    system_prompt: str,
+def conversation_to_tau2_messages(
     conversation: List[Dict[str, str]],
 ) -> List[Dict[str, Any]]:
-    """Convert internal conversation to OpenAI chat format for agent SFT.
+    """Convert internal conversation to tau2-bench message format.
 
-    Prepends agent system prompt, then maps internal roles to chat API roles.
-    Matches the format produced by game.get_messages() with system prompt.
+    Internal format uses: {"role": "user"|"assistant"|"tool_call"|"tool_result", "text": "..."}
+    Tau2-bench format uses: {"role": "user"|"assistant"|"tool", "content": "...", ...}
+
+    The output is directly compatible with SFTBuffer.load_sft_samples().
     """
-    messages = [{"role": "system", "content": system_prompt}]
+    messages = []
     tool_call_counter = 0
 
     i = 0
@@ -123,7 +125,11 @@ def conversation_to_agent_messages(
         if role == "user":
             messages.append({"role": "user", "content": text})
         elif role == "assistant":
-            messages.append({"role": "assistant", "content": text})
+            messages.append({
+                "role": "assistant",
+                "content": text,
+                "tool_calls": None,
+            })
         elif role == "tool_call":
             tc = json.loads(text)
             tc_id = f"tool-{tool_call_counter:04d}"
@@ -133,59 +139,21 @@ def conversation_to_agent_messages(
                 "content": None,
                 "tool_calls": [{
                     "id": tc_id,
-                    "type": "function",
-                    "function": {
-                        "name": tc["name"],
-                        "arguments": json.dumps(tc.get("arguments", {})),
-                    },
+                    "name": tc["name"],
+                    "arguments": tc.get("arguments", {}),
                 }],
             })
+            # Pair with tool_result if next message is one
             if (i + 1 < len(conversation)
                     and conversation[i + 1]["role"] == "tool_result"):
                 messages.append({
                     "role": "tool",
                     "content": conversation[i + 1]["text"],
-                    "tool_call_id": tc_id,
+                    "id": tc_id,
                 })
                 i += 1
         # skip standalone tool_result (already handled above)
         i += 1
-
-    return messages
-
-
-def conversation_to_user_messages(
-    user_system_prompt: str,
-    conversation: List[Dict[str, str]],
-) -> List[Dict[str, Any]]:
-    """Convert internal conversation to chat format for user SFT.
-
-    Matches LLMUser._build_messages() format exactly:
-    - system: user's system prompt (customer instructions)
-    - user: "Begin the conversation..." then "Agent: <text>" for agent messages
-    - assistant: customer responses (the turns the model learns to generate)
-    """
-    messages = [{"role": "system", "content": user_system_prompt}]
-
-    # Extract visible conversation (text only, no tool calls/results)
-    visible = [m for m in conversation if m["role"] in ("user", "assistant")]
-
-    if not visible:
-        return messages
-
-    # First user message = initial customer message (pre-filled as assistant)
-    messages.append({
-        "role": "user",
-        "content": "Begin the conversation with the customer service agent.",
-    })
-    messages.append({"role": "assistant", "content": visible[0]["text"]})
-
-    # Rest: agent messages -> user role (prefixed), customer messages -> assistant role
-    for msg in visible[1:]:
-        if msg["role"] == "assistant":
-            messages.append({"role": "user", "content": f"Agent: {msg['text']}"})
-        elif msg["role"] == "user":
-            messages.append({"role": "assistant", "content": msg["text"]})
 
     return messages
 
@@ -299,44 +267,6 @@ def run_episode(game, client: VLLMClient, seed: int, env_type: str,
     return result
 
 
-def rollout_to_sft_entries(rollout: Dict[str, Any], env_type: str,
-                           num_samples: int, select_topk: int,
-                           selected_rank: int,
-                           all_sample_rewards: List) -> List[Dict[str, Any]]:
-    """Convert a single rollout to SFT training entries (agent + user).
-
-    Returns 2 JSONL-ready dicts, each with a 'messages' field for sft_train.py.
-    """
-    conversation = rollout["conversation"]
-    system_prompt = rollout["system_prompt"]
-    user_system_prompt = rollout["user_system_prompt"]
-
-    # Metadata shared by both entries
-    meta = {
-        "seed": rollout["seed"],
-        "reward": rollout["reward"],
-        "env": env_type,
-        "domain": rollout.get("domain", ""),
-    }
-    if num_samples > 1:
-        meta["num_samples"] = num_samples
-        meta["select_topk"] = select_topk
-        meta["selected_rank"] = selected_rank
-        meta["all_sample_rewards"] = all_sample_rewards
-
-    # Agent entry
-    agent_messages = conversation_to_agent_messages(system_prompt, conversation)
-    agent_entry = {"messages": agent_messages, "role_type": "agent", **meta}
-    if rollout.get("tool_schemas"):
-        agent_entry["tools"] = rollout["tool_schemas"]
-
-    # User entry
-    user_messages = conversation_to_user_messages(user_system_prompt, conversation)
-    user_entry = {"messages": user_messages, "role_type": "user", **meta}
-
-    return [agent_entry, user_entry]
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -356,7 +286,7 @@ def main():
     parser.add_argument("--user-model", default=None,
                         help="User LLM model name (default: same as --model)")
     parser.add_argument("--num-seeds", type=int, required=True,
-                        help="Number of passing seeds to collect")
+                        help="Number of seeds to run")
     parser.add_argument("--start-seed", type=int, default=0,
                         help="Starting seed (default: 0)")
     parser.add_argument("--workers", "-w", type=int, default=100,
@@ -373,12 +303,7 @@ def main():
     parser.add_argument("--select-topk", type=int, default=1,
                         help="Keep top-k trajectories per seed by reward (default: 1)")
     parser.add_argument("--reward-threshold", type=float, default=1.0,
-                        help="Minimum reward to keep a trajectory (default: 1.0). "
-                             "Seeds with no sample meeting the threshold are "
-                             "discarded and new seeds are tried.")
-    parser.add_argument("--max-seed-attempts", type=int, default=None,
-                        help="Max total seeds to attempt before giving up "
-                             "(default: num_seeds * 20)")
+                        help="Minimum reward to keep a trajectory (default: 1.0)")
     # tau_tool_calling specific
     parser.add_argument("--domain", type=str, default=None,
                         choices=["airline", "retail"],
@@ -402,7 +327,6 @@ def main():
     num_samples = max(1, args.num_samples)
     select_topk = max(1, min(args.select_topk, num_samples))
     reward_threshold = args.reward_threshold
-    max_seed_attempts = args.max_seed_attempts or args.num_seeds * 20
 
     # Resolve models
     user_base_url = args.user_base_url or args.base_url
@@ -423,7 +347,7 @@ def main():
         output_dir = Path(args.output_dir) if args.output_dir else Path("/root/games/game_rollouts")
         agent_short = args.model.split("/")[-1]
         user_short = user_model.split("/")[-1]
-        output_path = output_dir / f"{args.env}-{agent_short}-{user_short}.jsonl"
+        output_path = output_dir / f"{args.env}-{agent_short}-{user_short}.json"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -431,12 +355,11 @@ def main():
     print(f"Environment:  {args.env}")
     print(f"Agent model:  {args.model} @ {args.base_url} (temp={args.temperature})")
     print(f"User  model:  {user_model} @ {user_base_url} (temp={args.user_temperature})")
-    print(f"Target seeds: {args.num_seeds} (with reward >= {reward_threshold})")
+    print(f"Seeds:        {args.num_seeds} (start={args.start_seed})")
     print(f"Workers:      {args.workers}")
     if num_samples > 1:
         print(f"Samples/seed: {num_samples}  select top-{select_topk}")
     print(f"Threshold:    {reward_threshold}")
-    print(f"Max attempts: {max_seed_attempts} seeds")
     print(f"Output:       {output_path}")
     if args.env == "tau_tool_calling":
         print(f"Domain:       {args.domain or 'both'}")
@@ -484,208 +407,180 @@ def main():
                            user_difficulty=difficulty)
 
     # -------------------------------------------------------------------
-    # Wave-based collection: keep trying seeds until we have enough
+    # Run all seeds in parallel (single pass, no retry waves)
     # -------------------------------------------------------------------
     num_workers = max(1, args.workers)
-    target = args.num_seeds
-    next_seed = args.start_seed
-    total_seeds_attempted = 0
+    seeds = list(range(args.start_seed, args.start_seed + args.num_seeds))
+
+    # Build work items
+    seed_difficulties = {}
+    work_items = []
+    for seed in seeds:
+        diff = get_seed_difficulty(seed)
+        seed_difficulties[seed] = diff
+        for sample_idx in range(num_samples):
+            work_items.append((seed, sample_idx, diff))
+
+    results_by_seed = {seed: [] for seed in seeds}
+    pending_per_seed = {seed: num_samples for seed in seeds}
+    completed_seeds = 0
+    passed_seeds = 0
     total_episodes = 0
-    all_raw_rewards = []
-    accepted = []           # list of (seed, difficulty, attempts_list)
-    rejected_count = 0
     t0 = time.time()
     print_lock = threading.Lock()
 
-    while len(accepted) < target and total_seeds_attempted < max_seed_attempts:
-        # Size this wave: how many seeds to try
-        deficit = target - len(accepted)
-        if total_seeds_attempted == 0:
-            # First wave: be optimistic, try exactly the deficit
-            wave_size = deficit
-        else:
-            # Estimate pass rate and over-provision
-            pass_rate = len(accepted) / total_seeds_attempted
-            if pass_rate > 0:
-                wave_size = int(deficit / pass_rate * 1.5) + 1
-            else:
-                # Nothing has passed yet — try a bigger batch
-                wave_size = deficit * 3
-        # Clamp to remaining budget (at least 1 to make progress)
-        remaining = max_seed_attempts - total_seeds_attempted
-        wave_size = max(1, min(wave_size, remaining))
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        future_to_item = {
+            executor.submit(_run_one, seed, sidx, diff): (seed, sidx)
+            for seed, sidx, diff in work_items
+        }
+        for future in as_completed(future_to_item):
+            seed, sample_idx = future_to_item[future]
+            try:
+                result = future.result()
+            except Exception as e:
+                result = {"seed": seed, "error": str(e)}
 
-        # Allocate seeds for this wave
-        wave_seeds = []
-        wave_difficulties = {}
-        for _ in range(wave_size):
-            seed = next_seed
-            wave_seeds.append(seed)
-            wave_difficulties[seed] = get_seed_difficulty(seed)
-            next_seed += 1
-        total_seeds_attempted += wave_size
+            results_by_seed[seed].append((sample_idx, result))
+            pending_per_seed[seed] -= 1
+            total_episodes += 1
 
-        # Build work items for this wave
-        work_items = []
-        for seed in wave_seeds:
-            for sample_idx in range(num_samples):
-                work_items.append((seed, sample_idx, wave_difficulties[seed]))
+            with print_lock:
+                elapsed = time.time() - t0
+                r = result.get("reward", 0)
+                err = " ERROR" if "error" in result else ""
+                sample_tag = (f"s={sample_idx+1}/{num_samples} "
+                              if num_samples > 1 else "")
 
-        # Track per-seed results within this wave
-        wave_results = {seed: [] for seed in wave_seeds}
-        wave_pending = {seed: num_samples for seed in wave_seeds}
-        wave_completed = 0
-        wave_total = len(work_items)
-
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            future_to_item = {
-                executor.submit(_run_one, seed, sidx, diff): (seed, sidx)
-                for seed, sidx, diff in work_items
-            }
-            for future in as_completed(future_to_item):
-                seed, sample_idx = future_to_item[future]
-                try:
-                    result = future.result()
-                except Exception as e:
-                    result = {"seed": seed, "error": str(e)}
-
-                wave_results[seed].append((sample_idx, result))
-                wave_pending[seed] -= 1
-                wave_completed += 1
-                total_episodes += 1
-
-                with print_lock:
-                    elapsed = time.time() - t0
-                    r = result.get("reward", 0)
-                    err = " ERROR" if "error" in result else ""
-                    sample_tag = (f"s={sample_idx+1}/{num_samples} "
-                                  if num_samples > 1 else "")
-                    accepted_so_far = len(accepted)
-
-                    # Check if this seed just completed
-                    tag_pass = ""
-                    if wave_pending[seed] == 0:
-                        best_r = max(
-                            (res.get("reward", -999)
-                             for _, res in wave_results[seed]
-                             if "error" not in res),
-                            default=-999,
-                        )
-                        if best_r >= reward_threshold:
-                            tag_pass = " PASS"
-                            accepted_so_far += 1  # preview
-                        else:
-                            tag_pass = " SKIP"
-
-                    if args.env == "tau_tool_calling":
-                        domain = result.get("domain", "?")
-                        stype = result.get("scenario_type",
-                                           result.get("error", "err"))[:14]
-                        print(f"  [{accepted_so_far:3d}/{target}] "
-                              f"seed={seed:4d} {sample_tag}"
-                              f"{domain:8s} {stype:14s} "
-                              f"reward={r:+5.2f} "
-                              f"steps={result.get('steps', 0):2d} "
-                              f"({elapsed:.0f}s){err}{tag_pass}")
+                # Check if this seed just completed all samples
+                tag_pass = ""
+                if pending_per_seed[seed] == 0:
+                    completed_seeds += 1
+                    best_r = max(
+                        (res.get("reward", -999)
+                         for _, res in results_by_seed[seed]
+                         if "error" not in res),
+                        default=-999,
+                    )
+                    if best_r >= reward_threshold:
+                        tag_pass = " PASS"
+                        passed_seeds += 1
                     else:
-                        tid = result.get("template_id", "?")
-                        tname = result.get("template_name",
-                                           result.get("error", "err"))[:22]
-                        is_adv = "ADV" if result.get("is_adversarial") else "COP"
-                        print(f"  [{accepted_so_far:3d}/{target}] "
-                              f"seed={seed:4d} {sample_tag}"
-                              f"T{tid:02d}:{tname:22s} {is_adv} "
-                              f"reward={r:+5.2f} "
-                              f"steps={result.get('steps', 0):2d} "
-                              f"({elapsed:.0f}s){err}{tag_pass}")
+                        tag_pass = " FAIL"
 
-        # Evaluate this wave's seeds
-        for seed in wave_seeds:
-            attempts = wave_results[seed]
-            sorted_by_idx = sorted(attempts, key=lambda x: x[0])
-            sample_rewards = [res.get("reward", None)
-                              for _, res in sorted_by_idx]
-            all_raw_rewards.extend(
-                [r for r in sample_rewards if r is not None])
-
-            # Check if any sample meets threshold
-            passing = [
-                (sidx, res) for sidx, res in attempts
-                if "error" not in res
-                and res.get("reward", -999) >= reward_threshold
-            ]
-            if passing:
-                accepted.append(
-                    (seed, wave_difficulties[seed], attempts, sample_rewards))
-            else:
-                rejected_count += 1
-
-            # Early exit if we have enough
-            if len(accepted) >= target:
-                break
-
-        if len(accepted) < target:
-            elapsed = time.time() - t0
-            print(f"\n  --- Wave done: {len(accepted)}/{target} accepted, "
-                  f"{rejected_count} rejected, "
-                  f"{total_seeds_attempted} seeds tried "
-                  f"({elapsed:.0f}s) ---\n")
+                if args.env == "tau_tool_calling":
+                    domain = result.get("domain", "?")
+                    stype = result.get("scenario_type",
+                                       result.get("error", "err"))[:14]
+                    print(f"  [{passed_seeds:3d}/{completed_seeds}/{len(seeds)}] "
+                          f"seed={seed:4d} {sample_tag}"
+                          f"{domain:8s} {stype:14s} "
+                          f"reward={r:+5.2f} "
+                          f"steps={result.get('steps', 0):2d} "
+                          f"({elapsed:.0f}s){err}{tag_pass}")
+                else:
+                    tid = result.get("template_id", "?")
+                    tname = result.get("template_name",
+                                       result.get("error", "err"))[:22]
+                    is_adv = "ADV" if result.get("is_adversarial") else "COP"
+                    print(f"  [{passed_seeds:3d}/{completed_seeds}/{len(seeds)}] "
+                          f"seed={seed:4d} {sample_tag}"
+                          f"T{tid:02d}:{tname:22s} {is_adv} "
+                          f"reward={r:+5.2f} "
+                          f"steps={result.get('steps', 0):2d} "
+                          f"({elapsed:.0f}s){err}{tag_pass}")
 
     elapsed = time.time() - t0
 
-    if len(accepted) < target:
-        print(f"\n  WARNING: Only collected {len(accepted)}/{target} passing "
-              f"seeds after trying {total_seeds_attempted} seeds "
-              f"(hit --max-seed-attempts={max_seed_attempts})")
-
     # -------------------------------------------------------------------
-    # Select top-k per accepted seed and convert to SFT format
+    # Select top-k per seed by reward and collect stats
     # -------------------------------------------------------------------
-    sft_entries = []
+    selected = []  # list of rollout dicts
+    all_raw_rewards = []
+    rejected_count = 0
 
-    for seed, difficulty, attempts, sample_rewards in accepted:
-        # Filter to passing samples only
+    for seed in seeds:
+        attempts = results_by_seed[seed]
+        sorted_by_idx = sorted(attempts, key=lambda x: x[0])
+        sample_rewards = [res.get("reward", None) for _, res in sorted_by_idx]
+        all_raw_rewards.extend([r for r in sample_rewards if r is not None])
+
         passing = [
             (sidx, res) for sidx, res in attempts
             if "error" not in res
             and res.get("reward", -999) >= reward_threshold
         ]
+        if not passing:
+            rejected_count += 1
+            continue
+
         # Sort by reward (desc), tiebreak by fewer steps
         passing.sort(
             key=lambda x: (x[1]["reward"], -x[1]["steps"]),
             reverse=True,
         )
-
-        for rank, (sidx, result) in enumerate(passing[:select_topk]):
-            entries = rollout_to_sft_entries(
-                result, args.env,
-                num_samples=num_samples,
-                select_topk=select_topk,
-                selected_rank=rank,
-                all_sample_rewards=sample_rewards,
-            )
-            sft_entries.extend(entries)
+        for sidx, result in passing[:select_topk]:
+            selected.append(result)
 
     # -------------------------------------------------------------------
-    # Write JSONL
+    # Group by domain and write tau2-bench JSON (SFTBuffer-compatible)
     # -------------------------------------------------------------------
-    with open(output_path, "w") as f:
-        for entry in sft_entries:
-            f.write(json.dumps(entry, default=str) + "\n")
+    POLICIES = {"airline": AIRLINE_POLICY, "retail": RETAIL_POLICY}
+
+    by_domain = defaultdict(list)
+    for rollout in selected:
+        domain = rollout.get("domain", "unknown")
+        by_domain[domain].append(rollout)
+
+    output_paths = []
+    total_simulations = 0
+
+    for domain, rollouts in sorted(by_domain.items()):
+        policy = POLICIES.get(domain, "")
+
+        simulations = []
+        for rollout in rollouts:
+            tau2_msgs = conversation_to_tau2_messages(rollout["conversation"])
+            simulations.append({
+                "task_id": str(rollout["seed"]),
+                "reward_info": {"reward": rollout["reward"]},
+                "messages": tau2_msgs,
+            })
+
+        output_data = {
+            "info": {
+                "environment_info": {
+                    "domain_name": domain,
+                    "policy": policy,
+                }
+            },
+            "simulations": simulations,
+        }
+
+        # Determine per-domain output path
+        if len(by_domain) == 1:
+            path = output_path
+        else:
+            path = output_path.parent / f"{output_path.stem}_{domain}{output_path.suffix}"
+
+        with open(path, "w") as f:
+            json.dump(output_data, f, default=str)
+
+        output_paths.append(path)
+        total_simulations += len(simulations)
+        print(f"  {domain}: {len(simulations)} simulations -> {path}")
 
     # -------------------------------------------------------------------
     # Summary stats
     # -------------------------------------------------------------------
-    n_selected = len(sft_entries) // 2  # agent + user per trajectory
-    selected_rewards = [e["reward"] for e in sft_entries
-                        if e["role_type"] == "agent"]
+    selected_rewards = [r["reward"] for r in selected]
 
     print(f"\n{'=' * 65}")
     print(f"  ROLLOUT COLLECTION COMPLETE — {elapsed:.1f}s")
     print(f"{'=' * 65}")
-    print(f"  Seeds attempted:  {total_seeds_attempted}")
-    print(f"  Seeds accepted:   {len(accepted)} "
-          f"(pass rate {len(accepted)/max(total_seeds_attempted,1)*100:.1f}%)")
+    print(f"  Seeds run:        {len(seeds)}")
+    print(f"  Seeds passed:     {passed_seeds} "
+          f"(pass rate {passed_seeds/max(len(seeds),1)*100:.1f}%)")
     print(f"  Seeds rejected:   {rejected_count} "
           f"(no sample with reward >= {reward_threshold})")
     print(f"  Total episodes:   {total_episodes}")
@@ -693,7 +588,7 @@ def main():
     if selected_rewards:
         avg = sum(selected_rewards) / len(selected_rewards)
         perfect = sum(1 for r in selected_rewards if r >= 1.0)
-        print(f"\n  Selected trajectories: {n_selected}")
+        print(f"\n  Selected trajectories: {len(selected)}")
         print(f"  Avg reward (selected): {avg:+.3f}")
         print(f"  Perfect (selected):    {perfect}/{len(selected_rewards)} "
               f"({perfect/len(selected_rewards)*100:.1f}%)")
@@ -706,9 +601,9 @@ def main():
         print(f"    Pass rate:    {raw_pass}/{len(all_raw_rewards)} "
               f"({raw_pass/len(all_raw_rewards)*100:.1f}%)")
 
-    print(f"\n  SFT entries: {len(sft_entries)} "
-          f"({n_selected} agent + {n_selected} user)")
-    print(f"  Saved to {output_path}")
+    print(f"\n  Simulations saved: {total_simulations}")
+    for p in output_paths:
+        print(f"    {p}")
 
 
 if __name__ == "__main__":
