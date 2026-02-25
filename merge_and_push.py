@@ -6,8 +6,8 @@ from peft import PeftModel
 import torch
 
 BASE_MODEL = "Qwen/Qwen3-30B-A3B-Instruct-2507"
-ADAPTER_PATHs =   ["/workspace/.cache/huggingface/default/sft/sft_ckpt_epoch_0_20260221_042348", "/workspace/.cache/huggingface/adversarial_policy/grpo_ckpt_iter_10_20260221_055252", "/workspace/.cache/huggingface/adversarial_policy/grpo_ckpt_iter_20_20260221_093853", "/workspace/.cache/huggingface/adversarial_policy/grpo_ckpt_iter_30_20260221_125549" ]
-TARGET_REPOs = ["tarsur909/Qwen3-30B-A3B-Instruct-2507-sft-0", "tarsur909/Qwen3-30B-A3B-Instruct-2507-adv-v2-10", "tarsur909/Qwen3-30B-A3B-Instruct-2507-adv-v2-20", "tarsur909/Qwen3-30B-A3B-Instruct-2507-adv-v2-30"]
+ADAPTER_PATHs =   ["/workspace/.cache/huggingface/tau_tool_calling/grpo_ckpt_iter_5_20260223_230030" ]
+TARGET_REPOs = ["tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-tool-5"]
 HF_TOKEN = "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"
 
 

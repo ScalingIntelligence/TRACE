@@ -5,6 +5,7 @@ env/
 .env/
 ENV/
 game_rollouts/
+structured_data_rollouts/
 
 # Python
 __pycache__/

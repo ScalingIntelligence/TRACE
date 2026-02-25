@@ -98,6 +98,18 @@ try:
 except ImportError:
     TauToolCallingEnv = None
 
+from structured_data_game import (
+    StructuredDataGame,
+    extract_action as extract_action_structured_data,
+    SYSTEM_PROMPT as SYSTEM_PROMPT_STRUCTURED_DATA,
+)
+
+from multistep_task_game import (
+    MultiStepTaskGame,
+    extract_action as extract_action_multistep_task,
+    SYSTEM_PROMPT as SYSTEM_PROMPT_MULTISTEP_TASK,
+)
+
 from pathlib import Path
 
 
@@ -480,6 +492,42 @@ def _register_builtin_games() -> None:
                 max_gen_tokens=1024,
             )
         )
+
+    # Structured Data Reasoning — targets ~44% of tau2-bench failures
+    # Trains parsing JSON data, filtering/sorting by criteria, computing derived values
+    # Single-turn, 3 questions per episode. No LLM user needed.
+    def make_structured_data(difficulty=3) -> StructuredDataGame:
+        return StructuredDataGame(difficulty=difficulty)
+
+    register_game(
+        GameSpec(
+            name="structured_data_reasoning",
+            make_env=make_structured_data,
+            extract_action=extract_action_structured_data,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_STRUCTURED_DATA,
+            max_gen_tokens=512,
+        )
+    )
+
+    # Multi-Step Task Tracking — targets ~32% of tau2-bench failures
+    # Trains completing N independent sub-tasks with correct tool calls
+    # Multi-turn, no LLM user needed.
+    def make_multistep_task(n_tasks=3) -> MultiStepTaskGame:
+        return MultiStepTaskGame(max_steps=15, n_tasks=n_tasks)
+
+    register_game(
+        GameSpec(
+            name="multistep_task_tracking",
+            make_env=make_multistep_task,
+            extract_action=extract_action_multistep_task,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_MULTISTEP_TASK,
+            max_gen_tokens=512,
+        )
+    )
 
 
 def _register_openspiel_games() -> None:

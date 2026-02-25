@@ -166,14 +166,18 @@ vllm serve Qwen/Qwen3-4B-Instruct-2507 \
       --sft-data "/root/games/evals/benchmarks/tau2_bench_eval/data/simulations/qwen-3-30b-airline-qwen3-30b.json,/root/games/evals/benchmarks/tau2_bench_eval/data/simulations/qwen-3-30b-retail-qwen3-30b.json" \
       --sft-coef 0.5 --sft-per-step 2
 
-  export HF_HOME=/workspace/.cache/huggingface
-  CUDA_VISIBLE_DEVICES=6,7 \
+CUDA_VISIBLE_DEVICES=2,3,6,7 \
   NCCL_P2P_DISABLE=1 \
   WANDB_API_KEY=f4ef099e7073d103963e5c986e4f818f5a526ee8 \
-  PYTHONUNBUFFERED=1 \
-  torchrun --nproc_per_node=2 --master-port 29502 train_sft.py --num-epochs 10 --sft-data "/root/games/evals/benchmarks/tau2_bench_eval/data/simulations/qwen-3-30b-airline-qwen3-30b.json,/root/games/evals/benchmarks/tau2_bench_eval/data/simulations/qwen-3-30b-retail-qwen3-30b.json"
+  VLLM_BASE_URLS=http://localhost:8080 \
+  VLLM_MODEL=tarsur909/Qwen3-30B-A3B-Instruct-2507-tool-v2-35 \
+  VLLM_TIMEOUT_S=2000 \
+  VLLM_ALLOW_RUNTIME_LORA_UPDATING=True \
+  VLLM_RPC_TIMEOUT=2000 \
+  PYTHONUNBUFFERED=1 torchrun --nproc_per_node=2 --master-port 29501 train_grpo_optimized.py --game adversarial_policy --model tarsur909/Qwen3-30B-A3B-Instruct-2507-tool-v2-35 --compact-tools \
+      --temperature-range "0.5,0.7,1.0" \
+      --save-every 5 --user-llm-url http://localhost:9000/v1 --user-llm-model "Qwen/Qwen3-30B-A3B-Instruct-2507"
 
-    
 
 CUDA_VISIBLE_DEVICES=2,3,6,7 \
   NCCL_P2P_DISABLE=1 \
@@ -183,7 +187,9 @@ CUDA_VISIBLE_DEVICES=2,3,6,7 \
   VLLM_TIMEOUT_S=2000 \
   VLLM_ALLOW_RUNTIME_LORA_UPDATING=True \
   VLLM_RPC_TIMEOUT=2000 \
-  PYTHONUNBUFFERED=1 torchrun --nproc_per_node=2 --master-port 29501 train_grpo_optimized.py --game adversarial_policy --model tarsur909/Qwen3-30B-A3B-Instruct-2507-tool-v2-35 --compact-tools \
+  PYTHONUNBUFFERED=1 torchrun --nproc_per_node=2 --master-port 29501 train_grpo_optimized.py --game structured_data_reasoning --model Qwen/Qwen3-30B-A3B-Instruct-2507 --compact-tools \
       --temperature-range "0.5,0.7,1.0" \
-      --tau2-eval-every 10 \
       --save-every 5 --user-llm-url http://localhost:9000/v1 --user-llm-model "Qwen/Qwen3-30B-A3B-Instruct-2507"
+
+
+CUDA_VISIBLE_DEVICES=2,3,6,7   NCCL_P2P_DISABLE=1   WANDB_API_KEY=f4ef099e7073d103963e5c986e4f818f5a526ee8   VLLM_BASE_URLS=http://localhost:8080   VLLM_MODEL=tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-10   VLLM_TIMEOUT_S=2000   VLLM_ALLOW_RUNTIME_LORA_UPDATING=True   VLLM_RPC_TIMEOUT=2000   PYTHONUNBUFFERED=1 torchrun --nproc_per_node=2 --master-port 29501 train_grpo_optimized.py --game structured_data_reasoning --model tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-10 --compact-tools       --temperature-range "0.5,0.7,1.0"       --save-every 5 --user-llm-url http://localhost:9000/v1 --user-llm-model "Qwen/Qwen3-30B-A3B-Instruct-2507"  --group-size 32
