@@ -185,12 +185,6 @@ class Config:
     MATH_EVAL_DATASETS = ["math", "amc", "aime"]
     
     # Prompt templates
-    SYSTEM_PROMPT_KUHN = (
-        "You are playing Kuhn Poker.\n"
-        + ("" if ENABLE_THINKING else "Respond with EXACTLY ONE action token and NOTHING ELSE.\n")
-        + "Valid actions: [check] or [bet] or [call] or [fold].\n"
-        + ("" if ENABLE_THINKING else "Do not add any whitespace, punctuation, explanation, or extra text.\n")
-    )
     SYSTEM_PROMPT_LIARS_DICE = (
         "You are playing Liar's Dice.\n"
         + ("" if ENABLE_THINKING else "Respond with EXACTLY ONE action and NOTHING ELSE.\n")
@@ -233,16 +227,6 @@ class Config:
         LIARS_DICE_TOOL_SPECS_NO_ID,
     )
 
-    SYSTEM_PROMPT_MEMORY_RECALL = (
-    "You are doing a memory recall task.\n"
-    "Read the system log and find YOUR dice values (matching your User ID).\n"
-    "Reason through it to get the right answer.\n"
-    "Respond with: [dice: A, B, C, D, E]\n"
-    "Example: [dice: 3, 1, 4, 6, 2]\n"
-    )
-
-
-
     MATH_SYSTEM_PROMPT = (
         "You are a helpful math assistant. Solve the following problem step by step. "
         "Put your final answer in \\boxed{}."
@@ -252,11 +236,6 @@ class Config:
 # =========================
 # Action constants
 # =========================
-ACTION_STRS_KUHN = ["[check]", "[bet]", "[call]", "[fold]"]
-
-CURRENT_GAME = "kuhn_poker"
-ACTION_STRS = ACTION_STRS_KUHN
-
 def get_system_prompt(game: str) -> str:
     """Get the system prompt for a game."""
     if game == "liars_dice":
@@ -271,9 +250,7 @@ def get_system_prompt(game: str) -> str:
         return Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED
     if game == "liars_dice_memory_updated_tool":
         return Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED_TOOL
-    if game == "memory_recall":
-        return Config.SYSTEM_PROMPT_MEMORY_RECALL
-    return Config.SYSTEM_PROMPT_KUHN
+    return ""
 
 
 def get_max_gen_tokens(game: str) -> int:
