@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # =========================
-# PPO self-play for Kuhn Poker - Main Entry Point
+# PPO Training - Main Entry Point
 # =========================
 """
-Main training script that orchestrates PPO training for Kuhn Poker.
+Main training script that orchestrates PPO training for game environments.
 Refactored for clarity with separated concerns:
 - config.py: Configuration and environment setup
-- kuhn_poker.py: Game environment
 - model.py: Neural network architecture
 - inference.py: Generation backends
-- training.py: PPO training logic
+- ppo.py: PPO training logic
 - evaluation.py: Evaluation functions
 """
 from unsloth import FastLanguageModel
@@ -36,7 +35,7 @@ from ppo import (
     logprob_action_tokens,
     values_from_hidden,
 )
-from evaluation import evaluate_vs_base, evaluate_math, evaluate_tau2_bench
+from evaluation import evaluate_tau2_bench
 
 # Optional tracking libs
 try:
@@ -57,7 +56,6 @@ def main():
     # Parse arguments
     args = parse_args()
     game = args.game
-    num_dice = Config.NUM_DICE
     try:
         game_spec = get_game_spec(game)
     except KeyError as e:
@@ -66,11 +64,7 @@ def main():
 
     max_gen_tokens = game_spec.max_gen_tokens
     env_kwargs = {}
-    if game_spec.name == "kuhn_poker":
-        env_kwargs["num_rounds"] = Config.NUM_ROUNDS
-    elif game_spec.name == "liars_dice":
-        env_kwargs["num_dice"] = num_dice
-    
+
     # Set dynamic rollout log name
     args.rollout_log = f"rollouts_ppo_{game_spec.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
 
@@ -206,8 +200,6 @@ def main():
     # =========================
     global_step = start_iter * 25 if args.resume else 0
 
-    math_eval_data_path = Path(__file__).resolve().parent / "data"
-
     role_baseline_ema = None
     if Config.USE_ROLE_BASELINE:
         role_baseline_ema = {0: EMA(Config.ROLE_BASELINE_EMA_GAMMA), 1: EMA(Config.ROLE_BASELINE_EMA_GAMMA)}
@@ -219,50 +211,6 @@ def main():
         inference_backend.sync_policy(ac.lm, vllm_adapter_dir)
         if not inference_backend.is_enabled():
             inference_backend = HFLocalBackend(ac.lm, tokenizer, device)
-
-                # Periodic eval (deterministic)
-        if it % Config.EVAL_EVERY_ITERS == 0 and it > 0:
-            ac.eval()
-
-            inference_backend.sync_policy(ac.lm, vllm_adapter_dir)
-            if not inference_backend.is_enabled():
-                inference_backend = HFLocalBackend(ac.lm, tokenizer, device)
-
-            
-            print(f"[eval {it}] Starting eval vs base model ({Config.EVAL_GAMES} games)")
-            t_eval_base0 = time.time()
-            eval_logs_base = evaluate_vs_base(
-                current_model=ac.lm,
-                base_model_adapter_dir=base_model_adapter_dir,
-                tokenizer=tokenizer,
-                backend=inference_backend,
-                num_games=Config.EVAL_GAMES,
-                temperature=0.0,  # deterministic
-                max_new_tokens=max_gen_tokens,
-                seed=20_000 + it,
-                hf_hub=hf_hub,
-                device=device,
-                game_spec=game_spec,
-                env_kwargs=env_kwargs,
-            )
-            t_eval_base1 = time.time()
-            win_rate_base = eval_logs_base.get("eval/win_rate_vs_base", 0.0)
-            print(f"[eval {it}] vs base: win_rate={win_rate_base:.3f} ({t_eval_base1-t_eval_base0:.1f}s)")
-
-            all_eval_logs = {
-                **eval_logs_base,
-                "eval/time_vs_base_sec": t_eval_base1 - t_eval_base0,
-                "eval/improvement_vs_base": win_rate_base - 0.5,
-            }
-
-            print(f"[eval {it}] Summary: vs_base={win_rate_base:.3f}")
-            if win_rate_base > 0.5:
-                print(f"[eval {it}] ✓ Model is better than base model!")
-
-
-            if wandb:
-                wandb.log(all_eval_logs, step=global_step)
-
 
         # Periodic tau2-bench evaluation (sharded across vLLM servers)
         if Config.TAU2_EVAL_EVERY_ITERS and it % Config.TAU2_EVAL_EVERY_ITERS == 0 and it > 0:
@@ -449,38 +397,6 @@ def main():
 
         if wandb:
             wandb.log(logs, step=global_step)
-
-        # Math evaluation
-        if it % Config.MATH_EVAL_EVERY_ITERS == 0 and it > 0:
-            ac.eval()
-            print(f"[eval {it}] Starting math benchmark evaluation...")
-
-            all_math_logs = {}
-            for ds_name in Config.MATH_EVAL_DATASETS:
-                math_start = time.time()
-                math_logs = evaluate_math(
-                    model=ac.lm,
-                    tokenizer=tokenizer,
-                    data_path=math_eval_data_path,
-                    dataset_name=ds_name,
-                    num_samples=Config.MATH_EVAL_SAMPLES,
-                    temperature=0.0,
-                    max_new_tokens=Config.MAX_TOKENS_MATH_EVAL,
-                    backend=inference_backend,
-                    device=device,
-                )
-
-                math_end = time.time()
-
-                acc = math_logs.get(f"eval_math/{ds_name}_accuracy", 0.0)
-
-                print(f"[eval {it}] {ds_name}: accuracy={acc:.3f} ({math_end-math_start:.1f}s)")
-                
-                all_math_logs.update(math_logs)
-                all_math_logs[f"eval_math/{ds_name}_time_sec"] = math_end - math_start
-            
-            if wandb:
-                wandb.log(all_math_logs, step=global_step)
 
         # Save checkpoints: 1st iter, 2nd iter, then every SAVE_EVERY_ITERS
         if it <= 1 or it % Config.SAVE_EVERY_ITERS == 0:

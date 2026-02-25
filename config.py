@@ -7,18 +7,12 @@ import os
 import torch
 from pathlib import Path
 
-from liars_dice_tools import (
-    LIARS_DICE_TOOL_SPECS_NO_ID,
-    LIARS_DICE_TOOL_SPECS_WITH_ID,
-    build_tool_system_prompt,
-)
-
 
 # =========================
 # Parse command-line arguments
 # =========================
 def parse_args():
-    parser = argparse.ArgumentParser(description="PPO self-play for Kuhn Poker")
+    parser = argparse.ArgumentParser(description="PPO/GRPO training for game environments")
     parser.add_argument(
         "--root",
         type=str,
@@ -28,8 +22,8 @@ def parse_args():
     parser.add_argument(
         "--game",
         type=str,
-        default="kuhn_poker",
-        help="Game to train on (e.g., kuhn_poker, liars_dice, or an OpenSpiel-backed game registered in openspiel_wrapper.py)",
+        default="adversarial_policy",
+        help="Game to train on (e.g., adversarial_policy, tau_tool_calling, structured_data_reasoning, multistep_task)",
     )
 
     parser.add_argument(
@@ -144,8 +138,6 @@ class Config:
     LORA_ALPHA = 8
     
     # Game settings
-    NUM_ROUNDS = 5
-    NUM_DICE = 5
     GAMES_PER_ITER = 256
     # PPO hyperparameters
     PPO_EPOCHS = 1
@@ -158,16 +150,10 @@ class Config:
     # Generation settings
     ENABLE_THINKING = True
     MAX_GEN_TOKENS = 2048 if ENABLE_THINKING else 8
-    MAX_GEN_TOKENS_LIARS_DICE = 8192 if ENABLE_THINKING else 16
     TEMPERATURE = 0.7
-    MAX_TOKENS_MATH_EVAL = 7000
-    
+
     # Checkpointing and evaluation
     SAVE_EVERY_ITERS = 5
-    EVAL_EVERY_ITERS = 100000
-    EVAL_GAMES = 50
-    MATH_EVAL_SAMPLES = 50
-    MATH_EVAL_EVERY_ITERS = 1000
 
     # tau2-bench evaluation (set TAU2_EVAL_EVERY_ITERS = 0 to disable)
     TAU2_EVAL_EVERY_ITERS = 50
@@ -179,94 +165,8 @@ class Config:
 
     USE_ROLE_BASELINE = True
     ROLE_BASELINE_EMA_GAMMA = 0.95
-    
-    EVAL_BATCH_SIZE = 8
-    # Math evaluation datasets
-    MATH_EVAL_DATASETS = ["math", "amc", "aime"]
-    
-    # Prompt templates
-    SYSTEM_PROMPT_LIARS_DICE = (
-        "You are playing Liar's Dice.\n"
-        + ("" if ENABLE_THINKING else "Respond with EXACTLY ONE action and NOTHING ELSE.\n")
-        + "Valid actions: [bid: quantity, face] or [call]\n"
-        + "Examples: [bid: 3, 4] or [call]\n"
-        + ("" if ENABLE_THINKING else "Do not add any whitespace, punctuation, explanation, or extra text.\n")
-    )
-
-    SYSTEM_PROMPT_LIARS_DICE_MEMORY = (
-        "You are playing Liar's Dice. We will give you a history of four previous games, and we will "
-        "roll your current dice while doing so.\n"
-        "Your current dice will be revealed as INTERRUPTIONS while you read game histories.\n"
-        "You MUST remember all dice values shown in the interruptions.\n"
-        + ("" if ENABLE_THINKING else "Respond with EXACTLY ONE action and NOTHING ELSE.\n")
-        + "Valid actions: [bid: quantity, face] or [call]\n"
-        + "Examples: [bid: 3, 4] or [call]\n"
-        + ("" if ENABLE_THINKING else "Do not add any whitespace, punctuation, explanation, or extra text.\n")
-    )
-
-    SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED = (
-        "You are playing Liar's Dice. The game is presented as a system log with User IDs.\n"
-        "Your dice are revealed one by one in log entries.\n"
-        "You will also see other games occuring at the same time.\n"
-        + "Valid actions: [bid: quantity, face] or [call]\n"
-        + "Examples: [bid: 3, 4] or [call]\n"
-    )
-
-    SYSTEM_PROMPT_LIARS_DICE_TOOL = build_tool_system_prompt(
-        SYSTEM_PROMPT_LIARS_DICE,
-        LIARS_DICE_TOOL_SPECS_WITH_ID,
-    )
-
-    SYSTEM_PROMPT_LIARS_DICE_MEMORY_TOOL = build_tool_system_prompt(
-        SYSTEM_PROMPT_LIARS_DICE_MEMORY,
-        LIARS_DICE_TOOL_SPECS_NO_ID,
-    )
-
-    SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED_TOOL = build_tool_system_prompt(
-        SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED,
-        LIARS_DICE_TOOL_SPECS_NO_ID,
-    )
-
-    MATH_SYSTEM_PROMPT = (
-        "You are a helpful math assistant. Solve the following problem step by step. "
-        "Put your final answer in \\boxed{}."
-    )
 
 
-# =========================
-# Action constants
-# =========================
-def get_system_prompt(game: str) -> str:
-    """Get the system prompt for a game."""
-    if game == "liars_dice":
-        return Config.SYSTEM_PROMPT_LIARS_DICE
-    if game == "liars_dice_tool":
-        return Config.SYSTEM_PROMPT_LIARS_DICE_TOOL
-    if game == "liars_dice_memory":
-        return Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY
-    if game == "liars_dice_memory_tool":
-        return Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY_TOOL
-    if game == "liars_dice_memory_updated": 
-        return Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED
-    if game == "liars_dice_memory_updated_tool":
-        return Config.SYSTEM_PROMPT_LIARS_DICE_MEMORY_UPDATED_TOOL
-    return ""
-
-
-def get_max_gen_tokens(game: str) -> int:
-    """Get max generation tokens for a game."""
-    if game in (
-        "liars_dice",
-        "liars_dice_tool",
-        "liars_dice_memory",
-        "liars_dice_memory_tool",
-        "liars_dice_memory_updated",
-        "liars_dice_memory_updated_tool",
-    ):
-        return Config.MAX_GEN_TOKENS_LIARS_DICE
-    return Config.MAX_GEN_TOKENS
-
-    
 def autocast_ctx(device):
     """Return appropriate autocast context for the device."""
     if str(device).startswith("cuda"):

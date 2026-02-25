@@ -13,11 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
 from config import Config
-from liars_dice_tools import (
-    action_string_to_tool_call,
-    extract_tool_call_with_text,
-    tool_call_to_json,
-)
+
 
 from game_registry import GameSpec
 from inference import InferenceBackend, HFLocalBackend, messages_for_game, build_prompt_text, generate_completion
@@ -225,13 +221,6 @@ def values_from_hidden(last_hidden: torch.Tensor, value_head, prompt_lens: List[
 # =========================
 # Self-play collector
 # =========================
-_TOOL_CALL_GAMES = {
-    "liars_dice_tool",
-    "liars_dice_memory_tool",
-    "liars_dice_memory_updated_tool",
-}
-
-
 def _action_text_for_training(
     game_spec: GameSpec,
     completion: str,

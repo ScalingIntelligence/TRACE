@@ -56,14 +56,6 @@ def tools_for_game(env=None, compact: bool = False) -> Optional[list]:
     return None
 
 
-def messages_for_math(question: str) -> list:
-    """Build messages for math problem."""
-    return [
-        {"role": "system", "content": Config.MATH_SYSTEM_PROMPT},
-        {"role": "user", "content": question},
-    ]
-
-
 def build_prompt_text(tokenizer, msgs: list, tools: Optional[list] = None) -> str:
     """
     Build a string prompt using the model's chat template.

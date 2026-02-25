@@ -32,9 +32,9 @@ from structured_data_game import (
 )
 
 from multistep_task_game import (
-    MultiStepTaskGame,
-    extract_action as extract_action_multistep_task,
-    SYSTEM_PROMPT as SYSTEM_PROMPT_MULTISTEP_TASK,
+    RealisticMultiStepGame,
+    extract_action as extract_action_multistep,
+    SYSTEM_PROMPT as SYSTEM_PROMPT_MULTISTEP,
 )
 
 
@@ -160,39 +160,23 @@ def _register_builtin_games() -> None:
         )
     )
 
-    # Multi-Step Task Tracking — targets ~32% of tau2-bench failures
-    # Trains completing N independent sub-tasks with correct tool calls
+    # Multi-Step Task — targets actual tau2-bench multi-step failure modes
+    # One-shot constraints, info retrieval chains, item batching, status-gated tools
     # Multi-turn, no LLM user needed.
-    def make_multistep_task(n_tasks=3) -> MultiStepTaskGame:
-        return MultiStepTaskGame(max_steps=15, n_tasks=n_tasks)
+    def make_multistep(difficulty=3) -> RealisticMultiStepGame:
+        return RealisticMultiStepGame(max_steps=30, difficulty=difficulty)
 
     register_game(
         GameSpec(
-            name="multistep_task_tracking",
-            make_env=make_multistep_task,
-            extract_action=extract_action_multistep_task,
+            name="multistep_task",
+            make_env=make_multistep,
+            extract_action=extract_action_multistep,
             action_space=[],
             stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
-            system_prompt=SYSTEM_PROMPT_MULTISTEP_TASK,
-            max_gen_tokens=512,
+            system_prompt=SYSTEM_PROMPT_MULTISTEP,
+            max_gen_tokens=1024,
         )
     )
 
 
-def _register_openspiel_games() -> None:
-    """Best-effort registration of optional OpenSpiel games."""
-    try:
-        from openspiel_wrapper import list_openspiel_game_specs
-    except Exception:
-        return
-
-    try:
-        for spec in list_openspiel_game_specs():
-            register_game(spec)
-    except Exception:
-        # Keep core games usable even if OpenSpiel isn't installed.
-        return
-
-
 _register_builtin_games()
-_register_openspiel_games()

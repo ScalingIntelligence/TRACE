@@ -84,7 +84,7 @@ from train_grpo import (
     compute_group_advantages,
     filter_constant_reward_groups,
 )
-from evaluation import evaluate_vs_base, evaluate_math, evaluate_tau2_bench
+from evaluation import evaluate_tau2_bench
 from sft_buffer import SFTBuffer
 from dist_utils import (
     dist_init, dist_pre_init, dist_nccl_init,
@@ -306,7 +306,7 @@ def parse_grpo_args_optimized():
     )
 
     # -- Game and model --
-    parser.add_argument("--game", type=str, default="kuhn_poker",
+    parser.add_argument("--game", type=str, default="adversarial_policy",
         help="Game to train on (from game_registry)")
     parser.add_argument("--model", type=str, default=None,
         help="HuggingFace model name (default: Config.MODEL_NAME)")
@@ -369,12 +369,6 @@ def parse_grpo_args_optimized():
         help="Filename for rollout logs")
     parser.add_argument("--save-every", type=int, default=5,
         help="Save checkpoint every N iterations")
-    parser.add_argument("--eval-every", type=int, default=100000,
-        help="Eval vs base model every N iterations")
-    parser.add_argument("--eval-games", type=int, default=100000,
-        help="Number of games for eval vs base")
-    parser.add_argument("--math-eval-every", type=int, default=100000,
-        help="Math benchmark eval every N iterations (0 to disable)")
     parser.add_argument("--tau2-eval-every", type=int, default=0,
         help="Tau2-bench eval every N iterations (0 to disable)")
 
@@ -464,11 +458,6 @@ def main():
 
     max_gen_tokens = game_spec.max_gen_tokens
     env_kwargs: Dict[str, Any] = {}
-    if game_spec.name == "kuhn_poker":
-        env_kwargs["num_rounds"] = Config.NUM_ROUNDS
-    elif game_spec.name == "liars_dice":
-        env_kwargs["num_dice"] = Config.NUM_DICE
-
     if args.user_llm_url and game_spec.name in ("adversarial_policy", "tau_tool_calling"):
         from adversarial_policy_game import UserLLMClient
         user_client = UserLLMClient(
@@ -669,8 +658,6 @@ def main():
     print(f"[GRPO] Starting optimized training loop...")
 
     global_step = start_iter * 25 if args.resume else 0
-    math_eval_data_path = Path(__file__).resolve().parent / "data"
-
     # ---- SFT buffer initialization ----
     sft_buffer = None
     if args.sft_data:
@@ -693,41 +680,7 @@ def main():
                 inference_backend = HFLocalBackend(model, tokenizer, device)
         barrier()
 
-        # ---- 2. Periodic evaluation (rank 0 only) ----
-        if args.eval_every and it % args.eval_every == 0 and it > 0:
-            if is_main_rank():
-                model.eval()
-                inference_backend.sync_policy(model, vllm_adapter_dir)
-                if not inference_backend.is_enabled():
-                    inference_backend = HFLocalBackend(model, tokenizer, device)
-
-                print(f"\n[eval {it}] Starting eval vs base ({args.eval_games} games)")
-                t_eval0 = time.time()
-                eval_logs = evaluate_vs_base(
-                    current_model=model,
-                    base_model_adapter_dir=base_model_adapter_dir,
-                    tokenizer=tokenizer,
-                    backend=inference_backend,
-                    num_games=args.eval_games,
-                    temperature=0.0,
-                    max_new_tokens=max_gen_tokens,
-                    seed=20_000 + it,
-                    hf_hub=hf_hub,
-                    device=device,
-                    game_spec=game_spec,
-                    env_kwargs=env_kwargs,
-                )
-                t_eval1 = time.time()
-                wr = eval_logs.get("eval/win_rate_vs_base", 0.0)
-                print(f"[eval {it}] win_rate={wr:.3f} ({t_eval1 - t_eval0:.1f}s)")
-                if wr > 0.5:
-                    print(f"[eval {it}] Model is better than base!")
-
-                if wandb:
-                    wandb.log(eval_logs, step=global_step)
-            barrier()
-
-        # tau2-bench evaluation (rank 0 only)
+        # ---- 2. Periodic tau2-bench evaluation (rank 0 only) ----
         if args.tau2_eval_every and it % args.tau2_eval_every == 0 and it > 0:
             if is_main_rank():
                 model.eval()
@@ -1243,32 +1196,6 @@ def main():
 
             if wandb:
                 wandb.log(logs, step=global_step)
-
-        # ---- Math evaluation (rank 0 only) ----
-        if args.math_eval_every and it % args.math_eval_every == 0 and it > 0:
-            if is_main_rank():
-                model.eval()
-                all_math_logs: Dict[str, float] = {}
-                for ds_name in Config.MATH_EVAL_DATASETS:
-                    math_start = time.time()
-                    math_logs = evaluate_math(
-                        model=model,
-                        tokenizer=tokenizer,
-                        data_path=math_eval_data_path,
-                        dataset_name=ds_name,
-                        num_samples=Config.MATH_EVAL_SAMPLES,
-                        temperature=0.0,
-                        max_new_tokens=Config.MAX_TOKENS_MATH_EVAL,
-                        backend=inference_backend,
-                        device=device,
-                    )
-                    math_end = time.time()
-                    acc = math_logs.get(f"eval_math/{ds_name}_accuracy", 0.0)
-                    print(f"[eval {it}] {ds_name}: accuracy={acc:.3f} ({math_end - math_start:.1f}s)")
-                    all_math_logs.update(math_logs)
-                if wandb:
-                    wandb.log(all_math_logs, step=global_step)
-            barrier()
 
         # ---- 9. Save checkpoint: 1st iter, 2nd iter, then every save_every (rank 0 only) ----
         if it % args.save_every == 0:
