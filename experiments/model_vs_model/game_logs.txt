@@ -1,49 +1,0 @@
-🦥 Unsloth: Will patch your computer to enable 2x faster free finetuning.
-ERROR 01-10 19:25:36 [config.py:32] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: module 'triton.language' has no attribute 'constexpr_function'
-🦥 Unsloth Zoo will now patch everything to make training faster!
-ERROR 01-10 19:25:38 [gpt_oss_triton_kernels_moe.py:30] Failed to import Triton kernels. Please make sure your triton version is compatible. Error: module 'triton.language' has no attribute 'constexpr_function'
-============================================================
-Kuhn Poker Model-vs-Model Evaluation
-============================================================
-Models: ['qwen-4b', 'qwen-4b-instruct', 'qwen-8b', 'qwen-14b']
-Games per matchup: 20
-Rounds per game: 1
-Temperature: 0.7
-Total matchups: 12
-
-============================================================
-Loading models...
-============================================================
-[load_model] Loading Qwen/Qwen3-4B...
-==((====))==  Unsloth 2026.1.2: Fast Qwen3 patching. Transformers: 4.56.2. vLLM: 0.13.0.
-   \\   /|    NVIDIA A100-SXM4-80GB. Num GPUs = 1. Max memory: 79.254 GB. Platform: Linux.
-O^O/ \_/ \    Torch: 2.9.0+cu129. CUDA: 8.0. CUDA Toolkit: 12.9. Triton: 3.5.0
-\        /    Bfloat16 = TRUE. FA [Xformers = None. FA2 = False]
- "-____-"     Free license: http://github.com/unslothai/unsloth
-Unsloth: Fast downloading is enabled - ignore downloading bars which are red colored!
-[load_model] qwen-4b loaded successfully
-[load_model] Loading Qwen/Qwen3-4B-Instruct-2507...
-==((====))==  Unsloth 2026.1.2: Fast Qwen3 patching. Transformers: 4.56.2. vLLM: 0.13.0.
-   \\   /|    NVIDIA A100-SXM4-80GB. Num GPUs = 1. Max memory: 79.254 GB. Platform: Linux.
-O^O/ \_/ \    Torch: 2.9.0+cu129. CUDA: 8.0. CUDA Toolkit: 12.9. Triton: 3.5.0
-\        /    Bfloat16 = TRUE. FA [Xformers = None. FA2 = False]
- "-____-"     Free license: http://github.com/unslothai/unsloth
-Unsloth: Fast downloading is enabled - ignore downloading bars which are red colored!
-[load_model] qwen-4b-instruct loaded successfully
-[load_model] Loading Qwen/Qwen3-8B...
-==((====))==  Unsloth 2026.1.2: Fast Qwen3 patching. Transformers: 4.56.2. vLLM: 0.13.0.
-   \\   /|    NVIDIA A100-SXM4-80GB. Num GPUs = 1. Max memory: 79.254 GB. Platform: Linux.
-O^O/ \_/ \    Torch: 2.9.0+cu129. CUDA: 8.0. CUDA Toolkit: 12.9. Triton: 3.5.0
-\        /    Bfloat16 = TRUE. FA [Xformers = None. FA2 = False]
- "-____-"     Free license: http://github.com/unslothai/unsloth
-Unsloth: Fast downloading is enabled - ignore downloading bars which are red colored!
-Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s]Loading checkpoint shards:  50%|█████     | 1/2 [00:00<00:00,  1.03it/s]Loading checkpoint shards: 100%|██████████| 2/2 [00:01<00:00,  1.50it/s]Loading checkpoint shards: 100%|██████████| 2/2 [00:01<00:00,  1.40it/s]
-[load_model] qwen-8b loaded successfully
-[load_model] Loading Qwen/Qwen3-14B...
-==((====))==  Unsloth 2026.1.2: Fast Qwen3 patching. Transformers: 4.56.2. vLLM: 0.13.0.
-   \\   /|    NVIDIA A100-SXM4-80GB. Num GPUs = 1. Max memory: 79.254 GB. Platform: Linux.
-O^O/ \_/ \    Torch: 2.9.0+cu129. CUDA: 8.0. CUDA Toolkit: 12.9. Triton: 3.5.0
-\        /    Bfloat16 = TRUE. FA [Xformers = None. FA2 = False]
- "-____-"     Free license: http://github.com/unslothai/unsloth
-Unsloth: Fast downloading is enabled - ignore downloading bars which are red colored!
-Loading checkpoint shards:   0%|          | 0/3 [00:00<?, ?it/s]Loading checkpoint shards:  33%|███▎      | 1/3 [00:00<00:01,  1.09it/s]Loading checkpoint shards:  67%|██████▋   | 2/3 [00:01<00:00,  1.19it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:01<00:00,  1.83it/s]Loading checkpoint shards: 100%|██████████| 3/3 [00:01<00:00,  1.58it/s]
