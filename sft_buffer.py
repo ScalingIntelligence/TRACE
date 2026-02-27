@@ -172,24 +172,31 @@ def load_sft_samples(
     # Get domain from environment_info
     env_info = data.get("info", {}).get("environment_info", {})
     domain = env_info.get("domain_name", "")
-    policy_text = env_info.get("policy", "")
 
-    if not domain or not policy_text:
-        return []
+    # System prompt: use explicit one if provided, else build from policy
+    explicit_system_prompt = env_info.get("system_prompt")
+    if explicit_system_prompt:
+        system_prompt = explicit_system_prompt
+    else:
+        policy_text = env_info.get("policy", "")
+        if not domain or not policy_text:
+            return []
+        system_prompt = _build_system_prompt(policy_text)
 
-    # Build system prompt
-    system_prompt = _build_system_prompt(policy_text)
     system_msg = {"role": "system", "content": system_prompt}
 
-    # Get tool schemas
-    if domain == "airline":
+    # Tool schemas: use explicit ones if provided, else lookup by domain
+    explicit_tools = env_info.get("tool_schemas")
+    if explicit_tools is not None:
+        tools = explicit_tools
+    elif domain == "airline":
         tools = AIRLINE_TOOL_SCHEMAS
     elif domain == "retail":
         tools = RETAIL_TOOL_SCHEMAS
     else:
-        return []
+        tools = []
 
-    if compact_tools:
+    if compact_tools and tools:
         tools = compress_tool_schemas(tools)
 
     # Extract from simulations

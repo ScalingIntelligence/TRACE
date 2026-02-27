@@ -28,22 +28,24 @@ from .scenarios import ExpectedAction, GeneratedScenario
 
 def compute_gold_db_hash(
     domain: str,
+    initial_db: Dict[str, Any],
     expected_actions: List[ExpectedAction],
 ) -> str:
-    """Compute the expected DB hash by replaying gold actions on a fresh environment.
+    """Compute the expected DB hash by replaying gold actions on a fresh DB copy.
 
     Args:
         domain: "airline" or "retail"
+        initial_db: The scenario's initial DB state (will be deep-copied).
         expected_actions: List of tool calls to replay.
 
     Returns:
         SHA256 hash of the expected DB state.
     """
-    from adversarial_policy_game.database import get_pydantic_db
+    import copy
     from adversarial_policy_game.tools import ToolExecutor
 
     # Create fresh environment with clean DB copy
-    db = get_pydantic_db(domain)
+    db = copy.deepcopy(initial_db)
     gold_tools = ToolExecutor(domain, db)
 
     # Replay expected actions
@@ -146,7 +148,7 @@ def _compute_action_reward(
         return 0.0, "Unnecessarily transferred on action task"
 
     # Compute gold and predicted DB hashes
-    gold_hash = compute_gold_db_hash(scenario.domain, scenario.expected_actions)
+    gold_hash = compute_gold_db_hash(scenario.domain, scenario.db, scenario.expected_actions)
     predicted_hash = compute_predicted_db_hash(tool_executor)
 
     db_pass = gold_hash == predicted_hash

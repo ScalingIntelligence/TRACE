@@ -1,14 +1,13 @@
 """Scenario templates for policy adherence training.
 
-Each template generates a scenario: entity references into the real tau2-bench
-database, user conversation prompts, and ground truth for verification.
+Each template generates a scenario with synthetic data (no tau2-bench DB leakage),
+user conversation prompts, and ground truth for verification.
 
 Templates 1-12: Adversarial (policy violation attempts under pressure).
 Templates 13-21: Cooperative (legitimate requests that should be fulfilled).
 
 The adversarial_ratio parameter controls the mix: e.g. 0.2 = 20% adversarial,
 80% cooperative, reflecting the real tau2-bench task distribution (~16% adversarial).
-No synthetic data — all entities sampled from the real tau2-bench database.
 """
 
 import random
@@ -20,8 +19,8 @@ from enum import Enum
 from .database import (
     sample_airline_user, sample_retail_user,
     sample_airline_multi_reservations,
-    _load_raw_db,
 )
+from .synthetic_db import build_airline_db, build_retail_db
 from .constants import AIRPORTS
 from .llm_user import build_user_system_prompt
 
@@ -58,6 +57,7 @@ class Scenario:
     key_facts: Dict[str, Any] = field(default_factory=dict)
     user_system_prompt: str = ""
     initial_message: str = ""
+    db: Dict[str, Any] = field(default_factory=dict)  # Episode DB for tool executor
 
 
 # =====================================================================
@@ -200,6 +200,7 @@ def generate_template_1(rng: random.Random) -> Scenario:
                    "membership": membership, "res_id": res_id},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_airline_db(sample["user"], sample["reservation"], sample.get("flights_db", {})),
     )
 
 
@@ -250,13 +251,13 @@ def generate_template_2(rng: random.Random) -> Scenario:
             communicate_info=["basic economy"],
         )
     else:
-        # upgrade_cabin: allowed — calculate price diff from real data
-        full_db = _load_raw_db("airline")
+        # upgrade_cabin: allowed — calculate price diff from synthetic flight data
+        flights_db = sample.get("flights_db", {})
         price_diff = 0
         for fleg in res.get("flights", []):
             fn = fleg.get("flight_number", "")
             date = fleg.get("date", "")
-            flight_data = full_db.get("flights", {}).get(fn, {}).get("dates", {}).get(date, {})
+            flight_data = flights_db.get(fn, {}).get("dates", {}).get(date, {})
             be_price = fleg.get("price", 0)
             econ_price = flight_data.get("prices", {}).get("economy", be_price + 50)
             price_diff += (econ_price - be_price)
@@ -296,6 +297,7 @@ def generate_template_2(rng: random.Random) -> Scenario:
         key_facts={"cabin": "basic_economy", "request_type": request_type, "res_id": res_id},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_airline_db(sample["user"], sample["reservation"], sample.get("flights_db", {})),
     )
 
 
@@ -361,6 +363,7 @@ def generate_template_3(rng: random.Random) -> Scenario:
         key_facts={"origin": origin, "dest": dest, "new_dest": new_dest, "res_id": res_id},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_airline_db(sample["user"], sample["reservation"], sample.get("flights_db", {})),
     )
 
 
@@ -423,6 +426,7 @@ def generate_template_4(rng: random.Random) -> Scenario:
         key_facts={"initial_bags": initial_bags, "res_id": res_id},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_airline_db(sample["user"], sample["reservation"], sample.get("flights_db", {})),
     )
 
 
@@ -510,6 +514,7 @@ def generate_template_5(rng: random.Random) -> Scenario:
         key_facts={"claim_type": claim_type, "membership": membership, "res_id": res_id},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_airline_db(sample["user"], sample["reservation"], sample.get("flights_db", {})),
     )
 
 
@@ -633,6 +638,7 @@ def generate_template_6(rng: random.Random) -> Scenario:
                    "wrong_pay": wrong_pay_id, "order_id": order_id},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_retail_db(sample["user"], sample["order"], sample.get("products_db", {})),
     )
 
 
@@ -739,6 +745,7 @@ def generate_template_7(rng: random.Random) -> Scenario:
                    "has_gift_card_refund": has_gift_card_refund, "num_items": num_items},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_retail_db(sample["user"], sample["order"], sample.get("products_db", {})),
     )
 
 
@@ -808,6 +815,7 @@ def generate_template_8(rng: random.Random) -> Scenario:
                    "order_id": order_id},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_retail_db(sample["user"], sample["order"], sample.get("products_db", {})),
     )
 
 
@@ -829,9 +837,9 @@ def generate_template_9(rng: random.Random) -> Scenario:
     order = sample["order"]
     item_to_modify = order["items"][0]
 
-    # Find a concrete alternative variant from the real DB
-    full_db = _load_raw_db("retail")
-    product = full_db.get("products", {}).get(item_to_modify["product_id"], {})
+    # Find a concrete alternative variant from synthetic products
+    products_db = sample.get("products_db", {})
+    product = products_db.get(item_to_modify["product_id"], {})
     current_item_id = item_to_modify["item_id"]
     alt_variants = [
         (vid, v) for vid, v in product.get("variants", {}).items()
@@ -891,6 +899,7 @@ def generate_template_9(rng: random.Random) -> Scenario:
         key_facts={"order_id": order_id, "correct_action": "modify", "wrong_action": "cancel"},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_retail_db(sample["user"], sample["order"], sample.get("products_db", {})),
     )
 
 
@@ -912,9 +921,9 @@ def generate_template_10(rng: random.Random) -> Scenario:
     order = sample["order"]
     item_to_change = order["items"][0]
 
-    # Find cheapest available variant of the same product from real DB
-    full_db = _load_raw_db("retail")
-    product = full_db.get("products", {}).get(item_to_change["product_id"], {})
+    # Find cheapest available variant of the same product from synthetic data
+    products_db = sample.get("products_db", {})
+    product = products_db.get(item_to_change["product_id"], {})
     available_prices = [
         v["price"] for v in product.get("variants", {}).values()
         if v.get("available", False)
@@ -973,6 +982,7 @@ def generate_template_10(rng: random.Random) -> Scenario:
         key_facts={"threshold": threshold, "cheapest": cheapest_available, "order_id": order_id},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_retail_db(sample["user"], sample["order"], sample.get("products_db", {})),
     )
 
 
@@ -1084,6 +1094,7 @@ def generate_template_11(rng: random.Random) -> Scenario:
         key_facts={"action_type": action_type, "res_id": res_id},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_airline_db(sample["user"], sample["reservation"], sample.get("flights_db", {})),
     )
 
 
@@ -1097,8 +1108,10 @@ def generate_template_12(rng: random.Random) -> Scenario:
         raise ValueError("No matching airline user for template 12 (3+ active reservations)")
 
     uid = sample["user_id"]
+    user = sample["user"]
     reservations = sample["reservations"]
     res_ids = sample["reservation_ids"]
+    flights_db = sample.get("flights_db", {})
 
     # Determine eligibility of each reservation
     eligible_ids = []
@@ -1116,9 +1129,8 @@ def generate_template_12(rng: random.Random) -> Scenario:
             ineligible_ids.append(rid)
 
     # If all are eligible or all ineligible, re-sample with more reservations
-    # to find a natural mix. Never force-override real eligibility.
+    # to find a natural mix.
     if not eligible_ids or not ineligible_ids:
-        # Try sampling a user with more reservations for a natural mix
         for extra in range(4, 8):
             sample2 = sample_airline_multi_reservations(rng, criteria={}, min_reservations=extra)
             if sample2 is None:
@@ -1134,14 +1146,15 @@ def generate_template_12(rng: random.Random) -> Scenario:
                 else:
                     ineligible_ids2.append(rid2)
             if eligible_ids2 and ineligible_ids2:
+                sample = sample2
                 uid = sample2["user_id"]
+                user = sample2["user"]
                 reservations = sample2["reservations"]
                 res_ids = sample2["reservation_ids"]
+                flights_db = sample2.get("flights_db", {})
                 eligible_ids = eligible_ids2
                 ineligible_ids = ineligible_ids2
                 break
-        # If still no mix, keep original classification (all eligible or all ineligible)
-        # — the scenario is still valid, just less interesting
 
     initial_msg = f"Hi, user ID {uid}. I want to cancel ALL my reservations. Every single one."
 
@@ -1190,6 +1203,7 @@ def generate_template_12(rng: random.Random) -> Scenario:
                    "num_reservations": len(res_ids)},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_airline_db(sample["user"], sample["reservations"], sample.get("flights_db", {})),
     )
 
 
@@ -1273,6 +1287,7 @@ def generate_template_13(rng: random.Random) -> Scenario:
         key_facts={"cancel_type": cancel_type, "res_id": res_id, "cabin": cabin},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_airline_db(sample["user"], sample["reservation"], sample.get("flights_db", {})),
     )
 
 
@@ -1336,6 +1351,7 @@ def generate_template_14(rng: random.Random) -> Scenario:
         key_facts={"cabin": actual_cabin, "res_id": res_id},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_airline_db(sample["user"], sample["reservation"], sample.get("flights_db", {})),
     )
 
 
@@ -1423,6 +1439,7 @@ def generate_template_15(rng: random.Random) -> Scenario:
         key_facts={"current_bags": current_bags, "new_bags": new_bags, "res_id": res_id},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_airline_db(sample["user"], sample["reservation"], sample.get("flights_db", {})),
     )
 
 
@@ -1460,14 +1477,14 @@ def generate_template_16(rng: random.Random) -> Scenario:
     res_id = sample["reservation_id"]
     res = sample["reservation"]
 
-    # Calculate price difference from real data (only if all flights have target cabin pricing)
-    full_db = _load_raw_db("airline")
+    # Calculate price difference from synthetic flight data
+    flights_db = sample.get("flights_db", {})
     price_diff = 0
     prices_reliable = True
     for fleg in res.get("flights", []):
         fn = fleg.get("flight_number", "")
         date = fleg.get("date", "")
-        flight_data = full_db.get("flights", {}).get(fn, {}).get("dates", {}).get(date, {})
+        flight_data = flights_db.get(fn, {}).get("dates", {}).get(date, {})
         current_price = fleg.get("price", 0)
         target_price = flight_data.get("prices", {}).get(to_cabin)
         if target_price is None:
@@ -1515,6 +1532,7 @@ def generate_template_16(rng: random.Random) -> Scenario:
                    "price_diff": total_diff, "res_id": res_id},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_airline_db(sample["user"], sample["reservation"], sample.get("flights_db", {})),
     )
 
 
@@ -1539,9 +1557,9 @@ def generate_template_17(rng: random.Random) -> Scenario:
     order = sample["order"]
     item = order["items"][0]
 
-    # Find an alternative variant from real DB
-    full_db = _load_raw_db("retail")
-    product = full_db.get("products", {}).get(item["product_id"], {})
+    # Find an alternative variant from synthetic products
+    products_db = sample.get("products_db", {})
+    product = products_db.get(item["product_id"], {})
     current_item_id = item["item_id"]
     alt_variants = [
         (vid, v) for vid, v in product.get("variants", {}).items()
@@ -1590,6 +1608,7 @@ def generate_template_17(rng: random.Random) -> Scenario:
         key_facts={"order_id": order_id, "item_name": item["name"]},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_retail_db(sample["user"], sample["order"], sample.get("products_db", {})),
     )
 
 
@@ -1665,6 +1684,7 @@ def generate_template_18(rng: random.Random) -> Scenario:
                    "total_refund": total_refund},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_retail_db(sample["user"], sample["order"], sample.get("products_db", {})),
     )
 
 
@@ -1729,6 +1749,7 @@ def generate_template_19(rng: random.Random) -> Scenario:
                    "total": total_amount},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_retail_db(sample["user"], sample["order"], sample.get("products_db", {})),
     )
 
 
@@ -1753,9 +1774,9 @@ def generate_template_20(rng: random.Random) -> Scenario:
     order = sample["order"]
     item = order["items"][0]
 
-    # Find alternative variant from real DB
-    full_db = _load_raw_db("retail")
-    product = full_db.get("products", {}).get(item["product_id"], {})
+    # Find alternative variant from synthetic products
+    products_db = sample.get("products_db", {})
+    product = products_db.get(item["product_id"], {})
     current_item_id = item["item_id"]
     alt_variants = [
         (vid, v) for vid, v in product.get("variants", {}).items()
@@ -1804,6 +1825,7 @@ def generate_template_20(rng: random.Random) -> Scenario:
         key_facts={"order_id": order_id, "item_name": item["name"]},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_retail_db(sample["user"], sample["order"], sample.get("products_db", {})),
     )
 
 
@@ -1871,6 +1893,7 @@ def generate_template_21(rng: random.Random) -> Scenario:
         key_facts={"order_id": order_id, "new_address": new_addr.get("address1", "")},
         user_system_prompt=user_prompt,
         initial_message=initial_msg,
+        db=build_retail_db(sample["user"], sample["order"], sample.get("products_db", {})),
     )
 
 

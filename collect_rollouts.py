@@ -1,8 +1,13 @@
-"""Collect agent-user trajectories for tau_tool_calling or adversarial_policy environments.
+"""Collect agent trajectories for any game supported by train_grpo_optimized.py.
 
-Runs a vLLM-served agent model and user model through seeds in parallel,
-saving trajectories as JSON in tau2-bench eval format compatible with
-train_sft.py (via SFTBuffer).
+Runs a vLLM-served agent model through seeds in parallel, saving trajectories
+as JSON in tau2-bench eval format compatible with train_sft.py (via SFTBuffer).
+
+Supports all 4 game environments:
+  - adversarial_policy:       multi-turn, tool calling, LLM user
+  - tau_tool_calling:         multi-turn, tool calling, LLM user
+  - multistep_task:           multi-turn, observation-based, simulated user
+  - structured_data_reasoning: single-turn, observation-based, no user
 
 Seeds [start_seed, start_seed + num_seeds) are run once. Trajectories
 meeting --reward-threshold are kept; the rest are discarded.
@@ -31,6 +36,18 @@ Usage:
         --num-seeds 100 \
         --reward-threshold 0.5
 
+    # Collect multistep_task:
+    python collect_rollouts.py \
+        --env multistep_task \
+        --model Qwen/Qwen3-30B-A3B-Instruct-2507 \
+        --num-seeds 100
+
+    # Collect structured_data_reasoning:
+    python collect_rollouts.py \
+        --env structured_data_reasoning \
+        --model Qwen/Qwen3-30B-A3B-Instruct-2507 \
+        --num-seeds 100
+
 Output:
     JSON file(s) in tau2-bench eval format (one per domain), directly
     loadable by SFTBuffer: python train_sft.py --sft-data <output.json>
@@ -53,15 +70,20 @@ _loguru_logger.disable("tau2")
 
 import requests
 
-from adversarial_policy_game.llm_user import UserLLMClient
-from adversarial_policy_game.constants import AIRLINE_POLICY, RETAIL_POLICY
+from game_registry import get_game_spec, list_game_names
+
+
+# Tool-calling games use LLM user for multi-turn conversation
+TOOL_CALLING_GAMES = {"adversarial_policy", "tau_tool_calling"}
+# Observation-based games use observe()/step() interface
+OBSERVE_GAMES = {"multistep_task", "structured_data_reasoning"}
 
 
 # ---------------------------------------------------------------------------
-# vLLM client with function calling
+# vLLM client with function calling + text generation
 # ---------------------------------------------------------------------------
 class VLLMClient:
-    def __init__(self, base_url: str, model: str, max_tokens: int = 512,
+    def __init__(self, base_url: str, model: str, max_tokens: int = 1024,
                  temperature: float = 0.0):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -78,6 +100,7 @@ class VLLMClient:
         messages: List[Dict[str, Any]],
         tools: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        """Generate with OpenAI tool-calling API (for adversarial_policy/tau_tool_calling)."""
         all_messages = [{"role": "system", "content": system_prompt}] + messages
         payload = {
             "model": self.model,
@@ -98,6 +121,30 @@ class VLLMClient:
             "content": choice.get("content"),
             "tool_calls": choice.get("tool_calls"),
         }
+
+    def generate_text(
+        self,
+        system_prompt: str,
+        user_content: str,
+    ) -> str:
+        """Generate plain text (for observation-based games)."""
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+        }
+        resp = self.session.post(
+            f"{self.base_url}/chat/completions",
+            json=payload,
+            timeout=180,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
 
 
 # ---------------------------------------------------------------------------
@@ -159,10 +206,10 @@ def conversation_to_tau2_messages(
 
 
 # ---------------------------------------------------------------------------
-# Episode runner (unified for both envs)
+# Episode runner: tool-calling games (adversarial_policy, tau_tool_calling)
 # ---------------------------------------------------------------------------
-def run_episode(game, client: VLLMClient, seed: int, env_type: str,
-                user_difficulty: str = None) -> Dict[str, Any]:
+def run_episode_toolcall(game, client: VLLMClient, seed: int, env_type: str,
+                         user_difficulty: str = None) -> Dict[str, Any]:
     """Run one episode using OpenAI function calling API.
 
     Works with both TauToolCallingEnv and AdversarialPolicyGame since they
@@ -268,14 +315,277 @@ def run_episode(game, client: VLLMClient, seed: int, env_type: str,
 
 
 # ---------------------------------------------------------------------------
+# Episode runner: observation-based games (multistep_task, structured_data)
+# ---------------------------------------------------------------------------
+def run_episode_observe(game, client: VLLMClient, seed: int,
+                        game_spec, env_type: str) -> Dict[str, Any]:
+    """Run one episode for observation-based games.
+
+    These games use observe()/step()/legal_actions() and produce a full
+    observation at each turn (including embedded tools and conversation).
+    """
+    try:
+        game.reset(seed)
+    except Exception as e:
+        return {"seed": seed, "error": str(e)}
+
+    system_prompt = game_spec.system_prompt
+    turns = []
+    step = 0
+    max_steps = getattr(game, '_max_steps', 30)
+
+    while not game.done and step < max_steps:
+        obs = game.observe(0)
+
+        try:
+            response = client.generate_text(system_prompt, obs)
+        except Exception as e:
+            game.step(None)
+            break
+
+        action = game_spec.extract_action(response, game.legal_actions())
+
+        turns.append({
+            "observation": obs,
+            "raw_response": response,
+            "action": action,
+        })
+
+        game.step(action)
+        step += 1
+
+    reward = game.rewards.get(0, 0.0)
+    summary = game.get_summary() if hasattr(game, 'get_summary') else {}
+
+    result = {
+        "seed": seed,
+        "reward": reward,
+        "reason": summary.get("reason", ""),
+        "steps": step,
+        "turns": turns,
+        "system_prompt": system_prompt,
+        "domain": env_type,
+    }
+
+    # Game-specific metadata
+    if env_type == "multistep_task":
+        result.update({
+            "n_ops": summary.get("n_ops", 0),
+            "one_shot_violations": summary.get("one_shot_violations", 0),
+            "wrong_tool_type": summary.get("wrong_tool_type", 0),
+        })
+    elif env_type == "structured_data_reasoning":
+        result.update({
+            "data_type": summary.get("data_type", ""),
+            "difficulty": summary.get("difficulty", 0),
+            "num_items": summary.get("num_items", 0),
+        })
+
+    return result
+
+
+def turns_to_simulations(rollout: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Convert observation-based game turns to per-turn tau2-bench simulations.
+
+    Each turn becomes a separate simulation entry. This matches how GRPO
+    training builds prompts for these games: each turn gets a full observation
+    as a single user message, so SFTBuffer should see each turn independently.
+    """
+    simulations = []
+    for i, turn in enumerate(rollout.get("turns", [])):
+        action_str = turn.get("action")
+        if action_str is None:
+            continue
+
+        try:
+            action_obj = json.loads(action_str)
+            name = action_obj.get("name", "")
+            args = action_obj.get("arguments", {})
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        messages = [
+            {"role": "user", "content": turn["observation"]},
+        ]
+
+        if name == "respond_to_user":
+            messages.append({
+                "role": "assistant",
+                "content": args.get("message", ""),
+                "tool_calls": None,
+            })
+        else:
+            messages.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": f"tool-{i:04d}",
+                    "name": name,
+                    "arguments": args,
+                }],
+            })
+
+        simulations.append({
+            "task_id": f"{rollout['seed']}_t{i}",
+            "reward_info": {"reward": rollout["reward"]},
+            "messages": messages,
+        })
+
+    return simulations
+
+
+# ---------------------------------------------------------------------------
+# Progress printing helpers
+# ---------------------------------------------------------------------------
+def _print_toolcall_progress(args, result, seed, sample_idx, num_samples,
+                              passed_seeds, completed_seeds, total_seeds,
+                              elapsed, tag_pass=""):
+    sample_tag = f"s={sample_idx+1}/{num_samples} " if num_samples > 1 else ""
+    r = result.get("reward", 0)
+    err = " ERROR" if "error" in result else ""
+
+    if args.env == "tau_tool_calling":
+        domain = result.get("domain", "?")
+        stype = result.get("scenario_type", result.get("error", "err"))[:14]
+        print(f"  [{passed_seeds:3d}/{completed_seeds}/{total_seeds}] "
+              f"seed={seed:4d} {sample_tag}"
+              f"{domain:8s} {stype:14s} "
+              f"reward={r:+5.2f} "
+              f"steps={result.get('steps', 0):2d} "
+              f"({elapsed:.0f}s){err}{tag_pass}")
+    else:  # adversarial_policy
+        tid = result.get("template_id", -1)
+        tname = result.get("template_name", result.get("error", "err"))[:22]
+        is_adv = "ADV" if result.get("is_adversarial") else "COP"
+        tid_str = f"T{tid:02d}" if isinstance(tid, int) and tid >= 0 else f"T{tid!s:>2s}"
+        print(f"  [{passed_seeds:3d}/{completed_seeds}/{total_seeds}] "
+              f"seed={seed:4d} {sample_tag}"
+              f"{tid_str}:{tname:22s} {is_adv} "
+              f"reward={r:+5.2f} "
+              f"steps={result.get('steps', 0):2d} "
+              f"({elapsed:.0f}s){err}{tag_pass}")
+
+
+def _print_observe_progress(args, result, seed, sample_idx, num_samples,
+                             passed_seeds, completed_seeds, total_seeds,
+                             elapsed, tag_pass=""):
+    sample_tag = f"s={sample_idx+1}/{num_samples} " if num_samples > 1 else ""
+    r = result.get("reward", 0)
+    err = " ERROR" if "error" in result else ""
+    steps = result.get("steps", 0)
+
+    if args.env == "multistep_task":
+        n_ops = result.get("n_ops", "?")
+        print(f"  [{passed_seeds:3d}/{completed_seeds}/{total_seeds}] "
+              f"seed={seed:4d} {sample_tag}"
+              f"ops={n_ops} "
+              f"reward={r:+5.2f} "
+              f"steps={steps:2d} "
+              f"({elapsed:.0f}s){err}{tag_pass}")
+    else:  # structured_data_reasoning
+        dtype = result.get("data_type", "?")[:8]
+        diff = result.get("difficulty", "?")
+        print(f"  [{passed_seeds:3d}/{completed_seeds}/{total_seeds}] "
+              f"seed={seed:4d} {sample_tag}"
+              f"d{diff} {dtype:8s} "
+              f"reward={r:+5.2f} "
+              f"({elapsed:.0f}s){err}{tag_pass}")
+
+
+# ---------------------------------------------------------------------------
+# Output writing
+# ---------------------------------------------------------------------------
+def write_toolcall_output(selected, output_path, by_domain=None):
+    """Write tau2-bench JSON for tool-calling games (grouped by domain)."""
+    from adversarial_policy_game.constants import AIRLINE_POLICY, RETAIL_POLICY
+    POLICIES = {"airline": AIRLINE_POLICY, "retail": RETAIL_POLICY}
+
+    if by_domain is None:
+        by_domain = defaultdict(list)
+        for rollout in selected:
+            domain = rollout.get("domain", "unknown")
+            by_domain[domain].append(rollout)
+
+    output_paths = []
+    total_simulations = 0
+
+    for domain, rollouts in sorted(by_domain.items()):
+        policy = POLICIES.get(domain, "")
+
+        simulations = []
+        for rollout in rollouts:
+            tau2_msgs = conversation_to_tau2_messages(rollout["conversation"])
+            simulations.append({
+                "task_id": str(rollout["seed"]),
+                "reward_info": {"reward": rollout["reward"]},
+                "messages": tau2_msgs,
+            })
+
+        output_data = {
+            "info": {
+                "environment_info": {
+                    "domain_name": domain,
+                    "policy": policy,
+                }
+            },
+            "simulations": simulations,
+        }
+
+        if len(by_domain) == 1:
+            path = output_path
+        else:
+            path = output_path.parent / f"{output_path.stem}_{domain}{output_path.suffix}"
+
+        with open(path, "w") as f:
+            json.dump(output_data, f, default=str)
+
+        output_paths.append(path)
+        total_simulations += len(simulations)
+        print(f"  {domain}: {len(simulations)} simulations -> {path}")
+
+    return output_paths, total_simulations
+
+
+def write_observe_output(selected, output_path, env_type, system_prompt):
+    """Write tau2-bench JSON for observation-based games.
+
+    Each turn becomes a separate simulation entry with the full observation
+    as the user message. SFTBuffer rebuilds each turn's prompt as
+    [system_prompt, observation] which matches GRPO training exactly.
+    """
+    simulations = []
+    for rollout in selected:
+        simulations.extend(turns_to_simulations(rollout))
+
+    output_data = {
+        "info": {
+            "environment_info": {
+                "domain_name": env_type,
+                "system_prompt": system_prompt,
+                "tool_schemas": [],
+            }
+        },
+        "simulations": simulations,
+    }
+
+    with open(output_path, "w") as f:
+        json.dump(output_data, f, default=str)
+
+    print(f"  {env_type}: {len(simulations)} simulations -> {output_path}")
+    return [output_path], len(simulations)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    all_games = list_game_names()
+
     parser = argparse.ArgumentParser(
-        description="Collect agent-user trajectories for game environments"
+        description="Collect agent trajectories for game environments"
     )
     parser.add_argument("--env", required=True,
-                        choices=["tau_tool_calling", "adversarial_policy"],
+                        choices=all_games,
                         help="Environment to use")
     parser.add_argument("--base-url", default="http://localhost:9090/v1",
                         help="vLLM server URL for agent (default: http://localhost:9090/v1)")
@@ -291,8 +601,9 @@ def main():
                         help="Starting seed (default: 0)")
     parser.add_argument("--workers", "-w", type=int, default=100,
                         help="Number of parallel workers (default: 100)")
-    parser.add_argument("--max-tokens", type=int, default=512,
-                        help="Max tokens per agent generation (default: 512)")
+    parser.add_argument("--max-tokens", type=int, default=None,
+                        help="Max tokens per agent generation "
+                             "(default: from game registry max_gen_tokens)")
     parser.add_argument("--temperature", type=float, default=0.0,
                         help="Temperature for agent LLM (default: 0.0)")
     parser.add_argument("--user-temperature", type=float, default=0.7,
@@ -314,6 +625,9 @@ def main():
     parser.add_argument("--user-difficulty", default="random",
                         choices=["easy", "medium", "hard", "random"],
                         help="User difficulty for adversarial_policy (default: random)")
+    # structured_data_reasoning specific
+    parser.add_argument("--difficulty", type=int, default=3,
+                        help="Difficulty level for structured_data_reasoning (default: 3)")
     # output
     parser.add_argument("--output-dir", default=None,
                         help="Output directory (default: /root/games/game_rollouts)")
@@ -324,6 +638,13 @@ def main():
 
     args = parser.parse_args()
 
+    # Get game spec from registry for max_gen_tokens
+    game_spec = get_game_spec(args.env)
+    max_tokens = args.max_tokens if args.max_tokens is not None else game_spec.max_gen_tokens
+
+    is_toolcall = args.env in TOOL_CALLING_GAMES
+    is_observe = args.env in OBSERVE_GAMES
+
     num_samples = max(1, args.num_samples)
     select_topk = max(1, min(args.select_topk, num_samples))
     reward_threshold = args.reward_threshold
@@ -332,13 +653,18 @@ def main():
     user_base_url = args.user_base_url or args.base_url
     user_model = args.user_model or args.model
 
-    # Build clients
-    client = VLLMClient(args.base_url, args.model, args.max_tokens,
+    # Build agent client
+    client = VLLMClient(args.base_url, args.model, max_tokens,
                         temperature=args.temperature)
-    user_client = UserLLMClient(
-        user_base_url, user_model,
-        max_tokens=256, temperature=args.user_temperature,
-    )
+
+    # Build user client only for tool-calling games that need it
+    user_client = None
+    if is_toolcall:
+        from adversarial_policy_game.llm_user import UserLLMClient
+        user_client = UserLLMClient(
+            user_base_url, user_model,
+            max_tokens=256, temperature=args.user_temperature,
+        )
 
     # Resolve output path
     if args.output:
@@ -346,15 +672,22 @@ def main():
     else:
         output_dir = Path(args.output_dir) if args.output_dir else Path("/root/games/game_rollouts")
         agent_short = args.model.split("/")[-1]
-        user_short = user_model.split("/")[-1]
-        output_path = output_dir / f"{args.env}-{agent_short}-{user_short}.json"
+        if is_toolcall:
+            user_short = user_model.split("/")[-1]
+            output_path = output_dir / f"{args.env}-{agent_short}-{user_short}.json"
+        elif args.env == "structured_data_reasoning":
+            output_path = output_dir / f"{args.env}-d{args.difficulty}-{agent_short}.json"
+        else:
+            output_path = output_dir / f"{args.env}-{agent_short}.json"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Print config
     print(f"Environment:  {args.env}")
     print(f"Agent model:  {args.model} @ {args.base_url} (temp={args.temperature})")
-    print(f"User  model:  {user_model} @ {user_base_url} (temp={args.user_temperature})")
+    if is_toolcall:
+        print(f"User  model:  {user_model} @ {user_base_url} (temp={args.user_temperature})")
+    print(f"Max tokens:   {max_tokens} (registry: {game_spec.max_gen_tokens})")
     print(f"Seeds:        {args.num_seeds} (start={args.start_seed})")
     print(f"Workers:      {args.workers}")
     if num_samples > 1:
@@ -366,6 +699,8 @@ def main():
     elif args.env == "adversarial_policy":
         print(f"Adv. ratio:   {args.adversarial_ratio}")
         print(f"User diff.:   {args.user_difficulty}")
+    elif args.env == "structured_data_reasoning":
+        print(f"Difficulty:   {args.difficulty}")
 
     # Connectivity test
     try:
@@ -385,15 +720,23 @@ def main():
                 user_client=user_client,
                 domain=args.domain,
             )
-        else:
+        elif args.env == "adversarial_policy":
             from adversarial_policy_game.game import AdversarialPolicyGame
             return AdversarialPolicyGame(
                 max_steps=20,
                 user_client=user_client,
                 adversarial_ratio=args.adversarial_ratio,
             )
+        elif args.env == "multistep_task":
+            from multistep_task_game import RealisticMultiStepGame
+            return RealisticMultiStepGame(max_steps=30)
+        elif args.env == "structured_data_reasoning":
+            from structured_data_game import StructuredDataGame
+            return StructuredDataGame(difficulty=args.difficulty)
+        else:
+            raise ValueError(f"Unknown env: {args.env}")
 
-    # Deterministic per-seed difficulty (independent of seed processing order)
+    # Deterministic per-seed difficulty (only for adversarial_policy)
     def get_seed_difficulty(seed):
         if args.env != "adversarial_policy":
             return None
@@ -403,8 +746,11 @@ def main():
 
     def _run_one(seed, sample_idx, difficulty):
         game = make_game()
-        return run_episode(game, client, seed, args.env,
-                           user_difficulty=difficulty)
+        if is_toolcall:
+            return run_episode_toolcall(game, client, seed, args.env,
+                                        user_difficulty=difficulty)
+        else:
+            return run_episode_observe(game, client, seed, game_spec, args.env)
 
     # -------------------------------------------------------------------
     # Run all seeds in parallel (single pass, no retry waves)
@@ -413,11 +759,9 @@ def main():
     seeds = list(range(args.start_seed, args.start_seed + args.num_seeds))
 
     # Build work items
-    seed_difficulties = {}
     work_items = []
     for seed in seeds:
         diff = get_seed_difficulty(seed)
-        seed_difficulties[seed] = diff
         for sample_idx in range(num_samples):
             work_items.append((seed, sample_idx, diff))
 
@@ -441,16 +785,11 @@ def main():
             except Exception as e:
                 result = {"seed": seed, "error": str(e)}
 
-            results_by_seed[seed].append((sample_idx, result))
-            pending_per_seed[seed] -= 1
-            total_episodes += 1
-
             with print_lock:
+                results_by_seed[seed].append((sample_idx, result))
+                pending_per_seed[seed] -= 1
+                total_episodes += 1
                 elapsed = time.time() - t0
-                r = result.get("reward", 0)
-                err = " ERROR" if "error" in result else ""
-                sample_tag = (f"s={sample_idx+1}/{num_samples} "
-                              if num_samples > 1 else "")
 
                 # Check if this seed just completed all samples
                 tag_pass = ""
@@ -468,27 +807,16 @@ def main():
                     else:
                         tag_pass = " FAIL"
 
-                if args.env == "tau_tool_calling":
-                    domain = result.get("domain", "?")
-                    stype = result.get("scenario_type",
-                                       result.get("error", "err"))[:14]
-                    print(f"  [{passed_seeds:3d}/{completed_seeds}/{len(seeds)}] "
-                          f"seed={seed:4d} {sample_tag}"
-                          f"{domain:8s} {stype:14s} "
-                          f"reward={r:+5.2f} "
-                          f"steps={result.get('steps', 0):2d} "
-                          f"({elapsed:.0f}s){err}{tag_pass}")
+                if is_toolcall:
+                    _print_toolcall_progress(
+                        args, result, seed, sample_idx, num_samples,
+                        passed_seeds, completed_seeds, len(seeds), elapsed,
+                        tag_pass)
                 else:
-                    tid = result.get("template_id", "?")
-                    tname = result.get("template_name",
-                                       result.get("error", "err"))[:22]
-                    is_adv = "ADV" if result.get("is_adversarial") else "COP"
-                    print(f"  [{passed_seeds:3d}/{completed_seeds}/{len(seeds)}] "
-                          f"seed={seed:4d} {sample_tag}"
-                          f"T{tid:02d}:{tname:22s} {is_adv} "
-                          f"reward={r:+5.2f} "
-                          f"steps={result.get('steps', 0):2d} "
-                          f"({elapsed:.0f}s){err}{tag_pass}")
+                    _print_observe_progress(
+                        args, result, seed, sample_idx, num_samples,
+                        passed_seeds, completed_seeds, len(seeds), elapsed,
+                        tag_pass)
 
     elapsed = time.time() - t0
 
@@ -523,52 +851,14 @@ def main():
             selected.append(result)
 
     # -------------------------------------------------------------------
-    # Group by domain and write tau2-bench JSON (SFTBuffer-compatible)
+    # Write output (format depends on game type)
     # -------------------------------------------------------------------
-    POLICIES = {"airline": AIRLINE_POLICY, "retail": RETAIL_POLICY}
-
-    by_domain = defaultdict(list)
-    for rollout in selected:
-        domain = rollout.get("domain", "unknown")
-        by_domain[domain].append(rollout)
-
-    output_paths = []
-    total_simulations = 0
-
-    for domain, rollouts in sorted(by_domain.items()):
-        policy = POLICIES.get(domain, "")
-
-        simulations = []
-        for rollout in rollouts:
-            tau2_msgs = conversation_to_tau2_messages(rollout["conversation"])
-            simulations.append({
-                "task_id": str(rollout["seed"]),
-                "reward_info": {"reward": rollout["reward"]},
-                "messages": tau2_msgs,
-            })
-
-        output_data = {
-            "info": {
-                "environment_info": {
-                    "domain_name": domain,
-                    "policy": policy,
-                }
-            },
-            "simulations": simulations,
-        }
-
-        # Determine per-domain output path
-        if len(by_domain) == 1:
-            path = output_path
-        else:
-            path = output_path.parent / f"{output_path.stem}_{domain}{output_path.suffix}"
-
-        with open(path, "w") as f:
-            json.dump(output_data, f, default=str)
-
-        output_paths.append(path)
-        total_simulations += len(simulations)
-        print(f"  {domain}: {len(simulations)} simulations -> {path}")
+    if is_toolcall:
+        output_paths, total_simulations = write_toolcall_output(selected, output_path)
+    else:
+        system_prompt = game_spec.system_prompt
+        output_paths, total_simulations = write_observe_output(
+            selected, output_path, args.env, system_prompt)
 
     # -------------------------------------------------------------------
     # Summary stats

@@ -12,7 +12,8 @@ from typing import Dict, List, Any, Optional
 from .scenarios import GeneratedScenario, generate_scenario
 from .verification import compute_reward
 
-from adversarial_policy_game.database import get_pydantic_db
+import copy
+
 from adversarial_policy_game.tools import ToolExecutor
 from adversarial_policy_game.constants import (
     AIRLINE_POLICY, RETAIL_POLICY,
@@ -76,7 +77,7 @@ class TauToolCallingEnv:
         self._scenario = generate_scenario(seed, domain=self._domain_filter)
         self._tools = ToolExecutor(
             self._scenario.domain,
-            get_pydantic_db(self._scenario.domain),
+            copy.deepcopy(self._scenario.db),
         )
 
         # Initialize LLM user

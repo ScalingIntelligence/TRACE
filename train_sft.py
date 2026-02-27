@@ -15,6 +15,8 @@ Supports:
   - SFTBuffer for data loading and tokenization
   - Exact per-token loss computation via logprob_action_tokens
   - Gradient accumulation across mini-batches
+  - Sequence packing for reduced padding waste
+  - torch.compile for kernel fusion speedup
   - Checkpoint saving and resuming
   - wandb logging
 
@@ -24,6 +26,9 @@ Usage:
 
     # Multi-GPU:
     torchrun --nproc_per_node=4 train_sft.py --sft-data file1.json,file2.json
+
+    # With packing + compile:
+    python train_sft.py --sft-data file1.json --pack-sequences --compile
 """
 import argparse
 import json
@@ -94,12 +99,22 @@ def parse_args():
         help="Number of full passes over the SFT dataset")
     parser.add_argument("--mini-batch-size", type=int, default=4,
         help="Mini-batch size for gradient updates")
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=4,
+        help="Number of mini-batches to accumulate before each optimizer step")
     parser.add_argument("--max-grad-norm", type=float, default=1.0,
         help="Max gradient norm for clipping")
     parser.add_argument("--warmup-ratio", type=float, default=0.05,
         help="Fraction of total steps for linear warmup")
     parser.add_argument("--weight-decay", type=float, default=0.01,
         help="Weight decay for AdamW")
+
+    # -- Performance --
+    parser.add_argument("--compile", action="store_true", default=False,
+        help="Use torch.compile for kernel fusion (may conflict with some unsloth versions)")
+    parser.add_argument("--pack-sequences", action="store_true", default=False,
+        help="Pack multiple sequences per row to reduce padding waste. "
+             "Requires flash attention 2 + transformers >= 4.44 for correct "
+             "cross-sequence attention masking via position_ids.")
 
     # -- Data processing --
     parser.add_argument("--compact-tools", action="store_true", default=False,
@@ -119,7 +134,7 @@ def parse_args():
 
     # -- Logging --
     parser.add_argument("--log-every", type=int, default=10,
-        help="Log metrics every N steps")
+        help="Log metrics every N optimizer steps")
     parser.add_argument("--wandb-project", type=str, default="games",
         help="wandb project name")
 
@@ -131,7 +146,7 @@ def parse_args():
 
 
 # ---------------------------------------------------------------------------
-# Data preparation
+# Data preparation (unpacked mode)
 # ---------------------------------------------------------------------------
 
 def prepare_batches(
@@ -163,6 +178,153 @@ def pad_batch(
     als = [action_lens[i] for i in batch_indices]
     ids, attn = pad_to_device(batch_seqs, pad_id, "cpu")
     return ids, attn, pls, als
+
+
+# ---------------------------------------------------------------------------
+# Sequence packing
+# ---------------------------------------------------------------------------
+
+def pack_into_rows(
+    seqs: List[torch.Tensor],
+    max_pack_len: int,
+) -> List[List[int]]:
+    """Greedily pack sequences into rows of at most max_pack_len tokens.
+
+    Sorts sequences shortest-first then fills rows sequentially.
+    Returns list of lists of indices into `seqs`.
+    """
+    indices = sorted(range(len(seqs)), key=lambda i: seqs[i].shape[0])
+
+    rows: List[List[int]] = []
+    current_row: List[int] = []
+    current_len = 0
+
+    for idx in indices:
+        seq_len = seqs[idx].shape[0]
+        if seq_len > max_pack_len:
+            continue
+        if current_len + seq_len > max_pack_len and current_row:
+            rows.append(current_row)
+            current_row = []
+            current_len = 0
+        current_row.append(idx)
+        current_len += seq_len
+
+    if current_row:
+        rows.append(current_row)
+
+    return rows
+
+
+def build_packed_batch(
+    row_indices_list: List[List[int]],
+    seqs: List[torch.Tensor],
+    prompt_lens: List[int],
+    action_lens: List[int],
+    pad_id: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[List[Tuple[int, int, int]]]]:
+    """Build padded tensors for a batch of packed rows.
+
+    Returns:
+        ids:         [num_rows, max_row_len]
+        position_ids:[num_rows, max_row_len]
+        attn_mask:   [num_rows, max_row_len]
+        pack_info:   list of lists of (offset, prompt_len, action_len) per row
+    """
+    batch_ids: List[torch.Tensor] = []
+    batch_pos: List[torch.Tensor] = []
+    pack_info: List[List[Tuple[int, int, int]]] = []
+
+    for row_indices in row_indices_list:
+        tokens_list: List[torch.Tensor] = []
+        pos_list: List[torch.Tensor] = []
+        segments: List[Tuple[int, int, int]] = []
+        offset = 0
+
+        for idx in row_indices:
+            seq = seqs[idx]
+            seq_len = seq.shape[0]
+            tokens_list.append(seq)
+            pos_list.append(torch.arange(seq_len, dtype=torch.long))
+            segments.append((offset, prompt_lens[idx], action_lens[idx]))
+            offset += seq_len
+
+        batch_ids.append(torch.cat(tokens_list))
+        batch_pos.append(torch.cat(pos_list))
+        pack_info.append(segments)
+
+    # Pad to max row length in this batch
+    max_len = max(t.shape[0] for t in batch_ids)
+    B = len(batch_ids)
+
+    ids = torch.full((B, max_len), pad_id, dtype=torch.long)
+    pos = torch.zeros((B, max_len), dtype=torch.long)
+    attn = torch.zeros((B, max_len), dtype=torch.long)
+
+    for i in range(B):
+        L = batch_ids[i].shape[0]
+        ids[i, :L] = batch_ids[i]
+        pos[i, :L] = batch_pos[i]
+        attn[i, :L] = 1
+
+    return ids, pos, attn, pack_info
+
+
+def logprob_packed(
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    pack_info: List[List[Tuple[int, int, int]]],
+    normalize_by_len: bool = True,
+) -> torch.Tensor:
+    """Compute per-sequence normalized log-probs for packed rows.
+
+    Args:
+        logits:    [num_rows, max_packed_len, V]
+        input_ids: [num_rows, max_packed_len]
+        pack_info: list of lists of (offset, prompt_len, action_len)
+        normalize_by_len: if True, divide total log-prob by action_len
+
+    Returns:
+        Tensor of per-sequence log-probs [N] (one per original sequence)
+    """
+    results: List[torch.Tensor] = []
+
+    for row_idx, segments in enumerate(pack_info):
+        for offset, pl, al in segments:
+            if al <= 0:
+                continue
+            # Logits at position p predict token at position p+1.
+            # Action tokens occupy positions [offset+pl, offset+pl+al).
+            # So predicting logits are at   [offset+pl-1, offset+pl+al-1).
+            l_start = offset + pl - 1
+            t_start = offset + pl
+            t_end = offset + pl + al
+
+            # Clamp: if pl=0 at offset=0, l_start=-1 — skip the first
+            # action token that has no preceding logit to predict it.
+            if l_start < 0:
+                skip = -l_start
+                l_start = 0
+                t_start += skip
+
+            l_end = l_start + (t_end - t_start)
+            eff_al = t_end - t_start
+            if eff_al <= 0:
+                continue
+
+            seg_logits = logits[row_idx, l_start:l_end, :].float()   # [eff_al, V]
+            seg_targets = input_ids[row_idx, t_start:t_end]           # [eff_al]
+
+            log_p = F.log_softmax(seg_logits, dim=-1)
+            tok_lp = log_p.gather(1, seg_targets.unsqueeze(1)).squeeze(1)  # [eff_al]
+
+            total = tok_lp.sum()
+            results.append(total / eff_al if normalize_by_len else total)
+
+    if not results:
+        return torch.zeros(1, device=logits.device, dtype=torch.float32)
+
+    return torch.stack(results)
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +412,15 @@ def main():
     model = model.to(device)
     print(f"[Model] Loaded with LoRA — SFT mode")
 
+    # ---- torch.compile (optional) ----
+    # Keep a reference to the unwrapped model for save_pretrained, since
+    # torch.compile wraps it in OptimizedModule which lacks that method.
+    unwrapped_model = model
+    if args.compile:
+        print("[Compile] Compiling model with torch.compile...")
+        model = torch.compile(model)
+        print("[Compile] Done (first forward pass will trigger compilation)")
+
     # ---- Resume from checkpoint ----
     start_epoch = 0
     global_step = 0
@@ -263,7 +434,7 @@ def main():
         adapter_path = resume_path / "adapter_model.safetensors"
         if adapter_path.exists():
             state = safetensors.torch.load_file(str(adapter_path))
-            set_peft_model_state_dict(model, state)
+            set_peft_model_state_dict(unwrapped_model, state)
             print(f"[Resume] Loaded adapter from {adapter_path}")
         else:
             raise FileNotFoundError(f"Adapter not found at {adapter_path}")
@@ -311,9 +482,26 @@ def main():
     print(f"[SFT] Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
 
     # ---- Compute schedule ----
-    batches_per_epoch_total = math.ceil(total_samples / args.mini_batch_size)
+    accum_steps = args.gradient_accumulation_steps
+    seqs = sft_buffer._seqs_cpu
+    prompt_lens = sft_buffer._prompt_lens
+    action_lens = sft_buffer._action_lens
+
+    if args.pack_sequences:
+        # Trial pack to estimate row count (packing is re-done each epoch)
+        trial_rows = pack_into_rows(seqs, max_seq_len)
+        num_packed_rows = len(trial_rows)
+        batches_per_epoch_total = math.ceil(num_packed_rows / args.mini_batch_size)
+        packing_ratio = total_samples / max(1, num_packed_rows)
+        del trial_rows
+    else:
+        num_packed_rows = None
+        packing_ratio = 1.0
+        batches_per_epoch_total = math.ceil(total_samples / args.mini_batch_size)
+
     batches_per_epoch_per_rank = math.ceil(batches_per_epoch_total / world_size)
-    total_steps = batches_per_epoch_per_rank * args.num_epochs
+    steps_per_epoch = math.ceil(batches_per_epoch_per_rank / accum_steps)
+    total_steps = steps_per_epoch * args.num_epochs
     warmup_steps = int(args.warmup_ratio * total_steps)
 
     print(f"\n{'=' * 60}")
@@ -327,8 +515,15 @@ def main():
     print(f"  Epochs:             {args.num_epochs}")
     print(f"  Total samples:      {total_samples}")
     print(f"  Mini-batch size:    {args.mini_batch_size}")
+    print(f"  Grad accum steps:   {accum_steps}")
+    print(f"  Effective batch:    {args.mini_batch_size * accum_steps * world_size}")
+    print(f"  Pack sequences:     {args.pack_sequences}")
+    if args.pack_sequences:
+        print(f"  Packed rows:        ~{num_packed_rows} ({packing_ratio:.1f}x packing)")
+    print(f"  torch.compile:      {args.compile}")
     print(f"  Batches/epoch:      {batches_per_epoch_total}")
-    print(f"  Total steps:        {total_steps}")
+    print(f"  Steps/epoch:        {steps_per_epoch}")
+    print(f"  Total optim steps:  {total_steps}")
     print(f"  Warmup steps:       {warmup_steps}")
     print(f"  Max seq length:     {max_seq_len}")
     print(f"  Max grad norm:      {args.max_grad_norm}")
@@ -355,14 +550,17 @@ def main():
             "num_epochs": args.num_epochs,
             "total_samples": total_samples,
             "mini_batch_size": args.mini_batch_size,
+            "gradient_accumulation_steps": accum_steps,
             "max_seq_length": max_seq_len,
             "compact_tools": args.compact_tools,
+            "pack_sequences": args.pack_sequences,
+            "torch_compile": args.compile,
             "world_size": world_size,
         })
         print("[wandb] Initialized")
 
     # ---- Sequence length stats ----
-    seq_lens = [sft_buffer._seqs_cpu[i].shape[0] for i in range(total_samples)]
+    seq_lens = [seqs[i].shape[0] for i in range(total_samples)]
     print(f"[SFT] Sequence length stats: "
           f"min={min(seq_lens)}, max={max(seq_lens)}, "
           f"mean={sum(seq_lens)/len(seq_lens):.0f}, "
@@ -371,9 +569,7 @@ def main():
     # ====================================================================
     # Training loop
     # ====================================================================
-    seqs = sft_buffer._seqs_cpu
-    prompt_lens = sft_buffer._prompt_lens
-    action_lens = sft_buffer._action_lens
+    lr = args.lr  # initialize for logging safety (overwritten by schedule)
 
     for epoch in range(start_epoch, args.num_epochs):
         t_epoch_start = time.time()
@@ -384,121 +580,233 @@ def main():
         sample_order = list(range(total_samples))
         rng.shuffle(sample_order)
 
-        # Reorder data by shuffled indices
+        # Reorder references via shuffled indices
         epoch_seqs = [seqs[i] for i in sample_order]
         epoch_pls = [prompt_lens[i] for i in sample_order]
         epoch_als = [action_lens[i] for i in sample_order]
 
-        # Create length-sorted mini-batches
-        batches = prepare_batches(epoch_seqs, args.mini_batch_size)
+        if args.pack_sequences:
+            # Pack shuffled sequences into rows
+            packed_rows = pack_into_rows(epoch_seqs, max_seq_len)
+
+            # Create batches of packed rows, sorted by row length
+            row_lens = [sum(epoch_seqs[i].shape[0] for i in row) for row in packed_rows]
+            row_order = sorted(range(len(packed_rows)), key=lambda r: row_lens[r])
+            batches = []
+            for start in range(0, len(row_order), args.mini_batch_size):
+                batches.append([packed_rows[row_order[j]]
+                                for j in range(start, min(start + args.mini_batch_size, len(row_order)))])
+        else:
+            # Standard length-sorted mini-batches
+            batches = prepare_batches(epoch_seqs, args.mini_batch_size)
 
         # Shuffle batch order (same seed on all ranks)
         batch_order = list(range(len(batches)))
         rng.shuffle(batch_order)
 
         # Shard batches across ranks
-        my_batch_order, n_total_batches = shard_batches(batch_order, rank, world_size)
+        my_batch_order, _ = shard_batches(batch_order, rank, world_size)
 
-        # Zero gradients once — accumulate across all mini-batches in epoch
-        optim.zero_grad(set_to_none=True)
+        # Pad so all ranks have equal batch count (prevents allreduce deadlock
+        # when ranks get different counts from round-robin sharding).
+        real_batch_count = len(my_batch_order)
+        target_len = math.ceil(len(batch_order) / max(1, world_size))
+        while len(my_batch_order) < target_len:
+            # Use last real batch index, or 0 if this rank got no batches
+            my_batch_order.append(my_batch_order[-1] if my_batch_order else 0)
+
+        # Initialize gradient accumulation.
+        # Allocate zero-grad tensors so allreduce_coalesced_grads always
+        # finds non-empty grads, even on padding-only accumulation windows
+        # where no backward() runs.  set_to_none=False keeps them after step.
+        for p in trainable_params:
+            if p.grad is None:
+                p.grad = torch.zeros_like(p.data)
+        optim.zero_grad(set_to_none=False)
 
         epoch_loss_acc = 0.0
         epoch_tokens_acc = 0
-        local_updates = 0
+        epoch_seqs_acc = 0
+        local_fwd_count = 0  # forward passes (for averaging loss)
 
         for step_in_epoch, bi in enumerate(my_batch_order):
-            # LR schedule
-            lr = get_lr(global_step, total_steps, warmup_steps, args.lr)
-            set_lr(optim, lr)
+            is_padding = step_in_epoch >= real_batch_count
 
-            mb_idx = batches[bi]
-            mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = pad_batch(
-                mb_idx, epoch_seqs, epoch_pls, epoch_als, tokenizer.pad_token_id
-            )
+            # LR schedule: update at each optimizer step boundary
+            if step_in_epoch % accum_steps == 0:
+                lr = get_lr(global_step, total_steps, warmup_steps, args.lr)
+                set_lr(optim, lr)
 
-            # Forward + backward with OOM retry: if the full mini-batch
-            # OOMs, clear the CUDA cache and re-process samples one by
-            # one so that no batch is silently dropped.
-            try:
-                mb_ids = mb_ids_cpu.to(device, non_blocking=True)
-                mb_attn = mb_attn_cpu.to(device, non_blocking=True)
-
-                with autocast_ctx(device):
-                    outputs = model(
-                        input_ids=mb_ids, attention_mask=mb_attn, use_cache=False
-                    )
-                    logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
-                    logp = logprob_action_tokens(
-                        logits, mb_ids, mb_pl, mb_al, normalize_by_len=True
-                    )
-
-                sft_loss = -logp.mean()
-                scaled_loss = sft_loss / n_total_batches
-                scaled_loss.backward()
-
-                with torch.no_grad():
-                    batch_action_tokens = sum(mb_al)
-                    epoch_loss_acc += float(sft_loss.item())
-                    epoch_tokens_acc += batch_action_tokens
-                    local_updates += 1
-
-                del mb_ids, mb_attn, logits, outputs, logp, scaled_loss, sft_loss
-
-            except torch.cuda.OutOfMemoryError:
-                # Clean up partially-allocated tensors and retry one sample
-                # at a time to avoid dropping any data.
-                for v in ("mb_ids", "mb_attn", "logits", "outputs",
-                          "logp", "scaled_loss", "sft_loss"):
-                    locals().pop(v, None)
-                torch.cuda.empty_cache()
-                if is_main_rank():
-                    print(f"[OOM] batch {step_in_epoch+1} — retrying {len(mb_idx)} samples individually")
-
-                n_samples = len(mb_idx)
-                batch_loss_acc = 0.0
-                batch_tokens_acc = 0
-                for si in range(n_samples):
-                    s_ids, s_attn, s_pl, s_al = pad_batch(
-                        [mb_idx[si]], epoch_seqs, epoch_pls, epoch_als,
-                        tokenizer.pad_token_id,
-                    )
-                    s_ids = s_ids.to(device, non_blocking=True)
-                    s_attn = s_attn.to(device, non_blocking=True)
-                    with autocast_ctx(device):
-                        out = model(input_ids=s_ids, attention_mask=s_attn, use_cache=False)
-                        lg = out.logits if hasattr(out, "logits") else out[0]
-                        lp = logprob_action_tokens(lg, s_ids, s_pl, s_al, normalize_by_len=True)
-                    loss_i = -lp.mean() / (n_total_batches * n_samples)
-                    loss_i.backward()
-                    with torch.no_grad():
-                        batch_loss_acc += float((-lp.mean()).item())
-                        batch_tokens_acc += s_al[0]
-                    del s_ids, s_attn, out, lg, lp, loss_i
-                    torch.cuda.empty_cache()
-                with torch.no_grad():
-                    epoch_loss_acc += batch_loss_acc / n_samples
-                    epoch_tokens_acc += batch_tokens_acc
-                local_updates += 1
-
-            del mb_ids_cpu, mb_attn_cpu
-
-            # Log periodically
-            if is_main_rank() and (global_step + 1) % args.log_every == 0:
-                avg_loss = epoch_loss_acc / max(1, local_updates)
-                print(
-                    f"[epoch {epoch}] step={global_step + 1}/{total_steps} "
-                    f"loss={avg_loss:.4f} lr={lr:.2e} "
-                    f"batch={step_in_epoch + 1}/{len(my_batch_order)}"
+            # Skip forward/backward on padding batches (they exist only to
+            # keep allreduce call counts in sync across ranks).
+            if is_padding:
+                pass  # no forward/backward, just fall through to optimizer step
+            elif args.pack_sequences:
+                batch_rows = batches[bi]
+                mb_ids_cpu, mb_pos_cpu, mb_attn_cpu, pack_info = build_packed_batch(
+                    batch_rows, epoch_seqs, epoch_pls, epoch_als,
+                    tokenizer.pad_token_id,
                 )
 
-            global_step += 1
+                try:
+                    mb_ids = mb_ids_cpu.to(device, non_blocking=True)
+                    mb_pos = mb_pos_cpu.to(device, non_blocking=True)
+                    mb_attn = mb_attn_cpu.to(device, non_blocking=True)
 
-        # All-reduce gradients across ranks
-        allreduce_coalesced_grads(trainable_params)
+                    with autocast_ctx(device):
+                        outputs = model(
+                            input_ids=mb_ids, attention_mask=mb_attn,
+                            position_ids=mb_pos, use_cache=False,
+                        )
+                        logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+                        logp = logprob_packed(logits, mb_ids, pack_info, normalize_by_len=True)
 
-        # Gradient clip + optimizer step
-        torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)
-        optim.step()
+                    sft_loss = -logp.mean()
+                    scaled_loss = sft_loss / accum_steps
+                    scaled_loss.backward()
+
+                    with torch.no_grad():
+                        batch_action_tokens = sum(al for segs in pack_info for _, _, al in segs)
+                        batch_seq_count = sum(len(segs) for segs in pack_info)
+                        epoch_loss_acc += float(sft_loss.item())
+                        epoch_tokens_acc += batch_action_tokens
+                        epoch_seqs_acc += batch_seq_count
+                        local_fwd_count += 1
+
+                    del mb_ids, mb_pos, mb_attn, logits, outputs, logp, scaled_loss, sft_loss
+
+                except torch.cuda.OutOfMemoryError:
+                    for v in ("mb_ids", "mb_pos", "mb_attn", "logits", "outputs",
+                              "logp", "scaled_loss", "sft_loss"):
+                        locals().pop(v, None)
+                    torch.cuda.empty_cache()
+                    if is_main_rank():
+                        print(f"[OOM] packed batch {step_in_epoch+1} — retrying rows individually")
+
+                    # Retry: process each packed row one at a time
+                    n_rows = len(batch_rows)
+                    batch_loss_acc = 0.0
+                    batch_tokens_acc = 0
+                    batch_seq_count = 0
+                    for ri in range(n_rows):
+                        s_ids, s_pos, s_attn, s_info = build_packed_batch(
+                            [batch_rows[ri]], epoch_seqs, epoch_pls, epoch_als,
+                            tokenizer.pad_token_id,
+                        )
+                        s_ids = s_ids.to(device, non_blocking=True)
+                        s_pos = s_pos.to(device, non_blocking=True)
+                        s_attn = s_attn.to(device, non_blocking=True)
+                        with autocast_ctx(device):
+                            out = model(input_ids=s_ids, attention_mask=s_attn,
+                                        position_ids=s_pos, use_cache=False)
+                            lg = out.logits if hasattr(out, "logits") else out[0]
+                            lp = logprob_packed(lg, s_ids, s_info, normalize_by_len=True)
+                        loss_i = -lp.mean() / (accum_steps * n_rows)
+                        loss_i.backward()
+                        with torch.no_grad():
+                            batch_loss_acc += float((-lp.mean()).item())
+                            batch_tokens_acc += sum(al for segs in s_info for _, _, al in segs)
+                            batch_seq_count += sum(len(segs) for segs in s_info)
+                        del s_ids, s_pos, s_attn, out, lg, lp, loss_i
+                        torch.cuda.empty_cache()
+                    with torch.no_grad():
+                        epoch_loss_acc += batch_loss_acc / n_rows
+                        epoch_tokens_acc += batch_tokens_acc
+                        epoch_seqs_acc += batch_seq_count
+                    local_fwd_count += 1
+
+                del mb_ids_cpu, mb_pos_cpu, mb_attn_cpu
+
+            else:
+                # ---- Standard (unpacked) forward pass ----
+                mb_idx = batches[bi]
+                mb_ids_cpu, mb_attn_cpu, mb_pl, mb_al = pad_batch(
+                    mb_idx, epoch_seqs, epoch_pls, epoch_als, tokenizer.pad_token_id
+                )
+
+                try:
+                    mb_ids = mb_ids_cpu.to(device, non_blocking=True)
+                    mb_attn = mb_attn_cpu.to(device, non_blocking=True)
+
+                    with autocast_ctx(device):
+                        outputs = model(
+                            input_ids=mb_ids, attention_mask=mb_attn, use_cache=False
+                        )
+                        logits = outputs.logits if hasattr(outputs, "logits") else outputs[0]
+                        logp = logprob_action_tokens(
+                            logits, mb_ids, mb_pl, mb_al, normalize_by_len=True
+                        )
+
+                    sft_loss = -logp.mean()
+                    scaled_loss = sft_loss / accum_steps
+                    scaled_loss.backward()
+
+                    with torch.no_grad():
+                        batch_action_tokens = sum(mb_al)
+                        epoch_loss_acc += float(sft_loss.item())
+                        epoch_tokens_acc += batch_action_tokens
+                        epoch_seqs_acc += len(mb_al)
+                        local_fwd_count += 1
+
+                    del mb_ids, mb_attn, logits, outputs, logp, scaled_loss, sft_loss
+
+                except torch.cuda.OutOfMemoryError:
+                    for v in ("mb_ids", "mb_attn", "logits", "outputs",
+                              "logp", "scaled_loss", "sft_loss"):
+                        locals().pop(v, None)
+                    torch.cuda.empty_cache()
+                    if is_main_rank():
+                        print(f"[OOM] batch {step_in_epoch+1} — retrying {len(mb_idx)} samples individually")
+
+                    n_samples = len(mb_idx)
+                    batch_loss_acc = 0.0
+                    batch_tokens_acc = 0
+                    for si in range(n_samples):
+                        s_ids, s_attn, s_pl, s_al = pad_batch(
+                            [mb_idx[si]], epoch_seqs, epoch_pls, epoch_als,
+                            tokenizer.pad_token_id,
+                        )
+                        s_ids = s_ids.to(device, non_blocking=True)
+                        s_attn = s_attn.to(device, non_blocking=True)
+                        with autocast_ctx(device):
+                            out = model(input_ids=s_ids, attention_mask=s_attn, use_cache=False)
+                            lg = out.logits if hasattr(out, "logits") else out[0]
+                            lp = logprob_action_tokens(lg, s_ids, s_pl, s_al, normalize_by_len=True)
+                        loss_i = -lp.mean() / (accum_steps * n_samples)
+                        loss_i.backward()
+                        with torch.no_grad():
+                            batch_loss_acc += float((-lp.mean()).item())
+                            batch_tokens_acc += s_al[0]
+                        del s_ids, s_attn, out, lg, lp, loss_i
+                        torch.cuda.empty_cache()
+                    with torch.no_grad():
+                        epoch_loss_acc += batch_loss_acc / n_samples
+                        epoch_tokens_acc += batch_tokens_acc
+                        epoch_seqs_acc += n_samples
+                    local_fwd_count += 1
+
+                del mb_ids_cpu, mb_attn_cpu
+
+            # ---- Optimizer step at accumulation boundaries ----
+            is_accum_boundary = (step_in_epoch + 1) % accum_steps == 0
+            is_last_step = (step_in_epoch + 1) == len(my_batch_order)
+
+            if is_accum_boundary or is_last_step:
+                allreduce_coalesced_grads(trainable_params)
+                torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)
+                optim.step()
+                optim.zero_grad(set_to_none=False)
+                global_step += 1
+
+                # Log at optimizer step boundaries
+                if is_main_rank() and global_step % args.log_every == 0:
+                    avg_loss = epoch_loss_acc / max(1, local_fwd_count)
+                    print(
+                        f"[epoch {epoch}] step={global_step}/{total_steps} "
+                        f"loss={avg_loss:.4f} lr={lr:.2e} "
+                        f"fwd={step_in_epoch + 1}/{len(my_batch_order)} "
+                        f"seqs={epoch_seqs_acc}"
+                    )
 
         # ---- Epoch metrics ----
         t_epoch_end = time.time()
@@ -507,24 +815,28 @@ def main():
             local_metrics = {
                 "loss": epoch_loss_acc,
                 "tokens": float(epoch_tokens_acc),
-                "n_updates": float(local_updates),
+                "seqs": float(epoch_seqs_acc),
+                "n_fwd": float(local_fwd_count),
             }
             agg = allreduce_scalars(local_metrics)
-            total_updates = int(agg["n_updates"])
+            total_fwd = int(agg["n_fwd"])
             epoch_loss_acc = agg["loss"]
             epoch_tokens_acc = int(agg["tokens"])
+            epoch_seqs_acc = int(agg["seqs"])
         else:
-            total_updates = local_updates
+            total_fwd = local_fwd_count
 
-        avg_epoch_loss = epoch_loss_acc / max(1, total_updates)
+        avg_epoch_loss = epoch_loss_acc / max(1, total_fwd)
         epoch_time = t_epoch_end - t_epoch_start
 
         if is_main_rank():
             print(
                 f"\n[Epoch {epoch}/{args.num_epochs}] "
                 f"avg_loss={avg_epoch_loss:.4f} "
+                f"seqs={epoch_seqs_acc:,} "
                 f"tokens={epoch_tokens_acc:,} "
-                f"updates={total_updates} "
+                f"fwd_passes={total_fwd} "
+                f"optim_steps={global_step} "
                 f"time={epoch_time:.1f}s"
             )
 
@@ -533,9 +845,11 @@ def main():
                     "sft/epoch": epoch,
                     "sft/loss": avg_epoch_loss,
                     "sft/action_tokens": epoch_tokens_acc,
+                    "sft/sequences": epoch_seqs_acc,
                     "sft/lr": lr,
                     "sft/epoch_time_sec": epoch_time,
-                    "sft/updates": total_updates,
+                    "sft/fwd_passes": total_fwd,
+                    "sft/optim_steps": global_step,
                 }, step=global_step)
 
         # ---- Save checkpoint ----
@@ -543,7 +857,7 @@ def main():
             if is_main_rank():
                 ckpt_dir = output_dir / f"sft_ckpt_epoch_{epoch}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 ckpt_dir.mkdir(parents=True, exist_ok=True)
-                model.save_pretrained(str(ckpt_dir))
+                unwrapped_model.save_pretrained(str(ckpt_dir))
                 tokenizer.save_pretrained(str(ckpt_dir))
 
                 # Save metadata for resuming
@@ -560,7 +874,7 @@ def main():
 
     # ---- Cleanup ----
     if is_main_rank():
-        print(f"\n[SFT] Training complete! {args.num_epochs} epochs, {global_step} steps")
+        print(f"\n[SFT] Training complete! {args.num_epochs} epochs, {global_step} optim steps")
     dist_cleanup()
 
 

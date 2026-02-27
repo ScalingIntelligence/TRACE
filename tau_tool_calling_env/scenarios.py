@@ -22,8 +22,8 @@ from typing import Any, Dict, List, Optional
 from adversarial_policy_game.database import (
     sample_airline_user,
     sample_retail_user,
-    _load_raw_db,
 )
+from adversarial_policy_game.synthetic_db import build_airline_db, build_retail_db
 from adversarial_policy_game.llm_user import build_user_system_prompt
 
 
@@ -50,6 +50,7 @@ class GeneratedScenario:
     is_refusal: bool = False
     description: str = ""
     key_facts: Dict[str, Any] = field(default_factory=dict)
+    db: Dict[str, Any] = field(default_factory=dict)
 
 
 # =====================================================================
@@ -126,6 +127,7 @@ def _gen_retail_cancel_pending(rng: random.Random) -> Optional[GeneratedScenario
     order_id = data["order_id"]
     reason = rng.choice(_CANCEL_REASONS)
     identity = _user_identity_retail(data)
+    db = build_retail_db(data["user"], data["order"], data.get("products_db", {}))
 
     initial_msg = (
         f"Hi, I'd like to cancel my order {order_id}. "
@@ -153,6 +155,7 @@ def _gen_retail_cancel_pending(rng: random.Random) -> Optional[GeneratedScenario
         communicate_info=["cancel"],
         description=f"Cancel pending order {order_id}",
         key_facts={"order_id": order_id, "user_id": data["user_id"]},
+        db=db,
     )
 
 
@@ -165,6 +168,7 @@ def _gen_retail_return_delivered(rng: random.Random) -> Optional[GeneratedScenar
     order = data["order"]
     order_id = data["order_id"]
     user = data["user"]
+    db = build_retail_db(data["user"], data["order"], data.get("products_db", {}))
 
     # Pick one item to return
     items = order.get("items", [])
@@ -221,6 +225,7 @@ def _gen_retail_return_delivered(rng: random.Random) -> Optional[GeneratedScenar
             "payment_method_id": payment_method_id,
             "user_id": data["user_id"],
         },
+        db=db,
     )
 
 
@@ -232,6 +237,7 @@ def _gen_retail_modify_address(rng: random.Random) -> Optional[GeneratedScenario
 
     order_id = data["order_id"]
     identity = _user_identity_retail(data)
+    db = build_retail_db(data["user"], data["order"], data.get("products_db", {}))
 
     # Generate a new address
     streets = [
@@ -287,6 +293,7 @@ def _gen_retail_modify_address(rng: random.Random) -> Optional[GeneratedScenario
             "new_address": f"{street}, {city}, {state} {zipcode}",
             "user_id": data["user_id"],
         },
+        db=db,
     )
 
 
@@ -302,6 +309,7 @@ def _gen_retail_modify_payment(rng: random.Random) -> Optional[GeneratedScenario
     order_id = data["order_id"]
     user = data["user"]
     identity = _user_identity_retail(data)
+    db = build_retail_db(data["user"], data["order"], data.get("products_db", {}))
 
     # Pick a different payment method than current
     order = data["order"]
@@ -352,6 +360,7 @@ def _gen_retail_modify_payment(rng: random.Random) -> Optional[GeneratedScenario
             "new_payment_id": new_pm_id,
             "user_id": data["user_id"],
         },
+        db=db,
     )
 
 
@@ -375,6 +384,7 @@ def _gen_airline_cancel_eligible(rng: random.Random) -> Optional[GeneratedScenar
     res_id = data["reservation_id"]
     res = data["reservation"]
     identity = _user_identity_airline(data)
+    db = build_airline_db(data["user"], data["reservation"], data.get("flights_db", {}))
     reason = rng.choice(_AIRLINE_CANCEL_REASONS)
 
     eligibility = []
@@ -417,6 +427,7 @@ def _gen_airline_cancel_eligible(rng: random.Random) -> Optional[GeneratedScenar
             "insurance": res.get("insurance"),
             "cabin": res.get("cabin"),
         },
+        db=db,
     )
 
 
@@ -430,6 +441,7 @@ def _gen_airline_update_baggages(rng: random.Random) -> Optional[GeneratedScenar
     res = data["reservation"]
     user = data["user"]
     identity = _user_identity_airline(data)
+    db = build_airline_db(data["user"], data["reservation"], data.get("flights_db", {}))
 
     # Current baggages
     current_baggages = res.get("baggages", {})
@@ -483,6 +495,7 @@ def _gen_airline_update_baggages(rng: random.Random) -> Optional[GeneratedScenar
             "bags_to_add": bags_to_add,
             "payment_id": payment_id,
         },
+        db=db,
     )
 
 
@@ -504,6 +517,8 @@ def _gen_airline_change_flight(rng: random.Random) -> Optional[GeneratedScenario
     res = data["reservation"]
     user = data["user"]
     identity = _user_identity_airline(data)
+    flights_db = data.get("flights_db", {})
+    db = build_airline_db(data["user"], data["reservation"], flights_db)
 
     flights = res.get("flights", [])
     if not flights:
@@ -516,9 +531,8 @@ def _gen_airline_change_flight(rng: random.Random) -> Optional[GeneratedScenario
     origin = old_seg["origin"]
     dest = old_seg["destination"]
 
-    # Find an available alternative flight on a nearby date
-    full_db = _load_raw_db("airline")
-    all_flights = full_db.get("flights", {})
+    # Find an available alternative flight on a nearby date (from synthetic flights_db)
+    all_flights = flights_db
 
     # Collect candidates: same origin->dest, different date, status=available
     candidates = []
@@ -628,6 +642,7 @@ def _gen_airline_change_flight(rng: random.Random) -> Optional[GeneratedScenario
             "destination": dest,
             "payment_id": payment_id,
         },
+        db=db,
     )
 
 
@@ -644,6 +659,7 @@ def _gen_airline_change_flight_basic_economy(rng: random.Random) -> Optional[Gen
     res_id = data["reservation_id"]
     res = data["reservation"]
     identity = _user_identity_airline(data)
+    db = build_airline_db(data["user"], data["reservation"], data.get("flights_db", {}))
 
     flights = res.get("flights", [])
     if not flights:
@@ -708,6 +724,7 @@ def _gen_airline_change_flight_basic_economy(rng: random.Random) -> Optional[Gen
             "old_date": old_date,
             "requested_date": new_date,
         },
+        db=db,
     )
 
 
@@ -720,6 +737,7 @@ def _gen_airline_update_passengers(rng: random.Random) -> Optional[GeneratedScen
     res_id = data["reservation_id"]
     res = data["reservation"]
     identity = _user_identity_airline(data)
+    db = build_airline_db(data["user"], data["reservation"], data.get("flights_db", {}))
 
     passengers = res.get("passengers", [])
     if not passengers:
@@ -776,6 +794,7 @@ def _gen_airline_update_passengers(rng: random.Random) -> Optional[GeneratedScen
             "passenger_name": f"{first_name} {last_name}",
             "new_dob": new_dob,
         },
+        db=db,
     )
 
 
@@ -796,16 +815,17 @@ def _gen_retail_exchange_cheapest(rng: random.Random) -> Optional[GeneratedScena
     items = order.get("items", [])
     if not items:
         return None
+    db = build_retail_db(data["user"], data["order"], data.get("products_db", {}))
 
-    # Pick an item with a multi-variant product
-    full_db = _load_raw_db("retail")
+    # Pick an item with a multi-variant product (from synthetic products_db)
+    products_db = data.get("products_db", {})
     rng_copy = random.Random(rng.random())
     shuffled_items = list(items)
     rng_copy.shuffle(shuffled_items)
 
     for item in shuffled_items:
         product_id = item.get("product_id", "")
-        product = full_db.get("products", {}).get(product_id, {})
+        product = products_db.get(product_id, {})
         variants = product.get("variants", {})
         if len(variants) < 3:
             continue
@@ -886,6 +906,7 @@ def _gen_retail_exchange_cheapest(rng: random.Random) -> Optional[GeneratedScena
                 "num_variants": len(variants),
                 "user_id": data["user_id"],
             },
+            db=db,
         )
 
     return None
@@ -904,15 +925,16 @@ def _gen_retail_exchange_specific_attr(rng: random.Random) -> Optional[Generated
     items = order.get("items", [])
     if not items:
         return None
+    db = build_retail_db(data["user"], data["order"], data.get("products_db", {}))
 
-    full_db = _load_raw_db("retail")
+    products_db = data.get("products_db", {})
     rng_copy = random.Random(rng.random())
     shuffled_items = list(items)
     rng_copy.shuffle(shuffled_items)
 
     for item in shuffled_items:
         product_id = item.get("product_id", "")
-        product = full_db.get("products", {}).get(product_id, {})
+        product = products_db.get(product_id, {})
         variants = product.get("variants", {})
         if len(variants) < 3:
             continue
@@ -996,6 +1018,7 @@ def _gen_retail_exchange_specific_attr(rng: random.Random) -> Optional[Generated
                         "payment_method_id": payment_method_id,
                         "user_id": data["user_id"],
                     },
+                    db=db,
                 )
 
     return None
@@ -1014,15 +1037,16 @@ def _gen_retail_modify_items(rng: random.Random) -> Optional[GeneratedScenario]:
     items = order.get("items", [])
     if not items:
         return None
+    db = build_retail_db(data["user"], data["order"], data.get("products_db", {}))
 
-    full_db = _load_raw_db("retail")
+    products_db = data.get("products_db", {})
     rng_copy = random.Random(rng.random())
     shuffled_items = list(items)
     rng_copy.shuffle(shuffled_items)
 
     for item in shuffled_items:
         product_id = item.get("product_id", "")
-        product = full_db.get("products", {}).get(product_id, {})
+        product = products_db.get(product_id, {})
         variants = product.get("variants", {})
         if len(variants) < 2:
             continue
@@ -1094,6 +1118,7 @@ def _gen_retail_modify_items(rng: random.Random) -> Optional[GeneratedScenario]:
                 "payment_method_id": payment_method_id,
                 "user_id": data["user_id"],
             },
+            db=db,
         )
 
     return None
@@ -1111,6 +1136,7 @@ def _gen_retail_cancel_nonpending(rng: random.Random) -> Optional[GeneratedScena
 
     order_id = data["order_id"]
     identity = _user_identity_retail(data)
+    db = build_retail_db(data["user"], data["order"], data.get("products_db", {}))
 
     initial_msg = (
         f"Hi, I want to cancel my order {order_id}. I changed my mind about it."
@@ -1138,6 +1164,7 @@ def _gen_retail_cancel_nonpending(rng: random.Random) -> Optional[GeneratedScena
         is_refusal=True,
         description=f"Cancel delivered order {order_id} (should be refused)",
         key_facts={"order_id": order_id, "user_id": data["user_id"]},
+        db=db,
     )
 
 
@@ -1156,6 +1183,7 @@ def _gen_airline_cancel_ineligible(rng: random.Random) -> Optional[GeneratedScen
 
     res_id = data["reservation_id"]
     identity = _user_identity_airline(data)
+    db = build_airline_db(data["user"], data["reservation"], data.get("flights_db", {}))
 
     initial_msg = (
         f"Hi, I need to cancel my reservation {res_id}. My plans have changed."
@@ -1186,6 +1214,7 @@ def _gen_airline_cancel_ineligible(rng: random.Random) -> Optional[GeneratedScen
             "reservation_id": res_id,
             "user_id": data["user_id"],
         },
+        db=db,
     )
 
 
@@ -1199,6 +1228,7 @@ def _gen_retail_info_query(rng: random.Random) -> Optional[GeneratedScenario]:
 
     order_id = data["order_id"]
     identity = _user_identity_retail(data)
+    db = build_retail_db(data["user"], data["order"], data.get("products_db", {}))
 
     initial_msg = (
         f"Hi, I'd like to check on the status of my order {order_id}."
@@ -1221,6 +1251,7 @@ def _gen_retail_info_query(rng: random.Random) -> Optional[GeneratedScenario]:
         is_refusal=False,  # Not refusal, just info query
         description=f"Query status of order {order_id}",
         key_facts={"order_id": order_id, "user_id": data["user_id"], "status": status},
+        db=db,
     )
 
 
@@ -1233,6 +1264,7 @@ def _gen_airline_info_query(rng: random.Random) -> Optional[GeneratedScenario]:
     res_id = data["reservation_id"]
     res = data["reservation"]
     identity = _user_identity_airline(data)
+    db = build_airline_db(data["user"], data["reservation"], data.get("flights_db", {}))
 
     initial_msg = (
         f"Hi, can you tell me the details of my reservation {res_id}?"
@@ -1258,6 +1290,7 @@ def _gen_airline_info_query(rng: random.Random) -> Optional[GeneratedScenario]:
         is_refusal=False,
         description=f"Query details of reservation {res_id}",
         key_facts={"reservation_id": res_id, "user_id": data["user_id"]},
+        db=db,
     )
 
 
@@ -1372,6 +1405,7 @@ def generate_scenario(seed: int, domain: Optional[str] = None) -> GeneratedScena
             communicate_info=[],
             is_refusal=False,
             description="Fallback: airline inquiry",
+        db={"users": {}, "reservations": {}, "flights": {}},
         )
 
     result = _gen_retail_cancel_pending(fallback_rng)
@@ -1391,4 +1425,5 @@ def generate_scenario(seed: int, domain: Optional[str] = None) -> GeneratedScena
         communicate_info=[],
         is_refusal=False,
         description="Fallback: general inquiry",
+        db={"users": {}, "orders": {}, "products": {}},
     )

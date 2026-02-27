@@ -163,8 +163,8 @@ def _register_builtin_games() -> None:
     # Multi-Step Task — targets actual tau2-bench multi-step failure modes
     # One-shot constraints, info retrieval chains, item batching, status-gated tools
     # Multi-turn, no LLM user needed.
-    def make_multistep(difficulty=3) -> RealisticMultiStepGame:
-        return RealisticMultiStepGame(max_steps=30, difficulty=difficulty)
+    def make_multistep() -> RealisticMultiStepGame:
+        return RealisticMultiStepGame(max_steps=30)
 
     register_game(
         GameSpec(

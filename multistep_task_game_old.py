@@ -5,17 +5,18 @@ Teaches one core skill: completing a sequence of N tool-call operations,
 gathering required information along the way.
 
 The model must:
-  1. Authenticate the user (find_user_id_by_name_zip → get_user_details)
-  2. Look up order/product details before acting (information gathering)
-  3. Execute all N requested operations without skipping any (completeness)
-  4. Batch items into single calls where required (one-shot constraint)
-  5. Track what's been done across turns (state management)
+  1. Look up order/product details before acting (information gathering)
+  2. Execute all N requested operations without skipping any (completeness)
+  3. Batch items into single calls where required (one-shot constraint)
+  4. Track what's been done across turns (state management)
 
-Reward: completion bonus (0.4) + linear partial credit (max 0.6).
-Designed for GRPO signal quality — 0.5 gap between perfect and 1-miss,
-with gradient across partials. Task descriptions are information-gated:
-item IDs must be discovered via get_order_details, payment method IDs
-via get_user_details.
+Difficulty scales by the number of operations and orders, not by
+reasoning complexity. All data is procedurally generated.
+
+Reward: completion bonus (0.4) + linear partial credit (max 0.6) +
+lookup penalty (0.15 per skip). Designed for GRPO signal quality —
+0.5 gap between perfect and 1-miss, with gradient across partials.
+Penalties sized so completion always dominates (all-ops+skips > miss-ops).
 """
 
 import random
@@ -34,12 +35,6 @@ FIRST_NAMES = [
     "Owen", "Luna", "Felix", "Ivy", "Jasper", "Nora", "Leo", "Elara",
 ]
 
-LAST_NAMES = [
-    "Brown", "Smith", "Li", "Garcia", "Santos", "Chen", "Kim", "Patel",
-    "Johnson", "Williams", "Davis", "Wilson", "Moore", "Taylor", "Clark",
-    "Lopez",
-]
-
 PRODUCT_TYPES = [
     "Wireless Headphones", "USB-C Cable", "Phone Case", "Bluetooth Speaker",
     "Laptop Stand", "Wireless Mouse", "Keyboard", "Monitor Light", "Webcam",
@@ -51,14 +46,6 @@ PRODUCT_TYPES = [
 OPTION_COLORS = ["red", "blue", "green", "black", "white", "silver"]
 OPTION_SIZES = ["small", "medium", "large"]
 OPTION_MATERIALS = ["plastic", "metal", "fabric", "wood"]
-
-PAYMENT_SOURCES = ["credit_card", "gift_card", "paypal"]
-
-PAYMENT_SOURCE_LABELS = {
-    "credit_card": "credit card",
-    "gift_card": "gift card",
-    "paypal": "PayPal account",
-}
 
 STREETS = [
     "10 Maple Lane", "25 Oak Drive", "77 Pine Street",
@@ -90,15 +77,24 @@ INCREMENTAL_ADDITIONS = [
     "Sorry, I forgot — please also {task_desc}",
 ]
 
-# Episode generation config: 5-8 operations, 4-6 orders, all 6 templates.
-EPISODE_CONFIG = {
-    "orders": (4, 6),
-    "items_per_order": (2, 4),
-    "ops": (5, 8),
-    "templates": [
-        "cross_order_ops", "multi_item_batch", "address_propagation",
-        "status_dependent", "cross_ref_address", "incremental_reveal",
-    ],
+# Difficulty scales by number of operations and orders (like structured_data_game
+# scales by data size). Templates test pure multi-step execution, not reasoning.
+DIFFICULTY_CONFIG = {
+    1: {"orders": (2, 2), "items_per_order": (1, 1), "ops": (2, 2),
+        "templates": ["cross_order_ops"]},
+    2: {"orders": (2, 3), "items_per_order": (1, 2), "ops": (2, 3),
+        "templates": ["cross_order_ops", "multi_item_batch", "address_propagation"]},
+    3: {"orders": (3, 5), "items_per_order": (2, 3), "ops": (4, 6),
+        "templates": ["cross_order_ops", "multi_item_batch", "address_propagation",
+                      "status_dependent", "cross_ref_address"]},
+    4: {"orders": (4, 6), "items_per_order": (2, 4), "ops": (5, 8),
+        "templates": ["cross_order_ops", "multi_item_batch", "address_propagation",
+                      "status_dependent", "cross_ref_address",
+                      "incremental_reveal"]},
+    5: {"orders": (5, 7), "items_per_order": (2, 4), "ops": (6, 9),
+        "templates": ["cross_order_ops", "multi_item_batch", "address_propagation",
+                      "status_dependent", "cross_ref_address",
+                      "incremental_reveal"]},
 }
 
 
@@ -150,31 +146,12 @@ class Address:
 
 
 @dataclass
-class PaymentMethod:
-    source: str  # "credit_card", "gift_card", "paypal"
-    id: str      # e.g. "credit_card_1234567"
-
-
-@dataclass
-class UserEntity:
-    user_id: str
-    first_name: str
-    last_name: str
-    address: Address
-    email: str
-    zip_code: str
-    payment_methods: Dict[str, PaymentMethod]  # id -> PaymentMethod
-    order_ids: List[str]
-
-
-@dataclass
 class OrderEntity:
     order_id: str
-    user_id: str
     status: str  # "pending", "delivered"
     items: List[OrderItem]
     address: Address
-    payment_history: List[Dict[str, Any]]
+    payment_method_id: str
 
 
 @dataclass
@@ -189,12 +166,12 @@ class TaskOperation:
 
 @dataclass
 class EpisodeScenario:
-    user: UserEntity
     orders: List[OrderEntity]
     products: List[ProductEntity]
     operations: List[TaskOperation]
     initial_task_descriptions: List[str]
     incremental_task_descriptions: List[str]
+    difficulty: int
 
 
 # =============================================================================
@@ -203,24 +180,8 @@ class EpisodeScenario:
 
 TOOL_SCHEMAS = [
     {
-        "name": "find_user_id_by_name_zip",
-        "description": "Find a user's ID by their first name, last name, and zip code.",
-        "parameters": {
-            "first_name": {"type": "string", "description": "The first name of the customer, such as 'John'"},
-            "last_name": {"type": "string", "description": "The last name of the customer, such as 'Doe'"},
-            "zip": {"type": "string", "description": "The zip code of the customer, such as '12345'"},
-        },
-    },
-    {
-        "name": "get_user_details",
-        "description": "Get a user's details including address, email, payment methods, and order history.",
-        "parameters": {
-            "user_id": {"type": "string", "description": "The user ID, such as 'john_doe_1234'"},
-        },
-    },
-    {
         "name": "get_order_details",
-        "description": "Look up the full details of an order including status, items, address, and payment history.",
+        "description": "Look up the full details of an order including status, items, address, and payment method.",
         "parameters": {
             "order_id": {"type": "string", "description": "The order ID to look up"},
         },
@@ -295,19 +256,15 @@ TOOL_SCHEMAS = [
 # =============================================================================
 
 def _gen_order_id(rng: random.Random) -> str:
-    return f"#W{rng.randint(1000000, 9999999)}"
+    return f"#W{rng.randint(100000, 999999)}"
 
 
 def _gen_product_id(rng: random.Random) -> str:
-    return str(rng.randint(1000000000, 9999999999))
+    return f"prod_{rng.randint(1000, 9999)}"
 
 
 def _gen_item_id(rng: random.Random) -> str:
-    return str(rng.randint(1000000000, 9999999999))
-
-
-def _gen_payment_method_id(rng: random.Random, source: str) -> str:
-    return f"{source}_{rng.randint(1000000, 9999999)}"
+    return f"item_{rng.randint(10000, 99999)}"
 
 
 def _gen_address(rng: random.Random) -> Address:
@@ -348,8 +305,7 @@ def _gen_product(rng: random.Random, name: str, num_variants: int = 4) -> Produc
 
 
 def _gen_order(rng: random.Random, status: str, products: List[ProductEntity],
-               n_items: int, user_id: str,
-               user_payment_methods: Dict[str, PaymentMethod]) -> OrderEntity:
+               n_items: int) -> OrderEntity:
     """Generate an order with n_items drawn from the product catalog."""
     items = []
     used_products = set()
@@ -367,63 +323,13 @@ def _gen_order(rng: random.Random, status: str, products: List[ProductEntity],
             name=product.name,
             price=variant.price,
         ))
-    # Pick a random payment method from user for payment_history
-    pm = rng.choice(list(user_payment_methods.values()))
-    total = sum(i.price for i in items)
-    payment_history = [
-        {"transaction_type": "payment", "amount": round(total, 2),
-         "payment_method_id": pm.id},
-    ]
     return OrderEntity(
         order_id=_gen_order_id(rng),
-        user_id=user_id,
         status=status,
         items=items,
         address=_gen_address(rng),
-        payment_history=payment_history,
+        payment_method_id=f"pay_{rng.randint(1000, 9999)}",
     )
-
-
-def _gen_user(rng: random.Random, first_name: str) -> UserEntity:
-    """Generate a user with name, address, and 2-3 payment methods."""
-    last_name = rng.choice(LAST_NAMES)
-    user_id = f"{first_name.lower()}_{last_name.lower()}_{rng.randint(1000, 9999)}"
-    address = _gen_address(rng)
-    email = f"{first_name.lower()}.{last_name.lower()}{rng.randint(100, 999)}@example.com"
-
-    # Generate 2-3 payment methods of different source types
-    n_methods = rng.randint(2, 3)
-    sources = rng.sample(PAYMENT_SOURCES, n_methods)
-    payment_methods: Dict[str, PaymentMethod] = {}
-    for source in sources:
-        pm_id = _gen_payment_method_id(rng, source)
-        payment_methods[pm_id] = PaymentMethod(source=source, id=pm_id)
-
-    return UserEntity(
-        user_id=user_id,
-        first_name=first_name,
-        last_name=last_name,
-        address=address,
-        email=email,
-        zip_code=address.zip_code,
-        payment_methods=payment_methods,
-        order_ids=[],  # filled in after orders are generated
-    )
-
-
-def _pick_payment_method(rng: random.Random, user: UserEntity,
-                         prefer_source: Optional[str] = None) -> PaymentMethod:
-    """Pick a payment method from user, optionally preferring a source type."""
-    if prefer_source:
-        for pm in user.payment_methods.values():
-            if pm.source == prefer_source:
-                return pm
-    return rng.choice(list(user.payment_methods.values()))
-
-
-def _payment_label(pm: PaymentMethod) -> str:
-    """Human-readable label like 'my gift card' for task descriptions."""
-    return f"my {PAYMENT_SOURCE_LABELS[pm.source]}"
 
 
 # =============================================================================
@@ -431,10 +337,8 @@ def _payment_label(pm: PaymentMethod) -> str:
 # =============================================================================
 
 def _tmpl_cross_order_ops(rng: random.Random, orders: List[OrderEntity],
-                          products: List[ProductEntity],
-                          user: UserEntity) -> List[TaskOperation]:
-    """Simple independent operations across different orders.
-    Delivered orders: 50% return, 50% single-item exchange."""
+                          products: List[ProductEntity]) -> List[TaskOperation]:
+    """Simple independent operations across different orders."""
     ops = []
     for order in orders:
         if order.status == "pending":
@@ -460,57 +364,26 @@ def _tmpl_cross_order_ops(rng: random.Random, orders: List[OrderEntity],
                     tool_args={"order_id": order.order_id, **new_addr.to_dict()},
                 ))
         else:  # delivered
-            if rng.random() < 0.5:
-                # Single-item exchange
-                item = rng.choice(order.items)
-                product = next((p for p in products if p.product_id == item.product_id), None)
-                if product:
-                    other_variants = [v for v in product.variants
-                                      if v.item_id != item.item_id and v.available]
-                    if other_variants:
-                        chosen = rng.choice(other_variants)
-                        pm = _pick_payment_method(rng, user)
-                        ops.append(TaskOperation(
-                            description=(
-                                f"exchange the {item.name} in order {order.order_id} "
-                                f"to the {chosen.color} {chosen.size} variant, "
-                                f"use {_payment_label(pm)} for any price difference"
-                            ),
-                            order_id=order.order_id,
-                            tool_name="exchange_delivered_order_items",
-                            tool_args={
-                                "order_id": order.order_id,
-                                "item_ids": [item.item_id],
-                                "new_item_ids": [chosen.item_id],
-                                "payment_method_id": pm.id,
-                            },
-                        ))
-                        continue
-                # Fallthrough to return if exchange not possible
-            # Return
             item = rng.choice(order.items)
-            pm = _pick_payment_method(rng, user)
             ops.append(TaskOperation(
                 description=(
-                    f"return the {item.name} from order {order.order_id}, "
-                    f"refund to {_payment_label(pm)}"
+                    f"return the {item.name} (item {item.item_id}) from order "
+                    f"{order.order_id}, refund to {order.payment_method_id}"
                 ),
                 order_id=order.order_id,
                 tool_name="return_delivered_order_items",
                 tool_args={
                     "order_id": order.order_id,
                     "item_ids": [item.item_id],
-                    "payment_method_id": pm.id,
+                    "payment_method_id": order.payment_method_id,
                 },
             ))
     return ops
 
 
 def _tmpl_multi_item_batch(rng: random.Random, orders: List[OrderEntity],
-                           products: List[ProductEntity],
-                           user: UserEntity) -> Optional[TaskOperation]:
-    """Exchange/return/modify MULTIPLE items from ONE order in a single call.
-    Delivered: 80% exchange, 20% return. Pending: always modify."""
+                           products: List[ProductEntity]) -> Optional[TaskOperation]:
+    """Exchange/return/modify MULTIPLE items from ONE order in a single call."""
     # Find an order with 2+ items
     candidates = [o for o in orders if len(o.items) >= 2]
     if not candidates:
@@ -518,11 +391,10 @@ def _tmpl_multi_item_batch(rng: random.Random, orders: List[OrderEntity],
 
     order = rng.choice(candidates)
     items_to_act = rng.sample(order.items, min(len(order.items), rng.randint(2, 3)))
-    pm = _pick_payment_method(rng, user)
 
     if order.status == "delivered":
-        if rng.random() < 0.8:
-            # Multi-item exchange — describe by name/attributes, not IDs
+        if rng.random() < 0.6:
+            # Multi-item exchange — specify target variants so model knows what to change to
             new_item_ids = []
             swap_descs = []
             for oi in items_to_act:
@@ -534,21 +406,21 @@ def _tmpl_multi_item_batch(rng: random.Random, orders: List[OrderEntity],
                         chosen = rng.choice(other_variants)
                         new_item_ids.append(chosen.item_id)
                         swap_descs.append(
-                            f"{oi.name} to the "
-                            f"{chosen.color} {chosen.size} variant"
+                            f"{oi.name} ({oi.item_id}) to the "
+                            f"{chosen.color} {chosen.size} variant ({chosen.item_id})"
                         )
                     else:
                         new_item_ids.append(oi.item_id)
-                        swap_descs.append(f"{oi.name} (keep same)")
+                        swap_descs.append(f"{oi.name} ({oi.item_id}) (keep same)")
                 else:
                     new_item_ids.append(oi.item_id)
-                    swap_descs.append(f"{oi.name} (keep same)")
+                    swap_descs.append(f"{oi.name} ({oi.item_id}) (keep same)")
 
             swap_list = "; ".join(swap_descs)
             return TaskOperation(
                 description=(
                     f"exchange ALL of these items from order {order.order_id} in one request: "
-                    f"{swap_list}. Use {_payment_label(pm)} for any price difference"
+                    f"{swap_list}"
                 ),
                 order_id=order.order_id,
                 tool_name="exchange_delivered_order_items",
@@ -556,26 +428,26 @@ def _tmpl_multi_item_batch(rng: random.Random, orders: List[OrderEntity],
                     "order_id": order.order_id,
                     "item_ids": [i.item_id for i in items_to_act],
                     "new_item_ids": new_item_ids,
-                    "payment_method_id": pm.id,
+                    "payment_method_id": order.payment_method_id,
                 },
             )
         else:
-            # Multi-item return — describe by name only, not IDs
-            item_descs = ", ".join(i.name for i in items_to_act)
+            # Multi-item return — no new_item_ids needed
+            item_descs = ", ".join(f"{i.name} ({i.item_id})" for i in items_to_act)
             return TaskOperation(
                 description=(
                     f"return ALL of these items from order {order.order_id} in one request: "
-                    f"{item_descs}. Refund to {_payment_label(pm)}"
+                    f"{item_descs}"
                 ),
                 order_id=order.order_id,
                 tool_name="return_delivered_order_items",
                 tool_args={
                     "order_id": order.order_id,
                     "item_ids": [i.item_id for i in items_to_act],
-                    "payment_method_id": pm.id,
+                    "payment_method_id": order.payment_method_id,
                 },
             )
-    else:  # pending — multi-item modify — describe by name/attributes, not IDs
+    else:  # pending — multi-item modify — specify target variants
         new_item_ids = []
         swap_descs = []
         for oi in items_to_act:
@@ -587,21 +459,21 @@ def _tmpl_multi_item_batch(rng: random.Random, orders: List[OrderEntity],
                     chosen = rng.choice(other_variants)
                     new_item_ids.append(chosen.item_id)
                     swap_descs.append(
-                        f"{oi.name} to the "
-                        f"{chosen.color} {chosen.size} variant"
+                        f"{oi.name} ({oi.item_id}) to the "
+                        f"{chosen.color} {chosen.size} variant ({chosen.item_id})"
                     )
                 else:
                     new_item_ids.append(oi.item_id)
-                    swap_descs.append(f"{oi.name} (keep same)")
+                    swap_descs.append(f"{oi.name} ({oi.item_id}) (keep same)")
             else:
                 new_item_ids.append(oi.item_id)
-                swap_descs.append(f"{oi.name} (keep same)")
+                swap_descs.append(f"{oi.name} ({oi.item_id}) (keep same)")
 
         swap_list = "; ".join(swap_descs)
         return TaskOperation(
             description=(
                 f"modify ALL of these items in order {order.order_id} in one request: "
-                f"{swap_list}. Use {_payment_label(pm)} for any price difference"
+                f"{swap_list}"
             ),
             order_id=order.order_id,
             tool_name="modify_pending_order_items",
@@ -609,22 +481,17 @@ def _tmpl_multi_item_batch(rng: random.Random, orders: List[OrderEntity],
                 "order_id": order.order_id,
                 "item_ids": [i.item_id for i in items_to_act],
                 "new_item_ids": new_item_ids,
-                "payment_method_id": pm.id,
+                "payment_method_id": order.payment_method_id,
             },
         )
 
 
 def _tmpl_address_propagation(rng: random.Random, orders: List[OrderEntity],
-                              products: List[ProductEntity],
-                              user: UserEntity) -> List[TaskOperation]:
-    """Update address on pending orders. Capped at 2 orders max."""
+                              products: List[ProductEntity]) -> List[TaskOperation]:
+    """Update address on ALL pending orders."""
     pending = [o for o in orders if "pending" in o.status]
     if len(pending) < 2:
         return []
-
-    # Cap at 2 orders to prevent address propagation from dominating
-    if len(pending) > 2:
-        pending = rng.sample(pending, 2)
 
     new_addr = _gen_address(rng)
     ops = []
@@ -646,8 +513,7 @@ def _tmpl_address_propagation(rng: random.Random, orders: List[OrderEntity],
 
 
 def _tmpl_cross_ref_address(rng: random.Random, orders: List[OrderEntity],
-                            products: List[ProductEntity],
-                            user: UserEntity) -> Optional[TaskOperation]:
+                            products: List[ProductEntity]) -> Optional[TaskOperation]:
     """Change one order's address to match another order's address."""
     pending = [o for o in orders if "pending" in o.status]
     others = [o for o in orders if o not in pending]
@@ -679,8 +545,7 @@ def _tmpl_cross_ref_address(rng: random.Random, orders: List[OrderEntity],
 
 
 def _tmpl_status_dependent(rng: random.Random, orders: List[OrderEntity],
-                           products: List[ProductEntity],
-                           user: UserEntity) -> Optional[TaskOperation]:
+                           products: List[ProductEntity]) -> Optional[TaskOperation]:
     """User says 'change item X' — agent must check status to pick the right tool."""
     order = rng.choice(orders)
     item = rng.choice(order.items)
@@ -700,13 +565,10 @@ def _tmpl_status_dependent(rng: random.Random, orders: List[OrderEntity],
     else:
         tool_name = "exchange_delivered_order_items"
 
-    pm = _pick_payment_method(rng, user)
-
     return TaskOperation(
         description=(
-            f"change the {item.name} in order {order.order_id} "
-            f"to the {new_variant.color} {new_variant.size} variant, "
-            f"use {_payment_label(pm)} for any price difference"
+            f"change the {item.name} ({item.item_id}) in order {order.order_id} "
+            f"to the {new_variant.color} {new_variant.size} variant ({new_variant.item_id})"
         ),
         order_id=order.order_id,
         tool_name=tool_name,
@@ -714,7 +576,7 @@ def _tmpl_status_dependent(rng: random.Random, orders: List[OrderEntity],
             "order_id": order.order_id,
             "item_ids": [item.item_id],
             "new_item_ids": [new_variant.item_id],
-            "payment_method_id": pm.id,
+            "payment_method_id": order.payment_method_id,
         },
         requires_lookup=True,
     )
@@ -724,9 +586,10 @@ def _tmpl_status_dependent(rng: random.Random, orders: List[OrderEntity],
 # Episode generation
 # =============================================================================
 
-def generate_episode(seed: int) -> EpisodeScenario:
+def generate_episode(seed: int, difficulty: int = 3) -> EpisodeScenario:
     rng = random.Random(seed)
-    config = EPISODE_CONFIG
+    difficulty = max(1, min(5, difficulty))
+    config = DIFFICULTY_CONFIG[difficulty]
 
     n_orders = rng.randint(*config["orders"])
     n_items_per = config["items_per_order"]
@@ -738,41 +601,28 @@ def generate_episode(seed: int) -> EpisodeScenario:
     products = [_gen_product(rng, name, num_variants=rng.randint(3, 6))
                 for name in product_names]
 
-    # Generate user first (needed for payment methods on orders)
-    user_name = rng.choice(FIRST_NAMES)
-    user = _gen_user(rng, user_name)
-
     # Generate orders with mixed statuses
     orders = []
     for _ in range(n_orders):
         status = rng.choice(["pending", "delivered"])
         n_items = rng.randint(*n_items_per)
-        orders.append(_gen_order(rng, status, products, n_items,
-                                 user.user_id, user.payment_methods))
-
-    # Link orders to user
-    user.order_ids = [o.order_id for o in orders]
+        orders.append(_gen_order(rng, status, products, n_items))
 
     # Ensure at least one pending and one delivered for interesting scenarios
-    statuses = [o.status for o in orders]
-    if "pending" not in statuses:
-        orders[0].status = "pending"
-    if "delivered" not in statuses and len(orders) > 1:
-        orders[1].status = "delivered"
+    if difficulty >= 3:
+        statuses = [o.status for o in orders]
+        if "pending" not in statuses:
+            orders[0].status = "pending"
+        if "delivered" not in statuses and len(orders) > 1:
+            orders[1].status = "delivered"
 
     # Select operations from available templates
-    # Prioritize exchange-generating templates before address_propagation
     available_templates = list(config["templates"])
-    # Reorder: exchange-heavy first, address_propagation last
-    priority_order = ["multi_item_batch", "status_dependent", "cross_order_ops",
-                      "cross_ref_address", "incremental_reveal", "address_propagation"]
-    available_templates.sort(
-        key=lambda t: priority_order.index(t) if t in priority_order else 99
-    )
-
     operations: List[TaskOperation] = []
     used_orders: Dict[str, str] = {}  # order_id -> tool used (for one-shot tracking)
     incremental_ops: List[TaskOperation] = []
+
+    rng.shuffle(available_templates)
 
     for template_name in available_templates:
         if len(operations) + len(incremental_ops) >= target_ops:
@@ -783,7 +633,7 @@ def generate_episode(seed: int) -> EpisodeScenario:
             free_orders = [o for o in orders if o.order_id not in used_orders]
             if free_orders:
                 subset = rng.sample(free_orders, min(len(free_orders), 2))
-                for op in _tmpl_cross_order_ops(rng, subset, products, user):
+                for op in _tmpl_cross_order_ops(rng, subset, products):
                     if len(operations) + len(incremental_ops) < target_ops:
                         operations.append(op)
                         used_orders[op.order_id] = op.tool_name
@@ -792,7 +642,7 @@ def generate_episode(seed: int) -> EpisodeScenario:
             free_orders = [o for o in orders if o.order_id not in used_orders
                            and len(o.items) >= 2]
             if free_orders:
-                op = _tmpl_multi_item_batch(rng, free_orders, products, user)
+                op = _tmpl_multi_item_batch(rng, free_orders, products)
                 if op:
                     operations.append(op)
                     used_orders[op.order_id] = op.tool_name
@@ -801,7 +651,7 @@ def generate_episode(seed: int) -> EpisodeScenario:
             pending_free = [o for o in orders if "pending" in o.status
                             and o.order_id not in used_orders]
             if len(pending_free) >= 2:
-                addr_ops = _tmpl_address_propagation(rng, orders, products, user)
+                addr_ops = _tmpl_address_propagation(rng, orders, products)
                 # Only add ops for orders not yet used
                 for op in addr_ops:
                     if op.order_id not in used_orders:
@@ -813,7 +663,7 @@ def generate_episode(seed: int) -> EpisodeScenario:
             pending_free = [o for o in orders if "pending" in o.status
                             and o.order_id not in used_orders]
             if pending_free:
-                op = _tmpl_cross_ref_address(rng, orders, products, user)
+                op = _tmpl_cross_ref_address(rng, orders, products)
                 if op and op.order_id not in used_orders:
                     operations.append(op)
                     used_orders[op.order_id] = op.tool_name
@@ -821,7 +671,9 @@ def generate_episode(seed: int) -> EpisodeScenario:
         elif template_name == "status_dependent":
             free_orders = [o for o in orders if o.order_id not in used_orders]
             if free_orders:
-                op = _tmpl_status_dependent(rng, free_orders, products, user)
+                # Temporarily override to use a free order
+                saved = orders
+                op = _tmpl_status_dependent(rng, free_orders, products)
                 if op and op.order_id not in used_orders:
                     operations.append(op)
                     used_orders[op.order_id] = op.tool_name
@@ -831,7 +683,7 @@ def generate_episode(seed: int) -> EpisodeScenario:
             if free_orders and len(operations) >= 2:
                 # Generate one op to be revealed mid-conversation
                 subset = [rng.choice(free_orders)]
-                cross_ops = _tmpl_cross_order_ops(rng, subset, products, user)
+                cross_ops = _tmpl_cross_order_ops(rng, subset, products)
                 if cross_ops:
                     op = cross_ops[0]
                     op.is_incremental = True
@@ -844,7 +696,7 @@ def generate_episode(seed: int) -> EpisodeScenario:
         if not free_orders:
             break
         subset = [rng.choice(free_orders)]
-        for op in _tmpl_cross_order_ops(rng, subset, products, user):
+        for op in _tmpl_cross_order_ops(rng, subset, products):
             operations.append(op)
             used_orders[op.order_id] = op.tool_name
             break
@@ -865,12 +717,12 @@ def generate_episode(seed: int) -> EpisodeScenario:
     all_ops = operations + incremental_ops
 
     return EpisodeScenario(
-        user=user,
         orders=orders,
         products=products,
         operations=all_ops,
         initial_task_descriptions=initial_descs,
         incremental_task_descriptions=incr_descs,
+        difficulty=difficulty,
     )
 
 
@@ -878,29 +730,14 @@ def generate_episode(seed: int) -> EpisodeScenario:
 # Tool simulation (stateful)
 # =============================================================================
 
-def _serialize_user(user: UserEntity) -> str:
-    return json.dumps({
-        "user_id": user.user_id,
-        "name": {"first_name": user.first_name, "last_name": user.last_name},
-        "address": user.address.to_dict(),
-        "email": user.email,
-        "payment_methods": {
-            pm_id: {"source": pm.source, "id": pm.id}
-            for pm_id, pm in user.payment_methods.items()
-        },
-        "orders": user.order_ids,
-    }, indent=2)
-
-
 def _serialize_order(order: OrderEntity) -> str:
     return json.dumps({
         "order_id": order.order_id,
-        "user_id": order.user_id,
         "status": order.status,
         "items": [{"item_id": i.item_id, "product_id": i.product_id,
                     "name": i.name, "price": i.price} for i in order.items],
         "address": order.address.to_dict(),
-        "payment_history": order.payment_history,
+        "payment_method_id": order.payment_method_id,
     }, indent=2)
 
 
@@ -923,26 +760,9 @@ def _normalize_order_id(oid: str, orders: List[OrderEntity]) -> Optional[OrderEn
 
 
 def execute_tool(tool_name: str, args: Dict[str, Any],
-                 user: UserEntity,
                  orders: List[OrderEntity],
                  products: List[ProductEntity]) -> Tuple[bool, str]:
     """Execute a tool call against mutable state. Returns (success, result_json)."""
-
-    if tool_name == "find_user_id_by_name_zip":
-        first = str(args.get("first_name", "")).strip()
-        last = str(args.get("last_name", "")).strip()
-        zip_code = str(args.get("zip", "")).strip()
-        if (first.lower() == user.first_name.lower()
-                and last.lower() == user.last_name.lower()
-                and zip_code == user.zip_code):
-            return True, json.dumps({"user_id": user.user_id})
-        return False, json.dumps({"error": "User not found with the provided name and zip code."})
-
-    if tool_name == "get_user_details":
-        uid = str(args.get("user_id", "")).strip()
-        if uid == user.user_id:
-            return True, _serialize_user(user)
-        return False, json.dumps({"error": f"User {uid} not found."})
 
     if tool_name == "get_order_details":
         oid = args.get("order_id", "")
@@ -1091,7 +911,7 @@ def _match_tool_call(call_name: str, call_args: Dict, op: TaskOperation) -> bool
             provided_new = set(call_args.get("new_item_ids", []))
             if expected_new != provided_new:
                 return False
-        return call_args.get("payment_method_id") == op.tool_args.get("payment_method_id")
+        return bool(call_args.get("payment_method_id"))
 
     if call_name == "modify_pending_order_address":
         expected_addr = Address(
@@ -1108,6 +928,7 @@ def compute_reward(
     operations: List[TaskOperation],
     one_shot_violations: int,
     wrong_tool_type_count: int,
+    skipped_lookups: int,
 ) -> Tuple[float, str]:
     n_ops = len(operations)
     if n_ops == 0:
@@ -1119,8 +940,7 @@ def compute_reward(
     for call in tool_calls:
         call_name = call.get("name", "")
         call_args = call.get("arguments", {})
-        if call_name in ("respond_to_user", "get_order_details", "get_product_details",
-                          "find_user_id_by_name_zip", "get_user_details"):
+        if call_name in ("respond_to_user", "get_order_details", "get_product_details"):
             continue
         matched = False
         for i, op in enumerate(operations):
@@ -1139,11 +959,15 @@ def compute_reward(
     # Creates strong GRPO signal (0.5 gap between perfect and 1-miss)
     # while providing gradient across partial completions.
     #
-    # Reward landscape (5-op example):
-    #   5/5 ops: 1.00  |  4/5 ops: 0.48  |  3/5 ops: 0.36  |  0/5 ops: 0.00
+    # Penalties are sized so completion always dominates: all-ops + N skips
+    # always beats miss-1-op + 0 skips. Skip penalty at 0.15 prevents
+    # stacking from wiping out perfect completions (old 0.30 did).
     #
-    # Lookups are enforced by information gating (item IDs / payment methods
-    # are hidden from user prompts), not by penalty.
+    # Reward landscape (5-op example):
+    #   5/5 ops, 0 skips: 1.00   |  4/5 ops, 0 skips: 0.48
+    #   5/5 ops, 1 skip:  0.85   |  4/5 ops, 1 skip:  0.33
+    #   5/5 ops, 2 skips: 0.70   |  3/5 ops, 0 skips: 0.36
+    #   5/5 ops, 4 skips: 0.40   |  (completion always > skip penalty)
 
     if correct_count == n_ops:
         reward = 1.0
@@ -1151,6 +975,7 @@ def compute_reward(
         reward = 0.6 * (correct_count / n_ops)
 
     # Penalties (applied subtractively, then clamped to [0, 1])
+    reward -= 0.15 * skipped_lookups
     reward -= 0.15 * one_shot_violations
     reward -= 0.1 * wrong_tool_type_count
     reward -= 0.1 * wrong_calls
@@ -1166,6 +991,8 @@ def compute_reward(
         details.append(f"Wrong tool type: {wrong_tool_type_count}")
     if wrong_calls:
         details.append(f"Wrong calls: {wrong_calls}")
+    if skipped_lookups:
+        details.append(f"Skipped lookups: {skipped_lookups}")
 
     reason = f"{correct_count}/{n_ops} ops completed. " + "; ".join(details)
     return reward, reason
@@ -1180,7 +1007,6 @@ class RealisticMultiStepGame:
     """Multi-turn task game for sequential task completion.
 
     Tests:
-    - User authentication via find_user_id_by_name_zip → get_user_details
     - Information must be retrieved via tool calls (not given upfront)
     - One-shot constraints on modify/exchange/return (status changes block re-calls)
     - Multi-item batching required
@@ -1189,8 +1015,9 @@ class RealisticMultiStepGame:
     - Completing all N operations without stopping early
     """
 
-    def __init__(self, max_steps: int = 30):
+    def __init__(self, max_steps: int = 30, difficulty: int = 3):
         self._max_steps = max_steps
+        self._difficulty = difficulty
         self._episode: Optional[EpisodeScenario] = None
         self._conversation: List[Dict[str, str]] = []
         self._tool_calls: List[Dict[str, Any]] = []
@@ -1200,6 +1027,8 @@ class RealisticMultiStepGame:
         # Tracking for reward penalties
         self._one_shot_violations: int = 0
         self._wrong_tool_type_count: int = 0
+        self._orders_looked_up: set = set()
+        self._orders_written_to: set = set()  # orders that had a write tool called
         self._one_shot_used: Dict[str, str] = {}  # order_id -> tool that used it
 
         # Incremental reveal state
@@ -1214,16 +1043,13 @@ class RealisticMultiStepGame:
 
     def reset(self, seed: int) -> None:
         self._rng = random.Random(seed + 999)
-        self._episode = generate_episode(seed)
+        self._episode = generate_episode(seed, self._difficulty)
 
-        ep = self._episode
-        user = ep.user
-        task_list = "\n".join(ep.initial_task_descriptions)
-
+        user_name = random.Random(seed).choice(FIRST_NAMES)
+        task_list = "\n".join(self._episode.initial_task_descriptions)
+        order_ids = ", ".join(o.order_id for o in self._episode.orders)
         initial_msg = (
-            f"Hi, I'm {user.first_name} {user.last_name}. "
-            f"My zip code is {user.zip_code}. "
-            f"I need help with the following:\n\n"
+            f"Hi, I'm {user_name}. I need help with my orders ({order_ids}).\n\n"
             f"{task_list}\n\n"
             f"Please complete all of these tasks."
         )
@@ -1233,6 +1059,8 @@ class RealisticMultiStepGame:
         self._step_count = 0
         self._one_shot_violations = 0
         self._wrong_tool_type_count = 0
+        self._orders_looked_up = set()
+        self._orders_written_to = set()
         self._one_shot_used = {}
         self._incremental_revealed = False
         self._ops_completed_before_reveal = 0
@@ -1250,10 +1078,9 @@ class RealisticMultiStepGame:
         tools_json = json.dumps(TOOL_SCHEMAS, indent=2)
 
         lines = [
-            "You are a customer service agent. You must first authenticate the user "
-            "by finding their user ID via name and zip code. Then you can help users "
-            "cancel or modify pending orders, return or exchange delivered orders, "
-            "and look up order and product information.",
+            "You are a customer service agent. You can help users cancel or modify "
+            "pending orders, return or exchange delivered orders, and look up order "
+            "and product information.",
             "",
             "<available_tools>",
             tools_json,
@@ -1306,6 +1133,7 @@ class RealisticMultiStepGame:
             reward, reason = compute_reward(
                 self._tool_calls, self._episode.operations,
                 self._one_shot_violations, self._wrong_tool_type_count,
+                self._count_skipped_lookups(),
             )
             self._finalize(reward, reason)
             return
@@ -1316,12 +1144,17 @@ class RealisticMultiStepGame:
 
         order_id = tool_args.get("order_id", "")
 
+        # Track lookups
+        if tool_name == "get_order_details":
+            self._orders_looked_up.add(order_id)
+
         # Track one-shot violations
         ONE_SHOT_TOOLS = {
             "modify_pending_order_items", "exchange_delivered_order_items",
             "return_delivered_order_items",
         }
         if tool_name in ONE_SHOT_TOOLS:
+            self._orders_written_to.add(order_id)
             if order_id in self._one_shot_used:
                 self._one_shot_violations += 1
             else:
@@ -1340,13 +1173,12 @@ class RealisticMultiStepGame:
         # Execute tool
         success, result = execute_tool(
             tool_name, tool_args,
-            self._episode.user, self._episode.orders, self._episode.products,
+            self._episode.orders, self._episode.products,
         )
         self._conversation.append({"role": "tool_result", "text": result})
 
         # Simulated user confirmation after successful write
-        if success and tool_name not in ("get_order_details", "get_product_details",
-                                          "find_user_id_by_name_zip", "get_user_details"):
+        if success and tool_name not in ("get_order_details", "get_product_details"):
             self._maybe_reveal_incremental()
             if self._rng:
                 confirmation = self._rng.choice(USER_CONFIRMATIONS)
@@ -1360,6 +1192,7 @@ class RealisticMultiStepGame:
                 reward, reason = compute_reward(
                     self._tool_calls, self._episode.operations,
                     self._one_shot_violations, self._wrong_tool_type_count,
+                    self._count_skipped_lookups(),
                 )
                 self._finalize(reward, f"Loop detected. {reason}")
                 return
@@ -1369,6 +1202,7 @@ class RealisticMultiStepGame:
             reward, reason = compute_reward(
                 self._tool_calls, self._episode.operations,
                 self._one_shot_violations, self._wrong_tool_type_count,
+                self._count_skipped_lookups(),
             )
             self._finalize(reward, f"Max steps reached. {reason}")
 
@@ -1397,6 +1231,10 @@ class RealisticMultiStepGame:
                 msg = template.format(task_desc=desc)
                 self._conversation.append({"role": "user", "text": msg})
 
+    def _count_skipped_lookups(self) -> int:
+        """Count orders that were written to without being looked up first."""
+        return len(self._orders_written_to - self._orders_looked_up)
+
     def _finalize(self, reward: float, reason: str) -> None:
         self.done = True
         self.rewards = {0: reward}
@@ -1406,6 +1244,7 @@ class RealisticMultiStepGame:
         ep = self._episode
         return {
             "n_ops": len(ep.operations) if ep else 0,
+            "difficulty": ep.difficulty if ep else 0,
             "task_descriptions": ep.initial_task_descriptions + ep.incremental_task_descriptions if ep else [],
             "steps": self._step_count,
             "tool_calls": self._tool_calls,
@@ -1413,6 +1252,7 @@ class RealisticMultiStepGame:
             "reason": getattr(self, "_reason", ""),
             "one_shot_violations": self._one_shot_violations,
             "wrong_tool_type": self._wrong_tool_type_count,
+            "skipped_lookups": self._count_skipped_lookups(),
         }
 
 
@@ -1467,10 +1307,9 @@ def extract_action(text: str, legal_actions: List[str]) -> Optional[str]:
 # =============================================================================
 
 SYSTEM_PROMPT = (
-    "You are a customer service agent. You must first authenticate the user "
-    "by finding their user ID via name and zip code. Then you can help users "
-    "cancel or modify pending orders, return or exchange delivered orders, "
-    "and look up order and product information.\n"
+    "You are a customer service agent. You can help users cancel or modify "
+    "pending orders, return or exchange delivered orders, and look up order "
+    "and product information.\n"
     "Respond with one JSON tool call at a time.\n"
 )
 
@@ -1483,36 +1322,16 @@ if __name__ == "__main__":
     print("Testing Realistic Multi-Step Task Game")
     print("=" * 70)
 
-    rewards = []
-    template_counts: Dict[str, int] = {}
-    game = RealisticMultiStepGame(max_steps=30)
+    for diff in [1, 2, 3, 4, 5]:
+        rewards = []
+        template_counts: Dict[str, int] = {}
+        game = RealisticMultiStepGame(max_steps=30, difficulty=diff)
 
-    for seed in range(100):
-        game.reset(seed)
-        ep = game._episode
+        for seed in range(100):
+            game.reset(seed)
+            ep = game._episode
 
-        # Perfect agent: auth first, then look up all orders, then execute
-        # Step 1: Authenticate
-        action = json.dumps({
-            "name": "find_user_id_by_name_zip",
-            "arguments": {
-                "first_name": ep.user.first_name,
-                "last_name": ep.user.last_name,
-                "zip": ep.user.zip_code,
-            },
-        })
-        game.step(action)
-
-        if not game.done:
-            # Step 2: Get user details
-            action = json.dumps({
-                "name": "get_user_details",
-                "arguments": {"user_id": ep.user.user_id},
-            })
-            game.step(action)
-
-        # Step 3: Look up all orders
-        if not game.done:
+            # Perfect agent: look up all orders, then execute all ops
             for order in ep.orders:
                 action = json.dumps({
                     "name": "get_order_details",
@@ -1522,62 +1341,60 @@ if __name__ == "__main__":
                 if game.done:
                     break
 
-        # Step 4: Look up products for exchange/modify ops
-        if not game.done:
-            looked_up_products = set()
-            for op in ep.operations:
-                if op.requires_lookup and op.tool_name in (
-                    "exchange_delivered_order_items", "modify_pending_order_items"
-                ):
-                    for item_id in op.tool_args.get("item_ids", []):
-                        for o in ep.orders:
-                            for oi in o.items:
-                                if oi.item_id == item_id and oi.product_id not in looked_up_products:
-                                    action = json.dumps({
-                                        "name": "get_product_details",
-                                        "arguments": {"product_id": oi.product_id},
-                                    })
-                                    game.step(action)
-                                    looked_up_products.add(oi.product_id)
+            if not game.done:
+                # Look up products needed for conditional/exchange ops
+                looked_up_products = set()
+                for op in ep.operations:
+                    if op.requires_lookup and op.tool_name in (
+                        "exchange_delivered_order_items", "modify_pending_order_items"
+                    ):
+                        for item_id in op.tool_args.get("item_ids", []):
+                            for o in ep.orders:
+                                for oi in o.items:
+                                    if oi.item_id == item_id and oi.product_id not in looked_up_products:
+                                        action = json.dumps({
+                                            "name": "get_product_details",
+                                            "arguments": {"product_id": oi.product_id},
+                                        })
+                                        game.step(action)
+                                        looked_up_products.add(oi.product_id)
 
-        # Step 5: Execute all operations
-        if not game.done:
-            for op in ep.operations:
+            if not game.done:
+                for op in ep.operations:
+                    action = json.dumps({
+                        "name": op.tool_name,
+                        "arguments": op.tool_args,
+                    })
+                    game.step(action)
+                    if game.done:
+                        break
+
+            if not game.done:
                 action = json.dumps({
-                    "name": op.tool_name,
-                    "arguments": op.tool_args,
+                    "name": "respond_to_user",
+                    "arguments": {"message": "All tasks completed."},
                 })
                 game.step(action)
-                if game.done:
-                    break
 
-        # Step 6: Respond to user
-        if not game.done:
-            action = json.dumps({
-                "name": "respond_to_user",
-                "arguments": {"message": "All tasks completed."},
-            })
-            game.step(action)
+            rewards.append(game.rewards[0])
 
-        rewards.append(game.rewards[0])
+            # Count templates used
+            for op in ep.operations:
+                tname = op.tool_name
+                template_counts[tname] = template_counts.get(tname, 0) + 1
 
-        # Count templates used
-        for op in ep.operations:
-            tname = op.tool_name
-            template_counts[tname] = template_counts.get(tname, 0) + 1
-
-    avg = sum(rewards) / len(rewards)
-    perfect = sum(1 for r in rewards if r >= 1.0)
-    non_perfect = [(seed, r) for seed, r in enumerate(rewards) if r < 1.0]
-    print(f"\navg_reward={avg:.3f}, perfect={perfect}/100")
-    print(f"  Tool distribution: {template_counts}")
-    if non_perfect:
-        print(f"  Non-perfect seeds: {non_perfect[:5]}")
+        avg = sum(rewards) / len(rewards)
+        perfect = sum(1 for r in rewards if r >= 1.0)
+        non_perfect = [(seed, r) for seed, r in enumerate(rewards) if r < 1.0]
+        print(f"\nDifficulty {diff}: avg_reward={avg:.3f}, perfect={perfect}/100")
+        print(f"  Tool distribution: {template_counts}")
+        if non_perfect:
+            print(f"  Non-perfect seeds: {non_perfect[:5]}")
 
     # Show example observation
     print("\n" + "=" * 70)
-    print("Example episode (seed=42):")
-    game = RealisticMultiStepGame(max_steps=30)
+    print("Example episode (difficulty=3, seed=42):")
+    game = RealisticMultiStepGame(max_steps=30, difficulty=3)
     game.reset(42)
     obs = game.observe(0)
     print(obs[:3000])
@@ -1586,5 +1403,3 @@ if __name__ == "__main__":
     for i, op in enumerate(game._episode.operations):
         print(f"  {i+1}. {op.tool_name}({json.dumps(op.tool_args)[:100]})")
         print(f"     requires_lookup={op.requires_lookup}, incremental={op.is_incremental}")
-    print(f"\nUser: {game._episode.user.user_id}")
-    print(f"Payment methods: {[(pm.source, pm.id) for pm in game._episode.user.payment_methods.values()]}")

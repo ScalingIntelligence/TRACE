@@ -9,7 +9,6 @@ import re
 from typing import Dict, List, Any, Optional
 
 from .scenarios import Scenario, generate_scenario
-from .database import get_pydantic_db
 from .tools import ToolExecutor
 from .verification import compute_reward
 from .constants import (
@@ -111,7 +110,7 @@ class AdversarialPolicyGame:
         """
         import random as _random
         self._scenario = generate_scenario(seed, adversarial_ratio=self._adversarial_ratio)
-        self._tools = ToolExecutor(self._scenario.domain, get_pydantic_db(self._scenario.domain))
+        self._tools = ToolExecutor(self._scenario.domain, self._scenario.db)
 
         # Initialize LLM user
         if self._user_client is None:

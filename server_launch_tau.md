@@ -1,6 +1,4 @@
-
-
-
+          
 ```bash
 conda activate games
 export HF_HOME=/workspace/.cache/huggingface
@@ -19,6 +17,12 @@ vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507 \
   --tool-call-parser hermes \
   --tensor-parallel-size 1 
 ```
+conda activate games
+export HF_HOME=/workspace/.cache/huggingface
+export VLLM_RPC_TIMEOUT=2000
+export CUDA_VISIBLE_DEVICES=0
+export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+vllm serve tarsur909/Qwen3-30B-A3B-Instruct-2507-multistep-task-15   --host 0.0.0.0   --port 8090   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.85   --enable-auto-tool-choice   --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
 
 conda activate games
 export HF_HOME=/workspace/.cache/huggingface
@@ -193,3 +197,10 @@ CUDA_VISIBLE_DEVICES=2,3,6,7 \
 
 
 CUDA_VISIBLE_DEVICES=2,3,6,7   NCCL_P2P_DISABLE=1   WANDB_API_KEY=f4ef099e7073d103963e5c986e4f818f5a526ee8   VLLM_BASE_URLS=http://localhost:8080   VLLM_MODEL=tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-10   VLLM_TIMEOUT_S=2000   VLLM_ALLOW_RUNTIME_LORA_UPDATING=True   VLLM_RPC_TIMEOUT=2000   PYTHONUNBUFFERED=1 torchrun --nproc_per_node=2 --master-port 29501 train_grpo_optimized.py --game structured_data_reasoning --model tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-10 --compact-tools       --temperature-range "0.5,0.7,1.0"       --save-every 5 --user-llm-url http://localhost:9000/v1 --user-llm-model "Qwen/Qwen3-30B-A3B-Instruct-2507"  --group-size 32
+
+
+
+
+
+
+CUDA_VISIBLE_DEVICES=1,2,3,4   NCCL_P2P_DISABLE=1   WANDB_API_KEY=f4ef099e7073d103963e5c986e4f818f5a526ee8   VLLM_BASE_URLS=http://localhost:8080   VLLM_MODEL=tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-10   VLLM_TIMEOUT_S=2000   VLLM_ALLOW_RUNTIME_LORA_UPDATING=True   VLLM_RPC_TIMEOUT=2000   PYTHONUNBUFFERED=1   torchrun --nproc_per_node=4 --master-port 29501 train_grpo_optimized.py     --game multistep_task     --model tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-10     --compact-tools     --temperature-range "0.7,0.9,1.0"     --save-every 5  --groups-per-batch 8 --group-size 16 --sft-data "/root/games/game_rollouts/structured_data_reasoning-d3-Qwen3-30B-A3B-Instruct-2507-structured-10.json" --sft-coef 0.1 --sft-per-step 2
