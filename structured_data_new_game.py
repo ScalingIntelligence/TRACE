@@ -696,14 +696,14 @@ def _gen_presentation_return(
 # ====================================================================
 
 RETAIL_SCENARIO_WEIGHTS = {
-    "single_exchange": 15,
-    "multi_exchange": 15,
-    "single_modify": 10,
-    "extremal_exchange": 15,
-    "conditional_exchange": 15,
-    "cross_ref_exchange": 10,
-    "return_items": 5,
-    "no_match": 15,
+    "single_exchange": 10,
+    "multi_exchange": 10,
+    "single_modify": 0,       # 100% solved — zero gradient, skip
+    "extremal_exchange": 25,
+    "conditional_exchange": 25,
+    "cross_ref_exchange": 20,
+    "return_items": 0,        # 100% solved — zero gradient, skip
+    "no_match": 10,
 }
 
 
@@ -2025,7 +2025,7 @@ def _build_airline_conversation(scenario: Dict[str, Any]) -> Tuple[List[Dict], L
 # ====================================================================
 
 
-DOMAIN_WEIGHTS = {"retail": 50, "airline": 50}
+DOMAIN_WEIGHTS = {"retail": 35, "airline": 65}
 
 
 def generate_scenario(seed: int, domain: Optional[str] = None) -> Dict[str, Any]:
@@ -2156,7 +2156,14 @@ class StructuredDataGame:
             return
 
         if action is None:
-            self._finalize(0.0, "No action provided")
+            # No tool call extracted — model produced a text response.
+            # If gold_action is None (no_match / conditional with no fallback),
+            # a text response IS the correct behavior (matches tau-bench where
+            # there is no respond_to_user tool — the model just sends a message).
+            if self._gold_action is None:
+                self._finalize(1.0, "Correctly informed user via text (no matching variant)")
+            else:
+                self._finalize(0.0, "No action provided (expected tool call)")
             return
 
         try:
