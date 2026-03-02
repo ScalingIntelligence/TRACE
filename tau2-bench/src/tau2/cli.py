@@ -162,6 +162,13 @@ def add_run_args(parser):
         default=None,
         help="List of API base URLs for user only. Use when agent and user have different models on different servers.",
     )
+    parser.add_argument(
+        "--orchestrator-config",
+        type=str,
+        default=None,
+        help="Path to YAML file defining orchestrator + skill LLMs configuration. "
+        "When provided, the orchestrator config is injected into agent_llm_args.",
+    )
 
 
 def main():
@@ -171,8 +178,15 @@ def main():
     # Run command
     run_parser = subparsers.add_parser("run", help="Run a benchmark")
     add_run_args(run_parser)
-    run_parser.set_defaults(
-        func=lambda args: run_domain(
+    def _run_with_config(args):
+        llm_args_agent = args.agent_llm_args
+        # Inject orchestrator config into agent_llm_args if provided
+        if args.orchestrator_config:
+            import yaml
+            with open(args.orchestrator_config) as f:
+                orch_cfg = yaml.safe_load(f)
+            llm_args_agent["orchestrator_config"] = orch_cfg
+        return run_domain(
             RunConfig(
                 domain=args.domain,
                 task_set_name=args.task_set_name,
@@ -181,7 +195,7 @@ def main():
                 num_tasks=args.num_tasks,
                 agent=args.agent,
                 llm_agent=args.agent_llm,
-                llm_args_agent=args.agent_llm_args,
+                llm_args_agent=llm_args_agent,
                 user=args.user,
                 llm_user=args.user_llm,
                 llm_args_user=args.user_llm_args,
@@ -198,7 +212,8 @@ def main():
                 user_api_base_urls=args.user_api_base_urls,
             )
         )
-    )
+
+    run_parser.set_defaults(func=_run_with_config)
 
     # Play command
     play_parser = subparsers.add_parser(

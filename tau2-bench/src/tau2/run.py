@@ -8,6 +8,7 @@ from typing import Optional
 from loguru import logger
 
 from tau2.agent.llm_agent import LLMAgent, LLMGTAgent, LLMSoloAgent
+from tau2.agent.orchestrator_agent import OrchestratorAgent, OrchestratorConfig
 from tau2.data_model.simulation import (
     AgentInfo,
     Info,
@@ -450,6 +451,57 @@ def run_tasks(
     return simulation_results
 
 
+def _ensure_skill_adapters(orch_config: OrchestratorConfig) -> None:
+    """Pre-load LoRA adapters for skills that specify adapter_path + adapter_name."""
+    import requests
+
+    for skill in orch_config.skills:
+        if skill.adapter_path and skill.adapter_name:
+            api_base = (skill.llm_args or {}).get("api_base")
+            if not api_base:
+                continue
+            # Check if adapter already loaded
+            server_url = api_base.rstrip("/").replace("/v1", "")
+            try:
+                r = requests.get(f"{server_url}/v1/models", timeout=10)
+                if r.status_code == 200:
+                    model_ids = [m["id"] for m in r.json().get("data", [])]
+                    if skill.adapter_name in model_ids:
+                        logger.info(
+                            f"Skill adapter '{skill.adapter_name}' already loaded"
+                        )
+                        continue
+            except Exception:
+                pass
+            # Load the adapter
+            try:
+                r = requests.post(
+                    f"{server_url}/v1/load_lora_adapter",
+                    json={
+                        "lora_name": skill.adapter_name,
+                        "lora_path": skill.adapter_path,
+                    },
+                    timeout=60,
+                )
+                if r.status_code == 200:
+                    logger.info(
+                        f"Loaded skill adapter '{skill.adapter_name}' from {skill.adapter_path}"
+                    )
+                elif "already exists" in r.text.lower():
+                    logger.info(
+                        f"Skill adapter '{skill.adapter_name}' already loaded"
+                    )
+                else:
+                    logger.warning(
+                        f"Failed to load skill adapter '{skill.adapter_name}': "
+                        f"{r.status_code} - {r.text}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Error loading skill adapter '{skill.adapter_name}': {e}"
+                )
+
+
 def run_task(
     domain: str,
     task: Task,
@@ -530,6 +582,24 @@ def run_task(
         agent = AgentConstructor(
             tools=environment.get_tools(),
             domain_policy=environment.get_policy(),
+        )
+    elif issubclass(AgentConstructor, OrchestratorAgent):
+        # Extract orchestrator_config from llm_args_agent
+        _agent_args = dict(llm_args_agent) if llm_args_agent else {}
+        orch_config_dict = _agent_args.pop("orchestrator_config", None)
+        if orch_config_dict is None:
+            raise ValueError(
+                "OrchestratorAgent requires 'orchestrator_config' in agent_llm_args. "
+                "Pass it via --orchestrator-config YAML or include an 'orchestrator' "
+                "section in your config file."
+            )
+        orch_config = OrchestratorConfig(**orch_config_dict)
+        _ensure_skill_adapters(orch_config)
+        agent = AgentConstructor(
+            tools=environment.get_tools(),
+            domain_policy=environment.get_policy(),
+            orchestrator_config=orch_config,
+            llm_args=_agent_args,
         )
     else:
         raise ValueError(

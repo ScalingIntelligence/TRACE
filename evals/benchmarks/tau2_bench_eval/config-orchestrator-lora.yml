@@ -1,0 +1,96 @@
+# Orchestrator + Skill LLMs — Mode 2: LoRA Adapters
+#
+# Skills are LoRA adapters loaded on a shared vLLM server.
+# The orchestrator selects which adapter(s) to use per turn.
+# In multi-skill mode, adapters are merged via PEFT (linear weighted merge).
+#
+# vLLM server requirements:
+#   - Started with --enable-lora --max-loras N
+#   - VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+#
+# Usage:
+#   python main.py --config config-orchestrator-lora.yml
+
+domain: retail
+agent: orchestrator_agent
+agent_llm: openai/Qwen3-30B-A3B-Instruct-2507
+
+agent_llm_args:
+  temperature: 0.0
+  max_context_length: 32000
+
+# Orchestrator configuration
+orchestrator:
+  # Model used for routing decisions (base model on the same server)
+  orchestrator_model: openai/Qwen3-30B-A3B-Instruct-2507
+  orchestrator_llm_args:
+    temperature: 0.0
+    api_base: http://localhost:8080/v1
+    api_key: EMPTY
+
+  default_mode: single
+  routing_context_window: 10
+
+  # LoRA merge settings for multi-skill mode
+  # When true: merge selected adapters via PEFT before generation
+  # When false: query each skill adapter separately and synthesize
+  merge_lora_for_multi: true
+  merge_cache_dir: /tmp/lora_merge_cache
+
+  skills:
+    - name: tool_calling
+      description: >
+        Expert at making correct tool calls with proper arguments.
+        Best for tasks requiring precise API interactions like cancellations,
+        modifications, returns, exchanges, and data lookups.
+      adapter_path: /root/games/checkpoints/tool_calling_lora
+      adapter_name: tool_calling_skill
+      base_model: Qwen/Qwen3-30B-A3B-Instruct-2507
+      llm_args:
+        api_base: http://localhost:8080/v1
+        api_key: EMPTY
+        temperature: 0.0
+        max_context_length: 32000
+
+    - name: policy_compliance
+      description: >
+        Expert at following domain policies precisely. Best for tasks
+        requiring policy-gated decisions like refund eligibility,
+        exchange rules, cancellation restrictions, and escalation criteria.
+      adapter_path: /root/games/checkpoints/policy_lora
+      adapter_name: policy_skill
+      base_model: Qwen/Qwen3-30B-A3B-Instruct-2507
+      llm_args:
+        api_base: http://localhost:8080/v1
+        api_key: EMPTY
+        temperature: 0.0
+        max_context_length: 32000
+
+    - name: data_reasoning
+      description: >
+        Expert at structured data reasoning — selecting correct items,
+        variants, flights, and payment methods from complex data structures.
+      adapter_path: /root/games/checkpoints/sdr_lora
+      adapter_name: sdr_skill
+      base_model: Qwen/Qwen3-30B-A3B-Instruct-2507
+      llm_args:
+        api_base: http://localhost:8080/v1
+        api_key: EMPTY
+        temperature: 0.0
+        max_context_length: 32000
+
+# User simulator
+user_llm: vllm://Qwen/Qwen3-30B-A3B-Instruct-2507
+user_llm_args:
+  temperature: 0.0
+  max_context_length: 32000
+
+# Execution
+max_steps: 50
+max_concurrency: 1
+seed: 42
+
+# vLLM server config
+vllm:
+  user_base_urls:
+    - http://localhost:9000/v1

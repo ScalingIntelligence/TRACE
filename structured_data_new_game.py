@@ -699,11 +699,12 @@ RETAIL_SCENARIO_WEIGHTS = {
     "single_exchange": 10,
     "multi_exchange": 10,
     "single_modify": 0,       # 100% solved — zero gradient, skip
-    "extremal_exchange": 25,
+    "extremal_exchange": 30,
     "conditional_exchange": 25,
-    "cross_ref_exchange": 20,
+    "cross_ref_exchange": 25,
     "return_items": 0,        # 100% solved — zero gradient, skip
-    "no_match": 10,
+    "no_match": 0,            # no tau-bench counterpart; teaches "don't call tool" which
+                              # conflicts with action scenarios and causes unlearning
 }
 
 
@@ -1100,8 +1101,10 @@ def _gen_conditional_exchange_scenario(rng: random.Random) -> Dict[str, Any]:
     current_item_id = _gen_item_id(rng)
     current_price = round(rng.uniform(20, 300), 2)
 
-    # Decide sub-type: 60% fallback to different variant, 40% fallback to "just inform me"
-    has_fallback_variant = rng.random() < 0.6
+    # Always use fallback variant — the "just inform me" path (gold_action=None)
+    # teaches "don't call a tool" which conflicts with action scenarios and
+    # causes unlearning of tool-calling behavior via GRPO gradient interference.
+    has_fallback_variant = True
 
     if has_fallback_variant:
         # Fallback target (different from primary, WILL be available)

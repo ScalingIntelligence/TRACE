@@ -175,6 +175,23 @@ def build_tau2_command(config: Dict[str, Any], cli_overrides: Dict[str, Any]) ->
     agent_llm_args = {"temperature": 0.0, **merged.get("agent_llm_args", {})}
     user_llm_args = {"temperature": 0.0, **merged.get("user_llm_args", {})}
 
+    # Orchestrator + skill LLMs configuration
+    orchestrator_config = merged.get("orchestrator")
+    if orchestrator_config:
+        print(f"Orchestrator mode enabled with {len(orchestrator_config.get('skills', []))} skills")
+        # Pre-load LoRA adapters for skills that need them
+        for skill in orchestrator_config.get("skills", []):
+            adapter_path = skill.get("adapter_path")
+            adapter_name = skill.get("adapter_name")
+            skill_api_base = (skill.get("llm_args") or {}).get("api_base")
+            if adapter_path and adapter_name and skill_api_base:
+                if not check_model_available(skill_api_base, adapter_name):
+                    load_lora_adapter(skill_api_base, adapter_name, adapter_path)
+                else:
+                    print(f"  Skill adapter '{adapter_name}' already loaded")
+        # Inject orchestrator config into agent_llm_args for passthrough to tau2
+        agent_llm_args["orchestrator_config"] = orchestrator_config
+
     # Check if using multi-server deterministic mode
     # Support both shared (base_urls) and separate (agent_base_urls/user_base_urls) configurations
     use_shared_multi_server = vllm_config.get("base_urls") is not None and len(vllm_config.get("base_urls", [])) > 0

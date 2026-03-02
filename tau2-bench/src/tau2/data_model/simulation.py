@@ -188,6 +188,13 @@ class RunConfig(BaseModel):
             default=None,
         ),
     ]
+    orchestrator_config: Annotated[
+        Optional[dict],
+        Field(
+            description="Orchestrator + skill LLMs configuration. Contains orchestrator_model, skills list, default_mode, etc.",
+            default=None,
+        ),
+    ]
 
     def validate(self) -> None:
         """
