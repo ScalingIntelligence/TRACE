@@ -123,13 +123,48 @@ def _convert_message(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _extract_thinking(content: str) -> Tuple[str, str]:
+    """Split content into (thinking_prefix, clean_content).
+
+    Handles Qwen3-style thinking where content may contain:
+      - "<think>\\nreasoning...\\n</think>\\n\\nActual response"
+      - "reasoning...\\n</think>\\n\\nActual response" (missing opening tag)
+
+    Returns:
+        (thinking_prefix, clean_content) where thinking_prefix is either
+        "<think>\\n...\\n</think>\\n" or "" if no thinking found.
+    """
+    if not content or "</think>" not in content:
+        return "", content or ""
+
+    # Ensure opening tag
+    if "<think>" not in content:
+        content = "<think>\n" + content
+
+    idx = content.index("</think>")
+    think_part = content[:idx + len("</think>")]
+    remaining = content[idx + len("</think>"):]
+    # Strip leading whitespace/newlines from the actual response
+    remaining = remaining.lstrip("\n")
+    return think_part + "\n", remaining
+
+
 def _make_completion_text(msg: Dict[str, Any]) -> str:
     """Create completion text for an assistant turn (matches GRPO rollout format).
 
     For tool calls: json.dumps({"name": ..., "arguments": ...})
     For text messages: json.dumps({"name": "respond_to_user", "arguments": {"message": ...}})
+
+    If the message content contains <think> tags (e.g. from Qwen3-Max),
+    the thinking is prepended BEFORE the JSON action so the model learns
+    to reason before acting.
     """
+    content = msg.get("content", "") or ""
     tool_calls = msg.get("tool_calls")
+
+    # Extract thinking from content (if present)
+    think_prefix, clean_content = _extract_thinking(content)
+
     if tool_calls:
         tc = tool_calls[0]  # tau2-bench uses single tool calls
         args = tc.get("arguments", {})
@@ -139,10 +174,11 @@ def _make_completion_text(msg: Dict[str, Any]) -> str:
                 args = json.loads(args)
             except json.JSONDecodeError:
                 pass
-        return json.dumps({"name": tc["name"], "arguments": args})
+        action_json = json.dumps({"name": tc["name"], "arguments": args})
+        return think_prefix + action_json
     else:
-        content = msg.get("content", "")
-        return json.dumps({"name": "respond_to_user", "arguments": {"message": content}})
+        action_json = json.dumps({"name": "respond_to_user", "arguments": {"message": clean_content}})
+        return think_prefix + action_json
 
 
 # ---------------------------------------------------------------------------
@@ -240,12 +276,16 @@ def load_sft_samples(
 def load_sft_samples_multi(
     paths: List[str],
     compact_tools: bool = False,
+    max_samples_per_file: int = None,
 ) -> List[SFTSample]:
     """Load SFT samples from multiple tau2-bench eval JSON files."""
     all_samples: List[SFTSample] = []
     for p in paths:
         try:
             samples = load_sft_samples(p, compact_tools=compact_tools)
+            if max_samples_per_file is not None and len(samples) > max_samples_per_file:
+                samples = samples[:max_samples_per_file]
+                print(f"[SFT]   {p}: truncated to {max_samples_per_file} samples (--max-samples-per-file)")
             all_samples.extend(samples)
         except Exception as e:
             print(f"[SFT] Warning: failed to load {p}: {e}")
@@ -268,9 +308,15 @@ class SFTBuffer:
         paths: List[str],
         tokenizer,
         compact_tools: bool = False,
+        max_samples_per_file: int = None,
+        max_seq_len: int = None,
+        min_prompt_len: int = 128,
     ):
         self._tokenizer = tokenizer
         self._compact_tools = compact_tools
+        self._max_samples_per_file = max_samples_per_file
+        self._max_seq_len = max_seq_len
+        self._min_prompt_len = min_prompt_len
         self._seen_tasks: Set[str] = set()  # (domain, task_id) for dedup
 
         # Pre-tokenized storage
@@ -278,9 +324,16 @@ class SFTBuffer:
         self._prompt_lens: List[int] = []
         self._action_lens: List[int] = []
 
+        # Stats
+        self._truncated_count = 0
+        self._dropped_count = 0
+
         # Load initial data
         if paths:
             self._load_and_tokenize(paths)
+            if self._truncated_count or self._dropped_count:
+                print(f"[SFT] Front-truncation: {self._truncated_count} truncated, "
+                      f"{self._dropped_count} dropped (action too long for max_seq_len={max_seq_len})")
 
     @staticmethod
     def _task_key(domain: str, task_id: str) -> str:
@@ -304,6 +357,10 @@ class SFTBuffer:
                 print(f"[SFT] Warning: failed to load {p}: {e}")
                 continue
 
+            if self._max_samples_per_file is not None and len(samples) > self._max_samples_per_file:
+                samples = samples[:self._max_samples_per_file]
+                print(f"[SFT]   {p}: truncated to {self._max_samples_per_file} samples (--max-samples-per-file)")
+
             # Which task_ids in this file are new?
             new_task_ids = set()
             for sample in samples:
@@ -325,6 +382,20 @@ class SFTBuffer:
                         sample.completion_text,
                         tools=sample.tools,
                     )
+                    total_len = seq.shape[0]
+
+                    # Front-truncate prompt if sequence exceeds max_seq_len
+                    if self._max_seq_len and total_len > self._max_seq_len:
+                        excess = total_len - self._max_seq_len
+                        new_pl = pl - excess
+                        if new_pl < self._min_prompt_len:
+                            # Action is too long or prompt would be too short
+                            self._dropped_count += 1
+                            continue
+                        seq = seq[excess:]
+                        pl = new_pl
+                        self._truncated_count += 1
+
                     self._seqs_cpu.append(seq)
                     self._prompt_lens.append(pl)
                     self._action_lens.append(al)

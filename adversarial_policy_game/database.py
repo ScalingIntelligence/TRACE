@@ -5,12 +5,13 @@ Maintains the same API as the old module so scenarios.py changes are minimal.
 """
 
 import random
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 from .synthetic_db import (
     generate_airline_episode,
     generate_airline_multi_reservations,
     generate_retail_episode,
+    generate_retail_multi_orders,
     build_airline_db,
     build_retail_db,
 )
@@ -48,6 +49,24 @@ def sample_retail_user(
 ) -> Optional[Dict[str, Any]]:
     """Generate a synthetic retail user + order matching criteria.
 
-    Returns dict with: user, order, order_id, user_ect_id, products_db
+    Returns dict with: user, order, order_id, user_id, products_db
     """
     return generate_retail_episode(rng, criteria)
+
+
+def sample_retail_multi_orders(
+    rng: random.Random,
+    criteria: Dict[str, Any],
+    order_specs: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Generate a synthetic retail user with multiple orders.
+
+    Args:
+        rng: Seeded random instance.
+        criteria: Shared criteria for the user (has_gift_card, etc.).
+        order_specs: List of per-order specs (each with "status", optional "min_items").
+            If None, generates 2 orders with random statuses.
+
+    Returns dict with: user, orders, order_ids, user_id, products_db
+    """
+    return generate_retail_multi_orders(rng, criteria, order_specs)

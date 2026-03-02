@@ -1,5 +1,7 @@
 import os
 os.environ["HF_HOME"] = "/workspace/.cache/huggingface"
+os.environ["TMPDIR"] = "/workspace/tmp"
+os.makedirs("/workspace/tmp", exist_ok=True)
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
@@ -7,8 +9,10 @@ from huggingface_hub import HfApi
 import torch
 
 BASE_MODEL = "Qwen/Qwen3-30B-A3B-Instruct-2507"
-ADAPTER_PATHs =   [ "/workspace/.cache/huggingface/multistep_task/grpo_ckpt_iter_10_20260227_184006"]
-TARGET_REPOs = [ "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-sft-multistep-task-10"]
+# ADAPTER_PATHs =   [ "/workspace/.cache/huggingface/default/sft/sft_ckpt_epoch_0_20260302_110400", "/workspace/.cache/huggingface/default/sft/sft_ckpt_epoch_1_20260302_121237", "/workspace/.cache/huggingface/default/sft/sft_ckpt_epoch_2_20260302_132119"]
+# TARGET_REPOs = [ "tarsur909/Qwen3-30B-A3B-Instruct-2507-expert-sft-1", "tarsur909/Qwen3-30B-A3B-Instruct-2507-expert-sft-2", "tarsur909/Qwen3-30B-A3B-Instruct-2507-expert-sft-3"]
+ADAPTER_PATHs =   [ "/workspace/.cache/huggingface/structured_data_v2/grpo_ckpt_iter_10_20260302_120731", "/workspace/.cache/huggingface/structured_data_v2/grpo_ckpt_iter_15_20260302_120731", "/workspace/.cache/huggingface/structured_data_v2/grpo_ckpt_iter_20_20260302_130336", "/workspace/.cache/huggingface/structured_data_v2/grpo_ckpt_iter_30_20260302_140008"]
+TARGET_REPOs = [ "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v2-grpo-10", "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v2-grpo-15", "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v2-grpo-20",  "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v2-grpo-30"]
 HF_TOKEN = "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"
 
 

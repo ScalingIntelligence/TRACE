@@ -121,6 +121,12 @@ def parse_args():
         help="Use compressed tool schemas (strips descriptions)")
     parser.add_argument("--max-seq-length", type=int, default=None,
         help="Max sequence length (default: Config.MAX_SEQ_LENGTH)")
+    parser.add_argument("--max-samples", type=int, default=None,
+        help="Train on only the first N samples (after seq-length filtering). "
+             "Useful for quick debugging or ablation runs.")
+    parser.add_argument("--max-samples-per-file", type=int, default=None,
+        help="Limit each input file to at most N samples before merging. "
+             "E.g., --max-samples-per-file 100 with 2 files gives 200 total.")
     parser.add_argument("--shuffle-seed", type=int, default=42,
         help="Random seed for data shuffling")
 
@@ -449,7 +455,9 @@ def main():
     # ---- Load SFT data ----
     sft_paths = [p.strip() for p in args.sft_data.split(",") if p.strip()]
     print(f"[SFT] Loading data from {len(sft_paths)} files...")
-    sft_buffer = SFTBuffer(sft_paths, tokenizer, compact_tools=args.compact_tools)
+    sft_buffer = SFTBuffer(sft_paths, tokenizer, compact_tools=args.compact_tools,
+                           max_samples_per_file=args.max_samples_per_file,
+                           max_seq_len=max_seq_len)
     total_samples = len(sft_buffer)
     print(f"[SFT] Loaded {total_samples} samples from {len(sft_paths)} files")
 
@@ -457,20 +465,13 @@ def main():
         print("[SFT] ERROR: No samples loaded. Check that JSON files contain reward=1.0 simulations.")
         return
 
-    # Filter sequences that exceed max_seq_length
-    valid_indices = []
-    for i in range(total_samples):
-        seq_len = sft_buffer._seqs_cpu[i].shape[0]
-        if seq_len <= max_seq_len:
-            valid_indices.append(i)
-
-    if len(valid_indices) < total_samples:
-        skipped = total_samples - len(valid_indices)
-        sft_buffer._seqs_cpu = [sft_buffer._seqs_cpu[i] for i in valid_indices]
-        sft_buffer._prompt_lens = [sft_buffer._prompt_lens[i] for i in valid_indices]
-        sft_buffer._action_lens = [sft_buffer._action_lens[i] for i in valid_indices]
+    # ---- Truncate to first N samples if requested ----
+    if args.max_samples is not None and args.max_samples < total_samples:
+        sft_buffer._seqs_cpu = sft_buffer._seqs_cpu[:args.max_samples]
+        sft_buffer._prompt_lens = sft_buffer._prompt_lens[:args.max_samples]
+        sft_buffer._action_lens = sft_buffer._action_lens[:args.max_samples]
         total_samples = len(sft_buffer)
-        print(f"[SFT] Filtered {skipped} sequences > {max_seq_len} tokens. Remaining: {total_samples}")
+        print(f"[SFT] Truncated to first {args.max_samples} samples (--max-samples)")
 
     # ---- Optimizer ----
     trainable_params = [p for p in model.parameters() if p.requires_grad]

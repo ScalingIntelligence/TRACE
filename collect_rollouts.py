@@ -16,9 +16,9 @@ Usage:
     # Collect trajectories for 100 seeds:
     python collect_rollouts.py \
         --env tau_tool_calling \
-        --base-url http://localhost:9090/v1 \
+        --base-url http://localhost:8080/v1 \
         --model Qwen/Qwen3-30B-A3B-Instruct-2507 \
-        --num-seeds 100
+        --num-seeds 400
 
     # Sample 5 attempts per seed, keep top 2 by reward:
     python collect_rollouts.py \
@@ -39,8 +39,9 @@ Usage:
     # Collect multistep_task:
     python collect_rollouts.py \
         --env multistep_task \
+        --base-url http://localhost:8080/v1 \
         --model Qwen/Qwen3-30B-A3B-Instruct-2507 \
-        --num-seeds 100
+        --num-seeds 400
 
     # Collect structured_data_reasoning:
     python collect_rollouts.py \
@@ -74,7 +75,9 @@ from game_registry import get_game_spec, list_game_names
 
 
 # Tool-calling games use LLM user for multi-turn conversation
-TOOL_CALLING_GAMES = {"adversarial_policy", "tau_tool_calling"}
+TOOL_CALLING_GAMES = {"adversarial_policy", "tau_tool_calling", "structured_data_v2"}
+# Tool-calling games that need an LLM user client
+TOOL_CALLING_WITH_USER = {"adversarial_policy", "tau_tool_calling"}
 # Observation-based games use observe()/step() interface
 OBSERVE_GAMES = {"multistep_task", "structured_data_reasoning"}
 
@@ -281,7 +284,7 @@ def run_episode_toolcall(game, client: VLLMClient, seed: int, env_type: str,
         "transferred": summary.get("transferred", False),
         "conversation": list(game._conversation),
         "system_prompt": system_prompt,
-        "user_system_prompt": game._scenario.user_system_prompt,
+        "user_system_prompt": getattr(getattr(game, '_scenario', None), 'user_system_prompt', ''),
         "tool_schemas": tools,
         "tool_calls": summary.get("tool_calls", []),
         "domain": summary.get("domain", ""),
@@ -296,6 +299,11 @@ def run_episode_toolcall(game, client: VLLMClient, seed: int, env_type: str,
             "communicate_info": summary.get("communicate_info", []),
             "key_facts": summary.get("key_facts", {}),
             "conversation_length": summary.get("conversation_length", 0),
+        })
+    elif env_type == "structured_data_v2":
+        result.update({
+            "scenario_type": summary.get("scenario_type", ""),
+            "domain": summary.get("domain", "retail"),
         })
     elif env_type == "adversarial_policy":
         sc = game._scenario
@@ -374,7 +382,7 @@ def run_episode_observe(game, client: VLLMClient, seed: int,
             "one_shot_violations": summary.get("one_shot_violations", 0),
             "wrong_tool_type": summary.get("wrong_tool_type", 0),
         })
-    elif env_type == "structured_data_reasoning":
+    elif env_type in ("structured_data_reasoning", "structured_data_v2"):
         result.update({
             "data_type": summary.get("data_type", ""),
             "difficulty": summary.get("difficulty", 0),
@@ -444,7 +452,7 @@ def _print_toolcall_progress(args, result, seed, sample_idx, num_samples,
     r = result.get("reward", 0)
     err = " ERROR" if "error" in result else ""
 
-    if args.env == "tau_tool_calling":
+    if args.env in ("tau_tool_calling", "structured_data_v2"):
         domain = result.get("domain", "?")
         stype = result.get("scenario_type", result.get("error", "err"))[:14]
         print(f"  [{passed_seeds:3d}/{completed_seeds}/{total_seeds}] "
@@ -453,7 +461,7 @@ def _print_toolcall_progress(args, result, seed, sample_idx, num_samples,
               f"reward={r:+5.2f} "
               f"steps={result.get('steps', 0):2d} "
               f"({elapsed:.0f}s){err}{tag_pass}")
-    else:  # adversarial_policy
+    elif args.env == "adversarial_policy":
         tid = result.get("template_id", -1)
         tname = result.get("template_name", result.get("error", "err"))[:22]
         is_adv = "ADV" if result.get("is_adversarial") else "COP"
@@ -633,6 +641,8 @@ def main():
                         help="Output directory (default: /root/games/game_rollouts)")
     parser.add_argument("--output", "-o", default=None,
                         help="Override output file path (ignores --output-dir naming)")
+    parser.add_argument("--save-every", type=int, default=10,
+                        help="Save to disk every N successful trajectories (default: 10)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Print per-episode details")
 
@@ -659,7 +669,7 @@ def main():
 
     # Build user client only for tool-calling games that need it
     user_client = None
-    if is_toolcall:
+    if is_toolcall and args.env in TOOL_CALLING_WITH_USER:
         from adversarial_policy_game.llm_user import UserLLMClient
         user_client = UserLLMClient(
             user_base_url, user_model,
@@ -672,20 +682,44 @@ def main():
     else:
         output_dir = Path(args.output_dir) if args.output_dir else Path("/root/games/game_rollouts")
         agent_short = args.model.split("/")[-1]
+
+        # Build a descriptive filename that includes key params to avoid overwrites
+        parts = [args.env]
         if is_toolcall:
             user_short = user_model.split("/")[-1]
-            output_path = output_dir / f"{args.env}-{agent_short}-{user_short}.json"
-        elif args.env == "structured_data_reasoning":
-            output_path = output_dir / f"{args.env}-d{args.difficulty}-{agent_short}.json"
+            parts.append(agent_short)
+            parts.append(user_short)
         else:
-            output_path = output_dir / f"{args.env}-{agent_short}.json"
+            parts.append(agent_short)
+
+        if args.env == "structured_data_reasoning":
+            parts.append(f"d{args.difficulty}")
+
+        parts.append(f"n{args.num_seeds}")
+        parts.append(f"s{args.start_seed}")
+
+        if num_samples > 1:
+            parts.append(f"samp{num_samples}")
+            if select_topk > 1:
+                parts.append(f"top{select_topk}")
+
+        if args.temperature != 0.0:
+            parts.append(f"t{args.temperature}")
+
+        if reward_threshold != 1.0:
+            parts.append(f"r{reward_threshold}")
+
+        if args.domain:
+            parts.append(args.domain)
+
+        output_path = output_dir / f"{'-'.join(parts)}.json"
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Print config
     print(f"Environment:  {args.env}")
     print(f"Agent model:  {args.model} @ {args.base_url} (temp={args.temperature})")
-    if is_toolcall:
+    if is_toolcall and args.env in TOOL_CALLING_WITH_USER:
         print(f"User  model:  {user_model} @ {user_base_url} (temp={args.user_temperature})")
     print(f"Max tokens:   {max_tokens} (registry: {game_spec.max_gen_tokens})")
     print(f"Seeds:        {args.num_seeds} (start={args.start_seed})")
@@ -733,6 +767,9 @@ def main():
         elif args.env == "structured_data_reasoning":
             from structured_data_game import StructuredDataGame
             return StructuredDataGame(difficulty=args.difficulty)
+        elif args.env == "structured_data_v2":
+            from structured_data_new_game import StructuredDataGame as SDGameV2
+            return SDGameV2(domain=args.domain)
         else:
             raise ValueError(f"Unknown env: {args.env}")
 

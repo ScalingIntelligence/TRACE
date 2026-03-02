@@ -31,6 +31,12 @@ from structured_data_game import (
     SYSTEM_PROMPT as SYSTEM_PROMPT_STRUCTURED_DATA,
 )
 
+from structured_data_new_game import (
+    StructuredDataGame as StructuredDataGameV2,
+    extract_action as extract_action_structured_data_v2,
+    SYSTEM_PROMPT as SYSTEM_PROMPT_STRUCTURED_DATA_V2,
+)
+
 from multistep_task_game import (
     RealisticMultiStepGame,
     extract_action as extract_action_multistep,
@@ -157,6 +163,25 @@ def _register_builtin_games() -> None:
             stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
             system_prompt=SYSTEM_PROMPT_STRUCTURED_DATA,
             max_gen_tokens=512,
+        )
+    )
+
+    # Structured Data Reasoning v2 — tau2-bench aligned single-turn
+    # Model is placed mid-conversation after auth+lookups, produces one action tool call
+    # Uses exact tau2-bench system prompt, tools, and message format
+    # Tool-calling game: uses generate_with_tools, not generate_text
+    def make_structured_data_v2(domain=None) -> StructuredDataGameV2:
+        return StructuredDataGameV2(domain=domain)
+
+    register_game(
+        GameSpec(
+            name="structured_data_v2",
+            make_env=make_structured_data_v2,
+            extract_action=extract_action_structured_data_v2,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_STRUCTURED_DATA_V2,
+            max_gen_tokens=1024,
         )
     )
 
