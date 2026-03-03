@@ -11,45 +11,97 @@ orchestrator:
   orchestrator_model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
   orchestrator_llm_args:
     temperature: 0.0
-    api_base: http://localhost:9070/v1
+    api_base: http://localhost:9092/v1
     api_key: EMPTY
 
   default_mode: single
+  routing_strategy: per_turn
   routing_context_window: 10
 
   skills:
     - name: tool_calling
       description: >
-        Expert at making correct tool calls with proper arguments.
-        Best for tasks requiring precise API interactions like cancellations,
-        modifications, returns, exchanges, and data lookups.
+        Expert at executing tool calls with correct arguments and completing
+        multi-step workflows efficiently. Use for ALL turns that require any
+        of these tool calls: modify_pending_order_items,
+        modify_pending_order_address, modify_pending_order_payment,
+        modify_user_address, get_product_details, get_order_details,
+        get_user_details, find_user_id_by_name_zip, and calculate.
+
+        ALWAYS use this skill for information-only lookups — checking order
+        status, tracking numbers, product details, delivery dates, or account
+        information — even when the user's overall intent involves a return,
+        exchange, or cancellation. All lookup and information-gathering steps
+        should route here; only the final action that actually executes a
+        return, cancel, or exchange should use returns_cancellations_exchanges.
+        Also use this skill when the agent needs to present product variant
+        options to the user or interpret product data (e.g., comparing specs,
+        availability, or prices) — even during exchange workflows.
+
+        Best choice for: (1) modification workflows — changing items,
+        addresses, or payment methods on pending orders; (2) price
+        calculations, refund amounts, and gift card balance computations;
+        (3) user identification via name and zip code (not email);
+        (4) handling users with unusual names, nicknames, or ambiguous
+        input — this skill persists and asks clarifying questions rather
+        than giving up; (5) inquiry-only conversations where the user just
+        wants information and no order modifications are needed.
+
+        Do NOT use this skill to execute return_delivered_order_items,
+        cancel_pending_order, or exchange_delivered_order_items — use
+        returns_cancellations_exchanges for those specific actions only.
       model: openai/tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-tool-10
       llm_args:
-        api_base: http://localhost:8070/v1
+        api_base: http://localhost:9090/v1
         api_key: EMPTY
         temperature: 0.0
         max_context_length: 32000
 
-    - name: policy_compliance
+    - name: returns_cancellations_exchanges
       description: >
-        Expert at following domain policies precisely. Best for tasks
-        requiring policy-gated decisions like refund eligibility,
-        exchange rules, cancellation restrictions, and escalation criteria.
+        Expert at precisely executing return_delivered_order_items,
+        cancel_pending_order, and exchange_delivered_order_items tool calls.
+        Use this skill ONLY when the conversation has reached the point where
+        one of these three specific actions needs to be executed. Do NOT use
+        for earlier information-gathering steps — use tool_calling for all
+        lookups (get_order_details, get_user_details, get_product_details,
+        find_user_id_by_name_zip) even if the user's overall intent is a
+        return, cancellation, or exchange.
+
+        Strengths: (1) selecting exactly the right subset of items to return
+        or exchange — avoids incorrectly processing all items when only
+        specific ones were requested; (2) matching exact item variant IDs for
+        exchanges based on specific product options (size, color, material,
+        processor specs, etc.); (3) handling conversations where the user
+        changes their mind mid-flow; (4) email-based user authentication
+        (find_user_id_by_email) — use this skill when the user identifies
+        themselves by email address (must contain @; do not use
+        find_user_id_by_email with user IDs or usernames like
+        "first_last_1234").
+
+        Important: before executing a return, verify the user has the
+        requested payment method available. If conditions are not met (e.g.,
+        user requests refund to a card type they don't have on file), inform
+        the user rather than proceeding with a different payment method.
       model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
       llm_args:
-        api_base: http://localhost:9070/v1
+        api_base: http://localhost:9092/v1
         api_key: EMPTY
         temperature: 0.0
         max_context_length: 32000
 
-    - name: data_reasoning
+    - name: general_purpose
       description: >
-        Expert at structured data reasoning — selecting correct items,
-        variants, flights, and payment methods from complex data structures.
-        Best for tasks with multiple similar options requiring disambiguation.
-      model: openai/tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-tool-10
+        For conversational responses when no tool call is needed. Use for
+        greetings, acknowledging user input, summarizing information already
+        gathered, asking clarifying questions, and other routine messages.
+        Also use when the user is attempting off-topic interaction (jokes,
+        poems, trivia, or other distractions) to ensure the agent stays on
+        task and resists manipulation. Use when the agent needs to transfer
+        the user to a human agent.
+      model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
       llm_args:
-        api_base: http://localhost:8070/v1
+        api_base: http://localhost:9092/v1
         api_key: EMPTY
         temperature: 0.0
         max_context_length: 32000
@@ -61,11 +113,10 @@ user_llm_args:
 
 max_steps: 50
 max_concurrency: 1
-num_tasks: 5
 num_trials: 1
 seed: 42
 verbose: true
-save_to: multi-model-retail-test
+save_to: multi-model-retail-revised-turn
 
 vllm:
-  base_url: http://localhost:9070/v1
+  base_url: http://localhost:9092/v1

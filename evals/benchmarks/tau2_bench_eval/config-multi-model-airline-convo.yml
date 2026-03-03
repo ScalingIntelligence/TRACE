@@ -17,7 +17,7 @@ agent_llm_args:
 # Orchestrator configuration
 orchestrator:
   # Routing LLM — use base model on port 9000
-  routing_strategy: per_turn 
+  routing_strategy: per_conversation 
   orchestrator_model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
   orchestrator_llm_args:
     temperature: 0.0
@@ -98,7 +98,7 @@ num_trials: 1
 seed: 42
 verbose: true
 
-save_to: multi-model-airline-test-rerun
+save_to: multi-model-airline-test-convo
 
 # vLLM server config — base_url for agent_llm fallback + user simulator
 vllm:

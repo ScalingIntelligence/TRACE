@@ -20,10 +20,12 @@ def load_results(filepath: str) -> Dict[str, Any]:
         return json.load(f)
 
 
-def get_task_rewards(results: Dict[str, Any]) -> Dict[str, float]:
+def get_task_rewards(results: Dict[str, Any], best_of: bool = False) -> Dict[str, float]:
     """
     Extract task rewards from results.
-    Returns a dict mapping task_id to reward (average across trials if multiple).
+    Returns a dict mapping task_id to reward.
+
+    If best_of is True, takes the max reward across trials; otherwise averages.
     """
     task_rewards = {}
     simulations = results.get("simulations", [])
@@ -37,7 +39,6 @@ def get_task_rewards(results: Dict[str, Any]) -> Dict[str, float]:
             reward = 0.0
 
         if task_id in task_rewards:
-            # Average multiple trials
             existing = task_rewards[task_id]
             if isinstance(existing, list):
                 existing.append(reward)
@@ -46,10 +47,10 @@ def get_task_rewards(results: Dict[str, Any]) -> Dict[str, float]:
         else:
             task_rewards[task_id] = reward
 
-    # Average the rewards for tasks with multiple trials
+    # Aggregate rewards for tasks with multiple trials
     for task_id, rewards in task_rewards.items():
         if isinstance(rewards, list):
-            task_rewards[task_id] = sum(rewards) / len(rewards)
+            task_rewards[task_id] = max(rewards) if best_of else sum(rewards) / len(rewards)
 
     return task_rewards
 
@@ -59,7 +60,8 @@ def compare_results(
     results2: Dict[str, Any],
     name1: str = "Model 1",
     name2: str = "Model 2",
-    threshold: float = 0.5
+    threshold: float = 0.5,
+    best_of: bool = False
 ) -> Dict[str, Any]:
     """
     Compare two sets of results.
@@ -70,12 +72,13 @@ def compare_results(
         name1: Name for first model
         name2: Name for second model
         threshold: Reward threshold to consider a task "won" (default 0.5)
+        best_of: If True, take max reward across trials instead of average
 
     Returns:
         Comparison statistics
     """
-    rewards1 = get_task_rewards(results1)
-    rewards2 = get_task_rewards(results2)
+    rewards1 = get_task_rewards(results1, best_of=best_of)
+    rewards2 = get_task_rewards(results2, best_of=best_of)
 
     # Get all task IDs
     all_tasks = set(rewards1.keys()) | set(rewards2.keys())
@@ -243,6 +246,11 @@ Examples:
         help="Show detailed task lists for all categories"
     )
     parser.add_argument(
+        "--best-of",
+        action="store_true",
+        help="Use max reward across trials instead of average"
+    )
+    parser.add_argument(
         "--json", "-j",
         action="store_true",
         help="Output results as JSON"
@@ -270,7 +278,7 @@ Examples:
         name2 = Path(args.result2).stem
 
     # Compare
-    comparison = compare_results(results1, results2, name1, name2, args.threshold)
+    comparison = compare_results(results1, results2, name1, name2, args.threshold, best_of=args.best_of)
 
     # Output
     if args.json:

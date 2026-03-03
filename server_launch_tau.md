@@ -20,9 +20,46 @@ vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507 \
 conda activate games
 export HF_HOME=/workspace/.cache/huggingface
 export VLLM_RPC_TIMEOUT=2000
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=2
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
-vllm serve tarsur909/Qwen3-30B-A3B-Instruct-2507-multistep-task-15   --host 0.0.0.0   --port 8090   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.85   --enable-auto-tool-choice   --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
+vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 9000   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
+
+
+conda activate games
+export HF_HOME=/workspace/.cache/huggingface
+export VLLM_RPC_TIMEOUT=2000
+export CUDA_VISIBLE_DEVICES=3
+export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 8090   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
+
+
+
+
+conda activate games
+export HF_HOME=/workspace/.cache/huggingface
+export VLLM_RPC_TIMEOUT=2000
+export CUDA_VISIBLE_DEVICES=4
+export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+vllm serve tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-tool-10   --host 0.0.0.0   --port 9090   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
+
+
+
+conda activate games
+export HF_HOME=/workspace/.cache/huggingface
+export VLLM_RPC_TIMEOUT=2000
+export CUDA_VISIBLE_DEVICES=5
+export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 9092   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
+
+
+conda activate games
+export HF_HOME=/workspace/.cache/huggingface
+export VLLM_RPC_TIMEOUT=2000
+export CUDA_VISIBLE_DEVICES=1
+export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+vllm serve tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-10   --host 0.0.0.0   --port 8080   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
+
+
 
 conda activate games
 export HF_HOME=/workspace/.cache/huggingface
@@ -48,7 +85,7 @@ export HF_HOME=/workspace/.cache/huggingface
 export VLLM_RPC_TIMEOUT=2000
 export CUDA_VISIBLE_DEVICES=0
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
-vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 9000   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes 
+vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 8050   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes 
 
 
 
@@ -236,9 +273,9 @@ CUDA_VISIBLE_DEVICES=5 NCCL_P2P_DISABLE=1 WANDB_API_KEY=f4ef099e7073d103963e5c98
   --model Qwen/Qwen3-30B-A3B-Instruct-2507 --max-samples-per-file 50
 
 
-CUDA_VISIBLE_DEVICES=2,3,4,5,6,7 NCCL_P2P_DISABLE=1 WANDB_API_KEY=f4ef099e7073d103963e5c986e4f818f5a526ee8 torchrun --nproc_per_node=6 train_sft.py \
-  --sft-data "/root/games/game_rollouts/expert_sft-qwen3-max-thinking-t0_retail.json,/root/games/game_rollouts/expert_sft-qwen3-max-thinking-t0_airline.json" \
-  --model Qwen/Qwen3-30B-A3B-Instruct-2507 --max-samples-per-file 50
+CUDA_VISIBLE_DEVICES=6,7 NCCL_P2P_DISABLE=1 WANDB_API_KEY=f4ef099e7073d103963e5c986e4f818f5a526ee8 torchrun --nproc_per_node=2 train_sft.py \
+  --sft-data "/home/ubuntu/hangook/games/data/sft_think_tagged/airline_llm_agent_qwen3-max-2026-01-23_user_simulator_gpt-4.1-2025-04-14.json,/home/ubuntu/hangook/games/data/sft_think_tagged/retail_llm_agent_qwen3-max-2026-01-23_user_simulator_gpt-4.1-2025-04-14.json" \
+  --model Qwen/Qwen3-30B-A3B-Instruct-2507 
 
 
 

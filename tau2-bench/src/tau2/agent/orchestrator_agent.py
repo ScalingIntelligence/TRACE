@@ -63,6 +63,7 @@ class OrchestratorConfig(BaseModel):
     merge_cache_dir: str = "/tmp/lora_merge_cache"
     skip_routing: Optional[str] = None  # always use this skill (ablation)
     routing_context_window: int = 10  # number of recent messages for routing
+    routing_strategy: str = "per_turn"  # "per_turn" or "per_conversation"
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +132,7 @@ class OrchestratorAgentState(BaseModel):
     system_messages: list[SystemMessage]
     messages: list[APICompatibleMessage]
     routing_history: list[SkillRoutingDecision] = []
+    conversation_route: Optional[SkillRoutingDecision] = None  # cached route for per_conversation mode
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +334,18 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
             return self._fallback_decision()
 
         decision.selected_skills = valid_skills
+
+        # Enforce default_mode: if configured as "single", override multi
+        if self.orchestrator_config.default_mode == "single":
+            if decision.mode == "multi" or len(decision.selected_skills) > 1:
+                logger.info(
+                    f"[Orchestrator] Overriding multi -> single "
+                    f"(default_mode=single). Keeping first skill: "
+                    f"{decision.selected_skills[0]}"
+                )
+                decision.mode = "single"
+                decision.selected_skills = decision.selected_skills[:1]
+                decision.weights = None
 
         # Normalize weights for multi mode
         if decision.mode == "multi" and decision.weights:
@@ -543,7 +557,24 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
         full_messages = state.system_messages + state.messages
 
         # Step 1: Routing decision
-        decision = self._route(full_messages)
+        strategy = self.orchestrator_config.routing_strategy
+        if strategy == "per_conversation" and state.conversation_route is not None:
+            # Reuse the cached routing decision for the entire conversation
+            decision = state.conversation_route
+            logger.info(
+                f"[Orchestrator] Reusing per-conversation route: "
+                f"{decision.mode} -> {decision.selected_skills}"
+            )
+        else:
+            # Route fresh (always for per_turn, or first call for per_conversation)
+            decision = self._route(full_messages)
+            if strategy == "per_conversation":
+                state.conversation_route = decision
+                logger.info(
+                    f"[Orchestrator] Locked per-conversation route: "
+                    f"{decision.mode} -> {decision.selected_skills}"
+                )
+
         state.routing_history.append(decision)
         logger.info(
             f"[Orchestrator] {decision.mode} -> {decision.selected_skills}"
