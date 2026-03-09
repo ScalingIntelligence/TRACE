@@ -14,7 +14,6 @@ orchestrator:
     api_base: http://localhost:9092/v1
     api_key: EMPTY
 
-  default_mode: single
   routing_strategy: per_turn
   routing_context_window: 10
 

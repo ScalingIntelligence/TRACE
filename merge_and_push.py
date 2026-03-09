@@ -11,8 +11,8 @@ import torch
 BASE_MODEL = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 # ADAPTER_PATHs =   [ "/workspace/.cache/huggingface/default/sft/sft_ckpt_epoch_0_20260302_110400", "/workspace/.cache/huggingface/default/sft/sft_ckpt_epoch_1_20260302_121237", "/workspace/.cache/huggingface/default/sft/sft_ckpt_epoch_2_20260302_132119"]
 # TARGET_REPOs = [ "tarsur909/Qwen3-30B-A3B-Instruct-2507-expert-sft-1", "tarsur909/Qwen3-30B-A3B-Instruct-2507-expert-sft-2", "tarsur909/Qwen3-30B-A3B-Instruct-2507-expert-sft-3"]
-ADAPTER_PATHs =   [ "/workspace/.cache/huggingface/structured_data_v2/grpo_ckpt_iter_10_20260302_120731", "/workspace/.cache/huggingface/structured_data_v2/grpo_ckpt_iter_15_20260302_120731", "/workspace/.cache/huggingface/structured_data_v2/grpo_ckpt_iter_20_20260302_130336", "/workspace/.cache/huggingface/structured_data_v2/grpo_ckpt_iter_30_20260302_140008"]
-TARGET_REPOs = [ "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v2-grpo-10", "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v2-grpo-15", "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v2-grpo-20",  "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v2-grpo-30"]
+ADAPTER_PATHs =   [ "/home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_5_20260308_042720", "/home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_10_20260308_050043", "/home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_15_20260308_053131", "/home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_20_20260308_055159", "/home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_25_20260308_062754", "/home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_30_20260308_070158"]
+TARGET_REPOs = [ "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v3-grpo-5", "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v3-grpo-10", "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v3-grpo-15", "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v3-grpo-20",  "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v3-grpo-25", "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v3-grpo-30"]
 HF_TOKEN = "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"
 
 
@@ -38,7 +38,7 @@ for ADAPTER_PATH, TARGET_REPO in zip(ADAPTER_PATHs, TARGET_REPOs):
     model = model.to(torch.bfloat16)
 
     # Save to /workspace (overlay / has limited space), then upload
-    save_dir = f"/workspace/merged_upload/{TARGET_REPO.split('/')[-1]}"
+    save_dir = f"/dev/sda2/merged_upload/{TARGET_REPO.split('/')[-1]}"
     print(f"Saving merged model to {save_dir}...")
     model.save_pretrained(save_dir, max_shard_size="5GB", safe_serialization=True)
     tokenizer.save_pretrained(save_dir)

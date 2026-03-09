@@ -11,10 +11,9 @@ orchestrator:
   orchestrator_model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
   orchestrator_llm_args:
     temperature: 0.0
-    api_base: http://localhost:9092/v1
+    api_base: http://localhost:9000/v1
     api_key: EMPTY
 
-  default_mode: single
   routing_strategy: per_conversation
   routing_context_window: 10
 
@@ -70,7 +69,7 @@ orchestrator:
         name and zip code. Name+zip does NOT override these triggers.
       model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
       llm_args:
-        api_base: http://localhost:9092/v1
+        api_base: http://localhost:9000/v1
         api_key: EMPTY
         temperature: 0.0
         max_context_length: 32000
@@ -98,7 +97,7 @@ orchestrator:
         (hostile tone, multi-item specs, emotional content, or email) match.
       model: openai/tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-tool-10
       llm_args:
-        api_base: http://localhost:9090/v1
+        api_base: http://localhost:8080/v1
         api_key: EMPTY
         temperature: 0.0
         max_context_length: 32000
@@ -110,7 +109,7 @@ orchestrator:
         product, return, exchange, cancellation, or account topic.
       model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
       llm_args:
-        api_base: http://localhost:9092/v1
+        api_base: http://localhost:9000/v1
         api_key: EMPTY
         temperature: 0.0
         max_context_length: 32000
@@ -128,4 +127,4 @@ verbose: true
 save_to: multi-model-retail-convo-rerun
 
 vllm:
-  base_url: http://localhost:9092/v1
+  base_url: http://localhost:9000/v1

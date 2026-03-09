@@ -24,9 +24,6 @@ orchestrator:
     api_base: http://localhost:9092/v1
     api_key: EMPTY
 
-  # Pick ONE skill per turn
-  default_mode: single
-
   # "per_turn" = route every turn, "per_conversation" = route once and reuse
   routing_strategy: per_turn
 

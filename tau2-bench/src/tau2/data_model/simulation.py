@@ -191,7 +191,7 @@ class RunConfig(BaseModel):
     orchestrator_config: Annotated[
         Optional[dict],
         Field(
-            description="Orchestrator + skill LLMs configuration. Contains orchestrator_model, skills list, default_mode, etc.",
+            description="Orchestrator + skill LLMs configuration. Contains orchestrator_model, skills list, routing_strategy, etc.",
             default=None,
         ),
     ]

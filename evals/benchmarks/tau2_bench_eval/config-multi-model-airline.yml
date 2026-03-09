@@ -24,9 +24,6 @@ orchestrator:
     api_base: http://localhost:9000/v1
     api_key: EMPTY
 
-  # Pick ONE skill per turn
-  default_mode: single
-
   # Number of recent messages to include in routing context
   routing_context_window: 10
 
