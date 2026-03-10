@@ -58,7 +58,8 @@ class OrchestratorConfig(BaseModel):
     skip_routing: Optional[str] = None  # always use this skill (ablation)
     routing_context_window: Optional[int] = None  # None = use entire conversation
     routing_strategy: str = "per_turn"  # "per_turn" or "per_conversation"
-    routing_mode: str = "llm"  # "llm" (JSON output) or "classifier" (1 forward pass with structured_outputs)
+    routing_mode: str = "llm"  # "llm" (JSON output), "classifier" (1 forward pass with structured_outputs), or "embedding" (sentence similarity)
+    embedding_model: str = "Qwen/Qwen3-Embedding-8B"  # model name for sentence_transformers when routing_mode == "embedding"
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +218,32 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
             )
             self._classifier_labels = list(self._label_to_skill.keys())
 
+        # Build embedding model and pre-encode skill descriptions for embedding mode
+        if orchestrator_config.routing_mode == "embedding":
+            from sentence_transformers import SentenceTransformer
+
+            logger.info(
+                f"[Embedding Router] Loading model: {orchestrator_config.embedding_model}"
+            )
+            self._embedding_model = SentenceTransformer(
+                orchestrator_config.embedding_model,
+                model_kwargs={"attn_implementation": "flash_attention_2", "device_map": "auto"},
+                tokenizer_kwargs={"padding_side": "left"},
+            )
+            # Map each skill name to its description for encoding
+            self._embedding_skill_names: list[str] = []
+            skill_docs: list[str] = []
+            for skill_config in orchestrator_config.skills:
+                self._embedding_skill_names.append(skill_config.name)
+                skill_docs.append(
+                    f"{skill_config.name}: {skill_config.description}"
+                )
+            # Pre-encode skill descriptions as documents (no query prompt)
+            self._embedding_skill_vectors = self._embedding_model.encode(skill_docs)
+            logger.info(
+                f"[Embedding Router] Pre-encoded {len(skill_docs)} skill descriptions"
+            )
+
         # Validate skip_routing target exists
         if orchestrator_config.skip_routing:
             if orchestrator_config.skip_routing not in self.skill_backends:
@@ -260,6 +287,9 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
 
         if self.orchestrator_config.routing_mode == "classifier":
             return self._route_classifier(messages)
+
+        if self.orchestrator_config.routing_mode == "embedding":
+            return self._route_embedding(messages)
 
         return self._route_llm(messages)
 
@@ -368,6 +398,58 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
                 f"Classifier returned unexpected label: '{chosen_label}'. "
                 f"Expected one of {self._classifier_labels}"
             )
+            return self._fallback_decision()
+
+    def _route_embedding(self, messages: list[Message]) -> SkillRoutingDecision:
+        """Route by encoding the conversation and finding the most similar skill description.
+
+        Uses SentenceTransformer cosine similarity between a query built from
+        recent conversation messages and the pre-encoded skill descriptions.
+        No API call is needed — inference runs locally on the loaded model.
+        """
+        # Build query from recent conversation messages
+        window = self.orchestrator_config.routing_context_window
+        non_system = [m for m in messages if not isinstance(m, SystemMessage)]
+        recent = non_system[-window:] if window is not None else non_system
+
+        # Concatenate recent message contents into a single query string
+        query_parts: list[str] = []
+        for m in recent:
+            content = getattr(m, "content", None) or ""
+            if content:
+                query_parts.append(content)
+
+        if not query_parts:
+            logger.warning("[Embedding Router] No message content for routing query")
+            return self._fallback_decision()
+
+        query_text = "\n".join(query_parts)
+
+        try:
+            # Encode the query using the "query" prompt (as recommended by Qwen3-Embedding)
+            query_embedding = self._embedding_model.encode(
+                [query_text], prompt_name="query"
+            )
+            # Compute cosine similarity against pre-encoded skill descriptions
+            similarity = self._embedding_model.similarity(
+                query_embedding, self._embedding_skill_vectors
+            )
+            # similarity shape: (1, num_skills) — get the best match
+            scores = similarity[0]  # first (only) query row
+            best_idx = int(scores.argmax())
+            best_score = float(scores[best_idx])
+            skill_name = self._embedding_skill_names[best_idx]
+
+            logger.info(
+                f"[Embedding Router] Best match: {skill_name} "
+                f"(score={best_score:.4f}, scores={[f'{self._embedding_skill_names[i]}:{float(scores[i]):.4f}' for i in range(len(self._embedding_skill_names))]})"
+            )
+            return SkillRoutingDecision(
+                selected_skill=skill_name,
+                reasoning=f"embedding similarity {best_score:.4f}",
+            )
+        except Exception as e:
+            logger.error(f"Embedding routing failed: {e}")
             return self._fallback_decision()
 
     def _parse_routing_response(

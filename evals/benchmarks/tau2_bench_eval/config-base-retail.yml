@@ -1,4 +1,10 @@
-# Base model only (port 9070) — retail
+# Base model only — retail
+#
+# Runs the base Qwen3-30B model without orchestration.
+#
+# Usage:
+#   python main.py --config config-base-retail.yml
+
 domain: retail
 agent_llm: vllm://Qwen/Qwen3-30B-A3B-Instruct-2507
 agent: null
@@ -13,13 +19,12 @@ user_llm_args:
   max_context_length: 32000
 
 user: null
-num_tasks: 5
 num_trials: 1
 max_steps: 50
 max_concurrency: 1
 seed: 42
 verbose: true
-save_to: base-only-retail-test
+save_to: base-retail
 
 vllm:
-  base_url: http://localhost:9070/v1
+  base_url: http://localhost:9000/v1
