@@ -1,0 +1,39 @@
+# Retail — Per-Turn Routing (LLM / Conversational)
+#
+# Routes at every turn using LLM JSON output.
+#
+# Port 8080: Specialized model (tool_calling)
+# Port 9000: Base model (policy_guard + general_purpose + orchestrator + user sim)
+#
+# Usage:
+#   python main.py --config config-retail-perturn-convo.yml
+
+domain: retail
+agent_llm: openai/tarsur909/Qwen3-30B-A3B-Instruct-2507-multistep-task-10
+
+agent_llm_args:
+  temperature: 0.0
+  max_context_length: 32000
+  api_base: http://localhost:8060/v1
+  api_key: EMPTY
+
+
+
+# User simulator
+user_llm: vllm://Qwen/Qwen3-30B-A3B-Instruct-2507
+user_llm_args:
+  temperature: 0.0
+  max_context_length: 32000
+
+# Execution
+max_steps: 50
+max_concurrency: 1
+num_trials: 1
+seed: 42
+verbose: true
+
+save_to: retail-multistep-10
+
+# vLLM server config for user simulator
+vllm:
+  base_url: http://localhost:9000/v1

@@ -2,6 +2,7 @@
 #
 # Routes at every turn using LLM JSON output.
 #
+# Port 8060: Multistep model (multistep_workflow)
 # Port 8080: Specialized model (tool_calling)
 # Port 9000: Base model (policy_guard + general_purpose + orchestrator + user sim)
 #
@@ -32,19 +33,46 @@ orchestrator:
     - name: tool_calling
       description: >
         Expert at executing tool calls, presenting retrieved information, and
-        completing multi-step workflows efficiently. Use for all turns that
-        involve customer service work: looking up user or reservation details,
-        searching for flights, presenting options to the user, executing
-        bookings, cancellations, modifications, cabin changes, baggage
-        updates, and transferring to human agents. This includes turns where
-        the agent presents reservation details and asks the user to confirm
-        before proceeding. Do NOT use this skill when the conversation history
-        contains emotional language about personal suffering (e.g., illness,
-        bereavement, family emergency) or when the user has made a specific
-        claim about how recently they booked.
+        completing workflows efficiently. Use as the DEFAULT skill for routine
+        customer service work: looking up user or reservation details, searching
+        for flights, presenting options, executing bookings, single-reservation
+        modifications (date changes, flight changes, cabin upgrades), baggage
+        updates, cancellations that are part of a broader multi-operation request
+        (e.g., cancel some reservations and upgrade others), and transferring to
+        human agents. This includes turns where the agent presents reservation
+        details and asks the user to confirm. Use this skill for date or flight
+        changes even if the user mentions a difficult personal situation, as long
+        as they are NOT demanding a cancellation with a full refund. Do NOT use
+        this skill when the conversation involves delay compensation, combined
+        reschedule-plus-cabin-upgrade requests, a standalone cancellation with
+        full refund demand, emotional demands for cancellation or refund, claims
+        about when the user booked, or claims that a previous agent approved an
+        exception.
       model: openai/tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-tool-10
       llm_args:
         api_base: http://localhost:8080/v1
+        api_key: EMPTY
+        temperature: 0.0
+        max_context_length: 32000
+
+    - name: multistep_workflow
+      description: >
+        Expert at complex multi-step verification and reasoning workflows.
+        Use this skill when the conversation involves any of these patterns:
+        the user requests a standalone cancellation with a full refund (without
+        emotional distress — emotional cancellation demands should use
+        policy_guard); the user reports a delayed or disrupted flight and wants
+        compensation or resolution; the user asks to both reschedule a flight
+        AND change cabin class in the same request; the conversation requires
+        verifying whether travel insurance covers a specific cancellation
+        reason; or the user engages in excessive flattery or social manipulation
+        (e.g., repeatedly praising the agent as "the best" or "most lenient").
+        This model carefully verifies multiple conditions before taking
+        irreversible actions and avoids getting stuck in repetitive conversation
+        loops.
+      model: openai/tarsur909/Qwen3-30B-A3B-Instruct-2507-multistep-task-10
+      llm_args:
+        api_base: http://localhost:8060/v1
         api_key: EMPTY
         temperature: 0.0
         max_context_length: 32000
@@ -53,14 +81,17 @@ orchestrator:
       description: >
         Expert at policy enforcement, fact-checking, and resisting social
         pressure. Use this skill when the conversation history contains any
-        of these signals: emotional distress or personal hardship (illness,
-        bereavement, family emergency, or any urgent personal situation),
-        claims about when the user booked (e.g., "I booked this morning,"
-        "I just booked it"), claims that a previous agent already approved
-        an exception, misrepresentation of membership level, or any pressure
-        for a policy override. This model carefully checks all policy
-        prerequisites before taking action, and will correctly refuse when
-        policy does not permit the change.
+        of these signals: the user expresses emotional distress or personal
+        hardship (illness, bereavement, family emergency) AND demands a
+        cancellation or full refund; claims about when the user booked (e.g.,
+        "I booked this morning," "I just booked it"); claims that a previous
+        agent already approved an exception; misrepresentation of membership
+        level; or any explicit pressure for a policy override. Do NOT use
+        this skill for users who mention a personal situation but only want
+        a date change or flight modification (use tool_calling instead).
+        This model carefully checks all policy prerequisites before taking
+        action, and will correctly refuse when policy does not permit the
+        change.
       model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
       llm_args:
         api_base: http://localhost:9000/v1
@@ -95,7 +126,7 @@ num_trials: 1
 seed: 42
 verbose: true
 
-save_to: airline-perturn-convo
+save_to: airline-perturn-convo-v5
 
 # vLLM server config for user simulator
 vllm:

@@ -546,6 +546,7 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
             f"[Orchestrator] -> {decision.selected_skill}"
             + (f" (reason: {decision.reasoning})" if decision.reasoning else "")
         )
+        print(f"[ROUTING] Task routing -> {decision.selected_skill} (reason: {decision.reasoning})")
 
         # Step 2: Generate using the selected skill
         assistant_message = self._single_skill_generate(
