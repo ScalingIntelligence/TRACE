@@ -140,11 +140,12 @@ Given the current conversation, decide which skill should handle the agent's nex
 Available skills:
 {skill_descriptions}
 
-You MUST respond with ONLY a JSON object (no markdown, no extra text):
-{{
-  "selected_skill": "skill_name",
-  "reasoning": "brief explanation"
-}}
+Think step-by-step about which skill best matches this conversation, then state your final choice.
+
+Format your response as:
+1. Free-form reasoning about the conversation and which skill fits best.
+2. End with your final answer on its own line in this exact format:
+   SELECTED_SKILL: skill_name
 
 Rules:
 - Select the single best skill for the current task.
@@ -227,7 +228,7 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
             )
             self._embedding_model = SentenceTransformer(
                 orchestrator_config.embedding_model,
-                model_kwargs={"attn_implementation": "flash_attention_2", "device_map": "auto"},
+                model_kwargs={"attn_implementation": "sdpa", "device_map": "auto"},
                 tokenizer_kwargs={"padding_side": "left"},
             )
             # Map each skill name to its description for encoding
@@ -309,7 +310,7 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
         routing_messages.append(
             UserMessage(
                 role="user",
-                content="Based on the conversation above, which skill should handle the agent's next response? Respond with JSON only.",
+                content="Based on the conversation above, which skill should handle the agent's next response? Think step-by-step, then end with SELECTED_SKILL: skill_name",
             )
         )
 
@@ -440,10 +441,12 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
             best_score = float(scores[best_idx])
             skill_name = self._embedding_skill_names[best_idx]
 
+            score_details = [f'{self._embedding_skill_names[i]}:{float(scores[i]):.4f}' for i in range(len(self._embedding_skill_names))]
             logger.info(
                 f"[Embedding Router] Best match: {skill_name} "
-                f"(score={best_score:.4f}, scores={[f'{self._embedding_skill_names[i]}:{float(scores[i]):.4f}' for i in range(len(self._embedding_skill_names))]})"
+                f"(score={best_score:.4f}, scores={score_details})"
             )
+            print(f"[EMBED] {skill_name} (best={best_score:.4f}) | {' '.join(score_details)}", flush=True)
             return SkillRoutingDecision(
                 selected_skill=skill_name,
                 reasoning=f"embedding similarity {best_score:.4f}",
@@ -455,13 +458,40 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
     def _parse_routing_response(
         self, response: AssistantMessage
     ) -> SkillRoutingDecision:
-        """Parse the orchestrator's JSON response into a SkillRoutingDecision."""
+        """Parse the orchestrator's response into a SkillRoutingDecision.
+
+        Supports two formats:
+        1. Reasoning-first: free text followed by "SELECTED_SKILL: skill_name"
+        2. Legacy JSON: {"selected_skill": "...", "reasoning": "..."}
+        """
         content = (response.content or "").strip()
 
+        # Try reasoning-first format: look for SELECTED_SKILL: line
+        import re
+        match = re.search(r'SELECTED_SKILL:\s*(\S+)', content, re.IGNORECASE)
+        if match:
+            skill_name = match.group(1).strip().rstrip(".")
+            # Extract reasoning as everything before the SELECTED_SKILL line
+            reasoning = content[:match.start()].strip()
+            # Truncate reasoning for logging
+            short_reasoning = reasoning[-200:] if len(reasoning) > 200 else reasoning
+            print(f"[LLM ROUTER] {skill_name} | full reasoning:\n{reasoning}\n---", flush=True)
+            decision = SkillRoutingDecision(
+                selected_skill=skill_name,
+                reasoning=short_reasoning,
+            )
+            if decision.selected_skill in self.skill_backends:
+                return decision
+            logger.warning(
+                f"Invalid skill in routing decision: {decision.selected_skill}. "
+                f"Available: {list(self.skill_backends.keys())}"
+            )
+            return self._fallback_decision()
+
+        # Fallback: try legacy JSON format
         # Strip markdown code fences if present
         if content.startswith("```"):
             lines = content.split("\n")
-            # Remove first and last lines (``` markers)
             lines = [l for l in lines if not l.strip().startswith("```")]
             content = "\n".join(lines).strip()
 
@@ -471,7 +501,7 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
         except (json.JSONDecodeError, Exception) as e:
             logger.warning(
                 f"Failed to parse routing decision ({e}), using fallback. "
-                f"Raw response: {content[:200]}"
+                f"Raw response: {content[:300]}"
             )
             return self._fallback_decision()
 

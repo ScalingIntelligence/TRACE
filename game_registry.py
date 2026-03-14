@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Protocol
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
 
 from config import Config
 
@@ -205,3 +205,55 @@ def _register_builtin_games() -> None:
 
 
 _register_builtin_games()
+
+
+# ============================================================================
+# Multi-environment game mixing
+# ============================================================================
+
+@dataclass
+class GameMixEntry:
+    """One entry in a multi-game mix."""
+    game_spec: GameSpec
+    weight: float  # Proportional weight (normalized to sum=1)
+    env_kwargs: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class GameMix:
+    """A weighted mix of games for multi-environment GRPO training."""
+    entries: List[GameMixEntry]
+
+    def assign_groups(self, groups_per_batch: int) -> List[Tuple[GameSpec, Dict[str, Any]]]:
+        """Assign each group index to a (GameSpec, env_kwargs) pair.
+
+        Uses proportional allocation: each entry gets
+        round(weight * groups_per_batch) groups, with remainder distributed
+        to the highest-weight entries to guarantee the total matches.
+
+        Returns:
+            List of length groups_per_batch, each element is
+            (GameSpec, env_kwargs) for that group.
+        """
+        # Compute raw allocations
+        raw = [e.weight * groups_per_batch for e in self.entries]
+        allocs = [int(r) for r in raw]
+        remainders = [(raw[i] - allocs[i], i) for i in range(len(self.entries))]
+
+        # Distribute remaining slots to entries with largest remainders
+        deficit = groups_per_batch - sum(allocs)
+        remainders.sort(reverse=True)
+        for _, idx in remainders[:deficit]:
+            allocs[idx] += 1
+
+        # Build assignment list
+        assignments: List[Tuple[GameSpec, Dict[str, Any]]] = []
+        for entry, count in zip(self.entries, allocs):
+            for _ in range(count):
+                assignments.append((entry.game_spec, entry.env_kwargs))
+        return assignments
+
+    @property
+    def max_gen_tokens(self) -> int:
+        """Maximum generation tokens across all games in the mix."""
+        return max(e.game_spec.max_gen_tokens for e in self.entries)

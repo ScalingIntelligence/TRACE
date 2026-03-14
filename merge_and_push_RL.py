@@ -7,23 +7,17 @@ from unsloth import FastLanguageModel
 from huggingface_hub import HfApi
 import torch
 import gc
+import shutil
 
 ADAPTER_PATHs = [
-    "/home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_5_20260308_042720",
-    "/home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_10_20260308_050043",
-    "/home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_15_20260308_053131",
-    "/home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_20_20260308_055159",
-    "/home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_25_20260308_062754",
-    "/home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_30_20260308_070158",
-]
-TARGET_REPOs = [
-    "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v3-grpo-5",
-    "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v3-grpo-10",
-    "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v3-grpo-15",
-    "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v3-grpo-20",
-    "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v3-grpo-25",
-    "tarsur909/Qwen3-30B-A3B-Instruct-2507-structured-v3-grpo-30",
-]
+    "/home/ubuntu/.cache/huggingface/adversarial_policy/grpo_ckpt_iter_20_20260313_181607","/home/ubuntu/.cache/huggingface/adversarial_policy/grpo_ckpt_iter_25_20260313_194228","/home/ubuntu/.cache/huggingface/adversarial_policy/grpo_ckpt_iter_30_20260313_210428","/home/ubuntu/.cache/huggingface/adversarial_policy/grpo_ckpt_iter_35_20260313_222857",                                                      
+]                                                                   
+TARGET_REPOs = [                                                                                                          
+    "tarsur909/mix-multistep-structured-20",
+    "tarsur909/mix-multistep-structured-25",
+    "tarsur909/mix-multistep-structured-30",
+    "tarsur909/mix-multistep-structured-35",
+] 
 HF_TOKEN = "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"
 MAX_SEQ_LENGTH = 16000
 
@@ -42,7 +36,7 @@ for ADAPTER_PATH, TARGET_REPO in zip(ADAPTER_PATHs, TARGET_REPOs):
         use_exact_model_name=True,
     )
 
-    save_dir = f"/dev/sda2/merged_upload/{TARGET_REPO.split('/')[-1]}"
+    save_dir = f"/merged_upload/{TARGET_REPO.split('/')[-1]}"
     print(f"Merging and saving to {save_dir}...")
     model.save_pretrained_merged(save_dir, tokenizer, save_method="merged_16bit")
 
@@ -55,3 +49,7 @@ for ADAPTER_PATH, TARGET_REPO in zip(ADAPTER_PATHs, TARGET_REPOs):
     del model, tokenizer
     gc.collect()
     torch.cuda.empty_cache()
+
+    print(f"Deleting merged folder {save_dir}...")
+    shutil.rmtree(save_dir)
+    print(f"Deleted {save_dir}.")

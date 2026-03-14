@@ -152,11 +152,16 @@ def _extract_thinking(content: str) -> Tuple[str, str]:
 def _make_completion_text(msg: Dict[str, Any]) -> str:
     """Create completion text for an assistant turn (matches GRPO rollout format).
 
-    For tool calls: json.dumps({"name": ..., "arguments": ...})
+    For tool calls: <tool_call>\n json.dumps({"name": ..., "arguments": ...})\n</tool_call>
     For text messages: json.dumps({"name": "respond_to_user", "arguments": {"message": ...}})
 
+    Tool-call outputs are wrapped in <tool_call>...</tool_call> to match
+    the Qwen3 chat template format — the same format the model sees for
+    historical assistant tool-call turns in the prompt and the same format
+    the model naturally generates during GRPO rollouts.
+
     If the message content contains <think> tags (e.g. from Qwen3-Max),
-    the thinking is prepended BEFORE the JSON action so the model learns
+    the thinking is prepended BEFORE the action so the model learns
     to reason before acting.
     """
     content = msg.get("content", "") or ""
@@ -175,10 +180,17 @@ def _make_completion_text(msg: Dict[str, Any]) -> str:
             except json.JSONDecodeError:
                 pass
         action_json = json.dumps({"name": tc["name"], "arguments": args})
-        return think_prefix + action_json
+        # Wrap in <tool_call> tags to match Qwen3 chat template format.
+        # The chat template formats historical assistant tool calls as:
+        #   <tool_call>\n{"name": ..., "arguments": ...}\n</tool_call>
+        # and the model naturally generates this format during inference.
+        return think_prefix + "<tool_call>\n" + action_json + "\n</tool_call>"
     else:
-        action_json = json.dumps({"name": "respond_to_user", "arguments": {"message": clean_content}})
-        return think_prefix + action_json
+        # Plain text — matches what the model generates during inference.
+        # vLLM's hermes tool-call parser returns non-tool-call content as
+        # plain text, and the tau2-bench orchestrator/user-simulator expects
+        # plain assistant text (not JSON-wrapped).
+        return think_prefix + clean_content
 
 
 # ---------------------------------------------------------------------------
@@ -276,16 +288,20 @@ def load_sft_samples(
 def load_sft_samples_multi(
     paths: List[str],
     compact_tools: bool = False,
-    max_samples_per_file: int = None,
+    max_samples_per_file: List[int] = None,
 ) -> List[SFTSample]:
-    """Load SFT samples from multiple tau2-bench eval JSON files."""
+    """Load SFT samples from multiple tau2-bench eval JSON files.
+
+    max_samples_per_file: optional list of per-file limits (same length as paths).
+    """
     all_samples: List[SFTSample] = []
-    for p in paths:
+    for i, p in enumerate(paths):
         try:
             samples = load_sft_samples(p, compact_tools=compact_tools)
-            if max_samples_per_file is not None and len(samples) > max_samples_per_file:
-                samples = samples[:max_samples_per_file]
-                print(f"[SFT]   {p}: truncated to {max_samples_per_file} samples (--max-samples-per-file)")
+            limit = max_samples_per_file[i] if max_samples_per_file is not None else None
+            if limit is not None and len(samples) > limit:
+                samples = samples[:limit]
+                print(f"[SFT]   {p}: truncated to {limit} samples (--max-samples-per-file)")
             all_samples.extend(samples)
         except Exception as e:
             print(f"[SFT] Warning: failed to load {p}: {e}")
@@ -308,7 +324,7 @@ class SFTBuffer:
         paths: List[str],
         tokenizer,
         compact_tools: bool = False,
-        max_samples_per_file: int = None,
+        max_samples_per_file: List[int] = None,
         max_seq_len: int = None,
         min_prompt_len: int = 128,
     ):
@@ -350,16 +366,17 @@ class SFTBuffer:
         Returns count of new samples added.
         """
         new_count = 0
-        for p in paths:
+        for i, p in enumerate(paths):
             try:
                 samples = load_sft_samples(p, compact_tools=self._compact_tools)
             except Exception as e:
                 print(f"[SFT] Warning: failed to load {p}: {e}")
                 continue
 
-            if self._max_samples_per_file is not None and len(samples) > self._max_samples_per_file:
-                samples = samples[:self._max_samples_per_file]
-                print(f"[SFT]   {p}: truncated to {self._max_samples_per_file} samples (--max-samples-per-file)")
+            limit = self._max_samples_per_file[i] if self._max_samples_per_file is not None else None
+            if limit is not None and len(samples) > limit:
+                samples = samples[:limit]
+                print(f"[SFT]   {p}: truncated to {limit} samples (--max-samples-per-file)")
 
             # Which task_ids in this file are new?
             new_task_ids = set()

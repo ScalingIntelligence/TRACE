@@ -124,9 +124,11 @@ def parse_args():
     parser.add_argument("--max-samples", type=int, default=None,
         help="Train on only the first N samples (after seq-length filtering). "
              "Useful for quick debugging or ablation runs.")
-    parser.add_argument("--max-samples-per-file", type=int, default=None,
+    parser.add_argument("--max-samples-per-file", type=str, default=None,
         help="Limit each input file to at most N samples before merging. "
-             "E.g., --max-samples-per-file 100 with 2 files gives 200 total.")
+             "A single int applies to all files; a comma-separated list "
+             "sets per-file limits matching --sft-data order. "
+             "E.g., --max-samples-per-file 100 or --max-samples-per-file 50,200,100")
     parser.add_argument("--shuffle-seed", type=int, default=42,
         help="Random seed for data shuffling")
 
@@ -454,9 +456,24 @@ def main():
 
     # ---- Load SFT data ----
     sft_paths = [p.strip() for p in args.sft_data.split(",") if p.strip()]
+
+    # Parse --max-samples-per-file: single int or comma-separated per-file limits
+    max_per_file = None
+    if args.max_samples_per_file is not None:
+        parts = [x.strip() for x in args.max_samples_per_file.split(",")]
+        if len(parts) == 1:
+            max_per_file = [int(parts[0])] * len(sft_paths)
+        else:
+            if len(parts) != len(sft_paths):
+                raise ValueError(
+                    f"--max-samples-per-file has {len(parts)} values but "
+                    f"--sft-data has {len(sft_paths)} files"
+                )
+            max_per_file = [int(x) for x in parts]
+
     print(f"[SFT] Loading data from {len(sft_paths)} files...")
     sft_buffer = SFTBuffer(sft_paths, tokenizer, compact_tools=args.compact_tools,
-                           max_samples_per_file=args.max_samples_per_file,
+                           max_samples_per_file=max_per_file,
                            max_seq_len=max_seq_len)
     total_samples = len(sft_buffer)
     print(f"[SFT] Loaded {total_samples} samples from {len(sft_paths)} files")

@@ -65,7 +65,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from tqdm import tqdm
 
 from config import Config, setup_environment, autocast_ctx
-from game_registry import get_game_spec, list_game_names, GameSpec
+from game_registry import get_game_spec, list_game_names, GameSpec, GameMix, GameMixEntry
 from inference import (
     InferenceBackend,
     HFLocalBackend,
@@ -308,6 +308,9 @@ def parse_grpo_args_optimized():
     # -- Game and model --
     parser.add_argument("--game", type=str, default="adversarial_policy",
         help="Game to train on (from game_registry)")
+    parser.add_argument("--games", type=str, default=None,
+        help="Multi-game mix (e.g. 'structured_data_reasoning:0.5,multistep_task:0.25,"
+             "adversarial_policy:0.25'). Overrides --game when set.")
     parser.add_argument("--model", type=str, default=None,
         help="HuggingFace model name (default: Config.MODEL_NAME)")
 
@@ -421,6 +424,58 @@ def parse_grpo_args_optimized():
 
 
 # ============================================================================
+# Multi-game helpers
+# ============================================================================
+
+def build_env_kwargs(game_spec: GameSpec, args) -> Dict[str, Any]:
+    """Build env_kwargs for a single GameSpec from CLI args."""
+    kwargs: Dict[str, Any] = {}
+    if args.user_llm_url and game_spec.name in ("adversarial_policy", "tau_tool_calling"):
+        from adversarial_policy_game import UserLLMClient
+        kwargs["user_client"] = UserLLMClient(
+            base_url=args.user_llm_url,
+            model=args.user_llm_model or "default",
+            max_tokens=args.user_llm_max_tokens,
+            temperature=args.user_llm_temperature,
+        )
+    if game_spec.name == "adversarial_policy":
+        kwargs["adversarial_ratio"] = args.adversarial_ratio
+    if game_spec.name == "tau_tool_calling" and hasattr(args, "tau_domain") and args.tau_domain:
+        kwargs["domain"] = args.tau_domain
+    return kwargs
+
+
+def parse_game_mix(games_str: str, args) -> GameMix:
+    """Parse '--games' string into a GameMix.
+
+    Format: 'game1:weight1,game2:weight2,...'
+    Weights are normalized to sum to 1.
+    """
+    entries = []
+    total_weight = 0.0
+    for part in games_str.split(","):
+        part = part.strip()
+        if ":" in part:
+            name, w = part.rsplit(":", 1)
+            weight = float(w)
+        else:
+            name = part
+            weight = 1.0
+        spec = get_game_spec(name.strip())
+        total_weight += weight
+        entries.append((spec, weight))
+
+    # Normalize weights
+    mix_entries = []
+    for spec, weight in entries:
+        normed = weight / total_weight
+        kwargs = build_env_kwargs(spec, args)
+        mix_entries.append(GameMixEntry(game_spec=spec, weight=normed, env_kwargs=kwargs))
+
+    return GameMix(entries=mix_entries)
+
+
+# ============================================================================
 # Main training loop (optimized)
 # ============================================================================
 
@@ -449,37 +504,33 @@ def main():
     use_train_autocast = os.getenv("GRPO_TRAIN_AUTOCAST", "0") == "1"
 
     # ---- Game setup ----
-    game = args.game
-    try:
-        game_spec = get_game_spec(game)
-    except KeyError as e:
-        available = ", ".join(list_game_names())
-        raise RuntimeError(f"{e}. Available games: {available}") from e
+    if args.games:
+        # Multi-game mix mode
+        game_mix = parse_game_mix(args.games, args)
+        # Primary game_spec used for backward-compat paths (logging, wandb config)
+        game_spec = game_mix.entries[0].game_spec
+        game = "+".join(e.game_spec.name for e in game_mix.entries)
+        max_gen_tokens = game_mix.max_gen_tokens
+        env_kwargs: Dict[str, Any] = game_mix.entries[0].env_kwargs
+        print(f"[GameMix] {len(game_mix.entries)} games: "
+              + ", ".join(f"{e.game_spec.name}:{e.weight:.2f}" for e in game_mix.entries))
+    else:
+        # Single-game mode (backward compatible)
+        game_mix = None
+        game = args.game
+        try:
+            game_spec = get_game_spec(game)
+        except KeyError as e:
+            available = ", ".join(list_game_names())
+            raise RuntimeError(f"{e}. Available games: {available}") from e
 
-    max_gen_tokens = game_spec.max_gen_tokens
-    env_kwargs: Dict[str, Any] = {}
-    if args.user_llm_url and game_spec.name in ("adversarial_policy", "tau_tool_calling"):
-        from adversarial_policy_game import UserLLMClient
-        user_client = UserLLMClient(
-            base_url=args.user_llm_url,
-            model=args.user_llm_model or "default",
-            max_tokens=args.user_llm_max_tokens,
-            temperature=args.user_llm_temperature,
-        )
-        env_kwargs["user_client"] = user_client
-        print(f"[User LLM] {args.user_llm_url} model={args.user_llm_model}")
-
-    # Wire up adversarial_ratio for adversarial_policy game
-    if game_spec.name == "adversarial_policy":
-        env_kwargs["adversarial_ratio"] = args.adversarial_ratio
-
-    # Wire up domain filter for tau_tool_calling game
-    if game_spec.name == "tau_tool_calling" and hasattr(args, "tau_domain"):
-        if args.tau_domain:
-            env_kwargs["domain"] = args.tau_domain
+        max_gen_tokens = game_spec.max_gen_tokens
+        env_kwargs = build_env_kwargs(game_spec, args)
+        if "user_client" in env_kwargs:
+            print(f"[User LLM] {args.user_llm_url} model={args.user_llm_model}")
 
     # Set dynamic rollout log name
-    args.rollout_log = f"rollouts_grpo_{game_spec.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+    args.rollout_log = f"rollouts_grpo_{game}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
 
     # ---- Environment setup ----
     env_config = setup_environment(args)
@@ -498,7 +549,10 @@ def main():
     print("=" * 60)
     print("GRPO TRAINER (OPTIMIZED)")
     print("=" * 60)
-    print(f"  Game:                {game_spec.name}")
+    print(f"  Game:                {game}")
+    if game_mix:
+        for e in game_mix.entries:
+            print(f"    - {e.game_spec.name}: weight={e.weight:.2f}, max_gen={e.game_spec.max_gen_tokens}")
     print(f"  Group size (inner):  {args.group_size}")
     print(f"  Groups/batch (outer):{args.groups_per_batch}")
     print(f"  Total games/iter:    {total_games_per_iter}")
@@ -636,6 +690,7 @@ def main():
         wandb.config.update({
             "trainer": "grpo_optimized",
             "game": game,
+            "games": args.games or args.game,
             "group_size": args.group_size,
             "groups_per_batch": args.groups_per_batch,
             "lora_rank": args.lora_rank,
@@ -715,6 +770,12 @@ def main():
 
         # ---- 3. Collect group-based rollouts (rank 0) + broadcast ----
         if is_main_rank():
+            # Build per-group assignments for this iteration
+            if game_mix:
+                iter_group_assignments = game_mix.assign_groups(args.groups_per_batch)
+            else:
+                iter_group_assignments = None  # single-game backward compat
+
             t_collect0 = time.time()
             samples, env_metrics = collect_grpo_rollouts(
                 backend=inference_backend,
@@ -730,6 +791,7 @@ def main():
                 temperature_range=temperature_range,
                 prefix_ratio=args.prefix_ratio,
                 compact_tools=args.compact_tools,
+                group_assignments=iter_group_assignments,
             )
             t_collect1 = time.time()
         else:
@@ -1179,6 +1241,18 @@ def main():
                 **env_metrics,
             }
 
+            # Per-game metrics (only meaningful in multi-game mode)
+            if game_mix:
+                per_game_rewards: Dict[str, List[float]] = defaultdict(list)
+                per_game_samples: Dict[str, int] = defaultdict(int)
+                for s in samples:
+                    gn = s.game_name or "unknown"
+                    per_game_rewards[gn].append(s.reward)
+                    per_game_samples[gn] += 1
+                for gn, rewards in per_game_rewards.items():
+                    logs[f"env/{gn}/avg_reward"] = sum(rewards) / len(rewards)
+                    logs[f"env/{gn}/num_samples"] = per_game_samples[gn]
+
             print(
                 f"[iter {it}] step={global_step} "
                 f"reward={avg_reward:.3f} avg_r={env_metrics['env/avg_reward_p0']:.3f} "
@@ -1193,6 +1267,9 @@ def main():
                 f"stats={t_stats - t_pad:.1f}s grad={t_train1 - t_stats:.1f}s "
                 f"pad_eff={pad_eff:.1%})"
             )
+            if game_mix:
+                parts = [f"{gn}={sum(r)/len(r):.3f}({len(r)})" for gn, r in per_game_rewards.items()]
+                print(f"  [mix] " + " | ".join(parts))
 
             if wandb:
                 wandb.log(logs, step=global_step)

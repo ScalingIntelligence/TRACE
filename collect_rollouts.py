@@ -87,11 +87,14 @@ OBSERVE_GAMES = {"multistep_task", "structured_data_reasoning"}
 # ---------------------------------------------------------------------------
 class VLLMClient:
     def __init__(self, base_url: str, model: str, max_tokens: int = 1024,
-                 temperature: float = 0.0):
+                 temperature: float = 0.0, top_p: float = None,
+                 top_k: int = None):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.top_p = top_p
+        self.top_k = top_k
         self.session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(pool_maxsize=128, pool_connections=128)
         self.session.mount("http://", adapter)
@@ -113,6 +116,10 @@ class VLLMClient:
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
         }
+        if self.top_p is not None:
+            payload["top_p"] = self.top_p
+        if self.top_k is not None:
+            payload["extra_body"] = {"top_k": self.top_k}
         resp = self.session.post(
             f"{self.base_url}/chat/completions",
             json=payload,
@@ -141,6 +148,10 @@ class VLLMClient:
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
         }
+        if self.top_p is not None:
+            payload["top_p"] = self.top_p
+        if self.top_k is not None:
+            payload["extra_body"] = {"top_k": self.top_k}
         resp = self.session.post(
             f"{self.base_url}/chat/completions",
             json=payload,
@@ -614,6 +625,10 @@ def main():
                              "(default: from game registry max_gen_tokens)")
     parser.add_argument("--temperature", type=float, default=0.0,
                         help="Temperature for agent LLM (default: 0.0)")
+    parser.add_argument("--top-p", type=float, default=None,
+                        help="Top-p (nucleus sampling) for agent LLM (default: None)")
+    parser.add_argument("--top-k", type=int, default=None,
+                        help="Top-k sampling for agent LLM (default: None)")
     parser.add_argument("--user-temperature", type=float, default=0.7,
                         help="Temperature for user LLM (default: 0.7)")
     # Sampling, selection, and filtering
@@ -636,6 +651,11 @@ def main():
     # structured_data_reasoning specific
     parser.add_argument("--difficulty", type=int, default=3,
                         help="Difficulty level for structured_data_reasoning (default: 3)")
+    # LoRA adapter
+    parser.add_argument("--lora-adapter-name", default=None,
+                        help="Name to register the LoRA adapter as on the vLLM server")
+    parser.add_argument("--lora-adapter-path", default=None,
+                        help="Path to the LoRA adapter directory (triggers dynamic loading)")
     # output
     parser.add_argument("--output-dir", default=None,
                         help="Output directory (default: /root/games/game_rollouts)")
@@ -663,9 +683,27 @@ def main():
     user_base_url = args.user_base_url or args.base_url
     user_model = args.user_model or args.model
 
+    # Load LoRA adapter if specified
+    effective_model = args.model
+    if args.lora_adapter_path:
+        lora_name = args.lora_adapter_name or "custom_adapter"
+        lora_path = args.lora_adapter_path
+        server_url = args.base_url.rstrip('/').replace('/v1', '')
+        load_url = f"{server_url}/v1/load_lora_adapter"
+
+        print(f"Loading LoRA adapter '{lora_name}' from: {lora_path}")
+        resp = requests.post(load_url, json={"lora_name": lora_name, "lora_path": lora_path}, timeout=60)
+        if resp.status_code == 200 or "already exists" in resp.text.lower():
+            print(f"  LoRA adapter '{lora_name}' ready")
+            effective_model = lora_name
+        else:
+            print(f"Failed to load LoRA adapter: {resp.status_code} - {resp.text}")
+            sys.exit(1)
+
     # Build agent client
-    client = VLLMClient(args.base_url, args.model, max_tokens,
-                        temperature=args.temperature)
+    client = VLLMClient(args.base_url, effective_model, max_tokens,
+                        temperature=args.temperature, top_p=args.top_p,
+                        top_k=args.top_k)
 
     # Build user client only for tool-calling games that need it
     user_client = None
@@ -680,12 +718,14 @@ def main():
     if args.output:
         output_path = Path(args.output)
     else:
-        output_dir = Path(args.output_dir) if args.output_dir else Path("/root/games/game_rollouts")
+        output_dir = Path(args.output_dir) if args.output_dir else Path("/home/ubuntu/hangook/games/game_rollouts")
         agent_short = args.model.split("/")[-1]
 
         # Build a descriptive filename that includes key params to avoid overwrites
         parts = [args.env]
-        if is_toolcall:
+        if effective_model != args.model:
+            parts.append(effective_model)  # LoRA adapter name
+        elif is_toolcall:
             user_short = user_model.split("/")[-1]
             parts.append(agent_short)
             parts.append(user_short)
@@ -718,7 +758,14 @@ def main():
 
     # Print config
     print(f"Environment:  {args.env}")
-    print(f"Agent model:  {args.model} @ {args.base_url} (temp={args.temperature})")
+    sampling_parts = [f"temp={args.temperature}"]
+    if args.top_p is not None:
+        sampling_parts.append(f"top_p={args.top_p}")
+    if args.top_k is not None:
+        sampling_parts.append(f"top_k={args.top_k}")
+    print(f"Agent model:  {effective_model} @ {args.base_url} ({', '.join(sampling_parts)})")
+    if effective_model != args.model:
+        print(f"  (LoRA adapter over base: {args.model})")
     if is_toolcall and args.env in TOOL_CALLING_WITH_USER:
         print(f"User  model:  {user_model} @ {user_base_url} (temp={args.user_temperature})")
     print(f"Max tokens:   {max_tokens} (registry: {game_spec.max_gen_tokens})")

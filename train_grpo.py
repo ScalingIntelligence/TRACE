@@ -103,6 +103,7 @@ class GRPOSample:
     group_id: int              # Group index (same seed → same group)
     game_id: int               # Unique game identifier
     tools: Optional[list] = None  # Tool schemas for structured games (train→eval alignment)
+    game_name: str = ""        # Name of the game that produced this sample
 
 
 # ============================================================================
@@ -124,6 +125,7 @@ def collect_grpo_rollouts(
     temperature_range: Optional[List[float]] = None,
     prefix_ratio: float = 0.0,
     compact_tools: bool = False,
+    group_assignments: Optional[List[Tuple[GameSpec, Dict[str, Any]]]] = None,
 ) -> Tuple[List[GRPOSample], Dict[str, float]]:
     """
     Collect rollouts with the GRPO inner/outer loop structure.
@@ -140,6 +142,9 @@ def collect_grpo_rollouts(
             (adversarial_policy game only). 0.0 = never, 1.0 = always.
         compact_tools: If True, use compressed tool schemas (descriptions stripped)
             for both generation and training. Reduces prompt length by ~60%.
+        group_assignments: Optional per-group (GameSpec, env_kwargs) overrides.
+            When set, each group uses its own game/kwargs instead of the global
+            game_spec/env_kwargs. Length must equal groups_per_batch.
 
     Returns:
         samples:  List of GRPOSample with group membership tagged.
@@ -147,6 +152,11 @@ def collect_grpo_rollouts(
     """
     rng = random.Random(base_seed)
     env_kwargs = env_kwargs or {}
+
+    # Build per-group assignments (backward compat: single game for all groups)
+    if group_assignments is None:
+        group_assignments = [(game_spec, env_kwargs)] * groups_per_batch
+    assert len(group_assignments) == groups_per_batch
 
     # ---- Outer loop: one seed per group ----
     group_seeds = [rng.randint(0, 2**31 - 1) for _ in range(groups_per_batch)]
@@ -162,6 +172,7 @@ def collect_grpo_rollouts(
     if backend.supports_batch():
         # --- Batch mode (vLLM) ---
         envs = []
+        env_game_specs: List[GameSpec] = []  # which GameSpec each env uses
         g_ids: List[int] = []        # group_id per env
         gm_ids: List[int] = []       # game_id per env
         # Each step tuple: (msgs, act, pid, completion, tools)
@@ -171,16 +182,18 @@ def collect_grpo_rollouts(
         game_temps: List[float] = []       # per-game temperature
         prefix_turns: List[int] = []       # per-game prefix count
         for g_idx, g_seed in enumerate(group_seeds):
+            g_spec, g_kwargs = group_assignments[g_idx]
+
             # Per-group prefix decision (same for all rollouts in group)
             use_prefix = False
-            if game_spec.name == "adversarial_policy" and prefix_ratio > 0:
+            if g_spec.name == "adversarial_policy" and prefix_ratio > 0:
                 use_prefix = rng.random() < prefix_ratio
 
             for s_idx in range(group_size):
-                env = game_spec.make_env(**env_kwargs)
+                env = g_spec.make_env(**g_kwargs)
                 # Assign random difficulty for adversarial_policy game
                 difficulty = None
-                if game_spec.name == "adversarial_policy":
+                if g_spec.name == "adversarial_policy":
                     difficulty = rng.choice(["easy", "medium", "hard"])
                     env.reset(g_seed, user_difficulty=difficulty)
                 else:
@@ -192,6 +205,7 @@ def collect_grpo_rollouts(
                     n_prefix = env.auto_play_prefix()
 
                 envs.append(env)
+                env_game_specs.append(g_spec)
                 g_ids.append(g_idx)
                 gm_ids.append(base_seed * 1_000_000 + g_idx * 1000 + s_idx)
                 episode_steps.append([])
@@ -218,31 +232,34 @@ def collect_grpo_rollouts(
                 pid = env.current_player
                 obs = env.observe(pid)
                 legal = env.legal_actions()
-                msgs = messages_for_game(pid, obs, game_spec, env=env)
+                msgs = messages_for_game(pid, obs, env_game_specs[i], env=env)
                 tools = tools_for_game(env, compact=compact_tools)
                 prompts.append(build_prompt_text(tokenizer, msgs, tools=tools))
                 meta.append((i, pid, obs, legal, msgs, tools))
 
             t0 = time.time()
 
-            # Group active games by temperature for sub-batch generation
-            temp_groups: Dict[float, List[Tuple[int, str]]] = {}
+            # Group active games by (game_spec, temperature) for sub-batch generation
+            # Different games have different stop_sequences and max_gen_tokens
+            gen_groups: Dict[Tuple[str, float], List[Tuple[int, str, GameSpec]]] = {}
             for j, (i, pid, obs, legal, msgs, tools) in enumerate(meta):
                 t = game_temps[i]
-                if t not in temp_groups:
-                    temp_groups[t] = []
-                temp_groups[t].append((j, prompts[j]))
+                key = (env_game_specs[i].name, t)
+                if key not in gen_groups:
+                    gen_groups[key] = []
+                gen_groups[key].append((j, prompts[j], env_game_specs[i]))
 
             completions: List[Optional[str]] = [None] * len(prompts)
-            for t, items in temp_groups.items():
-                batch_prompts = [p for _, p in items]
+            for (gs_name, t), items in gen_groups.items():
+                batch_prompts = [p for _, p, _ in items]
+                gs = items[0][2]  # All items in group share same GameSpec
                 results = backend.generate(
                     batch_prompts,
                     temperature=t,
-                    max_new_tokens=max_new_tokens,
-                    game_spec=game_spec,
+                    max_new_tokens=gs.max_gen_tokens,
+                    game_spec=gs,
                 )
-                for k, (j, _) in enumerate(items):
+                for k, (j, _, _) in enumerate(items):
                     completions[j] = results[k]
 
             t1 = time.time()
@@ -251,7 +268,7 @@ def collect_grpo_rollouts(
             step_data = []
             for j, (i, pid, obs, legal, msgs, tools) in enumerate(meta):
                 completion = completions[j]
-                act = game_spec.extract_action(completion, legal)
+                act = env_game_specs[i].extract_action(completion, legal)
                 if act is None:
                     extraction_failures += 1
 
@@ -287,7 +304,7 @@ def collect_grpo_rollouts(
 
             log_entry = {
                 "type": "game_end",
-                "game": game_spec.name,
+                "game": env_game_specs[i].name,
                 "game_id": gm_ids[i],
                 "group_id": g_ids[i],
                 "rewards": env.rewards,
@@ -309,21 +326,24 @@ def collect_grpo_rollouts(
                     group_id=g_ids[i],
                     game_id=gm_ids[i],
                     tools=tools,
+                    game_name=env_game_specs[i].name,
                 ))
 
     else:
         # --- Sequential mode (HF local) ---
         for g_idx, g_seed in enumerate(group_seeds):
+            g_spec, g_kwargs = group_assignments[g_idx]
+
             # Per-group prefix decision
             use_prefix = False
-            if game_spec.name == "adversarial_policy" and prefix_ratio > 0:
+            if g_spec.name == "adversarial_policy" and prefix_ratio > 0:
                 use_prefix = rng.random() < prefix_ratio
 
             for s_idx in range(group_size):
                 game_id = base_seed * 1_000_000 + g_idx * 1000 + s_idx
-                env = game_spec.make_env(**env_kwargs)
+                env = g_spec.make_env(**g_kwargs)
                 # Assign random difficulty for adversarial_policy game
-                if game_spec.name == "adversarial_policy":
+                if g_spec.name == "adversarial_policy":
                     difficulty = rng.choice(["easy", "medium", "hard"])
                     env.reset(g_seed, user_difficulty=difficulty)
                 else:
@@ -351,18 +371,18 @@ def collect_grpo_rollouts(
                         temperature=game_temp,
                         max_new_tokens=max_new_tokens,
                         device=backend.device,
-                        game_spec=game_spec,
+                        game_spec=g_spec,
                         env=env,
                         compact_tools=compact_tools,
                     )
 
-                    act = game_spec.extract_action(completion, legal)
+                    act = g_spec.extract_action(completion, legal)
                     if act is None:
                         extraction_failures += 1
 
                     tools = tools_for_game(env, compact=compact_tools)
                     response_lengths.append(len(completion))
-                    ep_steps.append((messages_for_game(pid, obs, game_spec, env=env), act, pid, completion, tools))
+                    ep_steps.append((messages_for_game(pid, obs, g_spec, env=env), act, pid, completion, tools))
                     env.step(act)
                     total_turns += 1
 
@@ -378,6 +398,7 @@ def collect_grpo_rollouts(
                         group_id=g_idx,
                         game_id=game_id,
                         tools=tools,
+                        game_name=g_spec.name,
                     ))
 
     # Metrics
