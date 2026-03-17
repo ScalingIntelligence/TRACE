@@ -38,7 +38,7 @@ set -x
 # -- Configurable via env vars --
 : "${DATA_DIR:=$HOME/data/skill_structured_data}"
 : "${NUM_GPUS:=8}"
-: "${MODEL:=Qwen/Qwen3-4B-Instruct-2507}"
+: "${MODEL:=Qwen/Qwen3-30B-A3B-Instruct-2507}"
 : "${LOGGER:=wandb}"
 
 # Auto-extract WANDB_API_KEY from .netrc if not set
