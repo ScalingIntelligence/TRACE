@@ -48,13 +48,14 @@ import torch
 import torch.nn.functional as F
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 from tqdm import tqdm
 
 from config import Config, setup_environment, autocast_ctx
 from ppo import logprob_action_tokens, pad_to_device, build_prompt_plus_action
 from sft_buffer import SFTBuffer
+from gumbel_topk import gumbel_kl_loss
 from dist_utils import (
     dist_pre_init, dist_nccl_init,
     dist_cleanup, is_main_rank, barrier,
@@ -139,6 +140,15 @@ def parse_args():
         help="Path to checkpoint directory to resume from")
     parser.add_argument("--output-dir", type=str, default=None,
         help="Output directory for checkpoints (default: auto)")
+
+    # -- Gumbel distillation regularization --
+    parser.add_argument("--kl-coef", type=float, default=0.0,
+        help="Gumbel distillation loss weight (0 = disabled). "
+             "Requires --gumbel-data from precompute_gumbel.py")
+    parser.add_argument("--gumbel-data", type=str, default=None,
+        help="Path to precomputed Gumbel top-k .pt file from precompute_gumbel.py")
+    parser.add_argument("--gumbel-k", type=int, default=None,
+        help="Override k for Gumbel soft targets (default: use all k from file)")
 
     # -- Logging --
     parser.add_argument("--log-every", type=int, default=10,
@@ -336,6 +346,120 @@ def logprob_packed(
 
 
 # ---------------------------------------------------------------------------
+# Gumbel data gathering for batches
+# ---------------------------------------------------------------------------
+
+def gather_gumbel_for_unpacked(
+    batch_indices: List[int],
+    sample_order: List[int],
+    gumbel_data: list,
+    k: int,
+    device: str,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Gather and concatenate Gumbel data for action positions in an unpacked batch.
+
+    Returns:
+        tokens:     [N_total, k] int64
+        log_probs:  [N_total, k] float32
+        thresholds: [N_total, k] float32
+    where N_total = sum of action position counts across batch items.
+    """
+    all_tok, all_lp, all_thr = [], [], []
+    for idx in batch_indices:
+        orig_idx = sample_order[idx]
+        gd = gumbel_data[orig_idx]
+        n_pos = gd["tokens"].shape[0]
+        if n_pos > 0:
+            all_tok.append(gd["tokens"][:, :k].to(torch.int64))
+            all_lp.append(gd["log_probs"][:, :k].float())
+            all_thr.append(gd["thresholds"][:, :k].float())
+
+    if not all_tok:
+        empty = torch.zeros(0, k, device=device)
+        return empty.long(), empty, empty
+
+    return (
+        torch.cat(all_tok).to(device),
+        torch.cat(all_lp).to(device),
+        torch.cat(all_thr).to(device),
+    )
+
+
+def gather_policy_logits_for_unpacked(
+    logits: torch.Tensor,
+    prompt_lens: List[int],
+    action_lens: List[int],
+) -> torch.Tensor:
+    """Extract policy logits at action-predicting positions for an unpacked batch.
+
+    Returns:
+        policy_logits: [N_total, V] where N_total = sum of action position counts.
+    """
+    parts = []
+    for i in range(logits.size(0)):
+        pl, al = prompt_lens[i], action_lens[i]
+        if al <= 0:
+            continue
+        l_start = max(0, pl - 1)
+        l_end = pl + al - 1
+        if l_end > l_start:
+            parts.append(logits[i, l_start:l_end, :])
+    if not parts:
+        return torch.zeros(0, logits.size(-1), device=logits.device)
+    return torch.cat(parts, dim=0)
+
+
+def gather_gumbel_for_packed(
+    pack_info: List[List[Tuple[int, int, int]]],
+    row_indices_list: List[List[int]],
+    sample_order: List[int],
+    gumbel_data: list,
+    k: int,
+    device: str,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Gather Gumbel data for action positions in a packed batch."""
+    all_tok, all_lp, all_thr = [], [], []
+    for row_indices, segments in zip(row_indices_list, pack_info):
+        for seq_local_idx, (_, _, al) in zip(row_indices, segments):
+            orig_idx = sample_order[seq_local_idx]
+            gd = gumbel_data[orig_idx]
+            n_pos = gd["tokens"].shape[0]
+            if n_pos > 0 and al > 0:
+                all_tok.append(gd["tokens"][:, :k].to(torch.int64))
+                all_lp.append(gd["log_probs"][:, :k].float())
+                all_thr.append(gd["thresholds"][:, :k].float())
+
+    if not all_tok:
+        empty = torch.zeros(0, k, device=device)
+        return empty.long(), empty, empty
+
+    return (
+        torch.cat(all_tok).to(device),
+        torch.cat(all_lp).to(device),
+        torch.cat(all_thr).to(device),
+    )
+
+
+def gather_policy_logits_for_packed(
+    logits: torch.Tensor,
+    pack_info: List[List[Tuple[int, int, int]]],
+) -> torch.Tensor:
+    """Extract policy logits at action-predicting positions for a packed batch."""
+    parts = []
+    for row_idx, segments in enumerate(pack_info):
+        for offset, pl, al in segments:
+            if al <= 0:
+                continue
+            l_start = max(0, offset + pl - 1)
+            l_end = offset + pl + al - 1
+            if l_end > l_start:
+                parts.append(logits[row_idx, l_start:l_end, :])
+    if not parts:
+        return torch.zeros(0, logits.size(-1), device=logits.device)
+    return torch.cat(parts, dim=0)
+
+
+# ---------------------------------------------------------------------------
 # Learning rate scheduler
 # ---------------------------------------------------------------------------
 
@@ -490,6 +614,28 @@ def main():
         total_samples = len(sft_buffer)
         print(f"[SFT] Truncated to first {args.max_samples} samples (--max-samples)")
 
+    # ---- Load precomputed Gumbel data (required for --kl-coef > 0) ----
+    gumbel_data = None
+    gumbel_k = None
+    if args.kl_coef > 0 and not args.gumbel_data:
+        raise ValueError(
+            "--kl-coef > 0 requires --gumbel-data. Run precompute_gumbel.py first."
+        )
+    if args.gumbel_data:
+        gumbel_file = torch.load(args.gumbel_data, map_location="cpu", weights_only=False)
+        gumbel_data = gumbel_file["data"]
+        gumbel_k = args.gumbel_k or gumbel_file["gumbel_k"]
+        if len(gumbel_data) != total_samples:
+            raise ValueError(
+                f"Gumbel data has {len(gumbel_data)} samples but SFT data has "
+                f"{total_samples}. They must match (same --sft-data and --max-samples)."
+            )
+        print(f"[Gumbel] Loaded precomputed data: k={gumbel_k}, "
+              f"{len(gumbel_data)} samples from {args.gumbel_data}")
+        if args.kl_coef <= 0:
+            print("[Gumbel] WARNING: --gumbel-data provided but --kl-coef is 0. "
+                  "Set --kl-coef > 0 to enable Gumbel distillation loss.")
+
     # ---- Optimizer ----
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optim = torch.optim.AdamW(
@@ -546,6 +692,9 @@ def main():
     print(f"  Max seq length:     {max_seq_len}")
     print(f"  Max grad norm:      {args.max_grad_norm}")
     print(f"  Compact tools:      {args.compact_tools}")
+    if args.kl_coef > 0:
+        print(f"  KL coef:            {args.kl_coef}")
+        print(f"  Gumbel k:           {gumbel_k}")
     print(f"  Device:             {device}")
     print(f"  Output dir:         {output_dir}")
     if world_size > 1:
@@ -574,6 +723,8 @@ def main():
             "pack_sequences": args.pack_sequences,
             "torch_compile": args.compile,
             "world_size": world_size,
+            "kl_coef": args.kl_coef,
+            "gumbel_k": gumbel_k,
         })
         print("[wandb] Initialized")
 
@@ -643,6 +794,7 @@ def main():
         optim.zero_grad(set_to_none=False)
 
         epoch_loss_acc = 0.0
+        epoch_kl_acc = 0.0
         epoch_tokens_acc = 0
         epoch_seqs_acc = 0
         local_fwd_count = 0  # forward passes (for averaging loss)
@@ -680,26 +832,43 @@ def main():
                         logp = logprob_packed(logits, mb_ids, pack_info, normalize_by_len=True)
 
                     sft_loss = -logp.mean()
-                    scaled_loss = sft_loss / accum_steps
+
+                    # Gumbel distillation regularization
+                    kl_loss = torch.tensor(0.0, device=device)
+                    if args.kl_coef > 0:
+                        pol_logits_flat = gather_policy_logits_for_packed(logits, pack_info)
+                        g_tok, g_lp, g_thr = gather_gumbel_for_packed(
+                            pack_info, batch_rows, sample_order,
+                            gumbel_data, gumbel_k, device,
+                        )
+                        kl_loss = gumbel_kl_loss(
+                            pol_logits_flat, g_tok, g_lp, g_thr, gumbel_k,
+                        )
+                        del pol_logits_flat, g_tok, g_lp, g_thr
+
+                    total_loss = sft_loss + args.kl_coef * kl_loss
+                    scaled_loss = total_loss / accum_steps
                     scaled_loss.backward()
 
                     with torch.no_grad():
                         batch_action_tokens = sum(al for segs in pack_info for _, _, al in segs)
                         batch_seq_count = sum(len(segs) for segs in pack_info)
                         epoch_loss_acc += float(sft_loss.item())
+                        epoch_kl_acc += float(kl_loss.item())
                         epoch_tokens_acc += batch_action_tokens
                         epoch_seqs_acc += batch_seq_count
                         local_fwd_count += 1
 
-                    del mb_ids, mb_pos, mb_attn, logits, outputs, logp, scaled_loss, sft_loss
+                    del mb_ids, mb_pos, mb_attn, logits, outputs, logp, scaled_loss, sft_loss, kl_loss, total_loss
 
                 except torch.cuda.OutOfMemoryError:
                     for v in ("mb_ids", "mb_pos", "mb_attn", "logits", "outputs",
-                              "logp", "scaled_loss", "sft_loss"):
+                              "logp", "scaled_loss", "sft_loss", "kl_loss",
+                              "total_loss"):
                         locals().pop(v, None)
                     torch.cuda.empty_cache()
                     if is_main_rank():
-                        print(f"[OOM] packed batch {step_in_epoch+1} — retrying rows individually")
+                        print(f"[OOM] packed batch {step_in_epoch+1} — retrying rows individually (distill skipped)")
 
                     # Retry: process each packed row one at a time
                     n_rows = len(batch_rows)
@@ -756,25 +925,44 @@ def main():
                         )
 
                     sft_loss = -logp.mean()
-                    scaled_loss = sft_loss / accum_steps
+
+                    # Gumbel distillation regularization
+                    kl_loss = torch.tensor(0.0, device=device)
+                    if args.kl_coef > 0:
+                        pol_logits_flat = gather_policy_logits_for_unpacked(
+                            logits, mb_pl, mb_al,
+                        )
+                        g_tok, g_lp, g_thr = gather_gumbel_for_unpacked(
+                            mb_idx, sample_order, gumbel_data,
+                            gumbel_k, device,
+                        )
+                        kl_loss = gumbel_kl_loss(
+                            pol_logits_flat, g_tok, g_lp, g_thr, gumbel_k,
+                        )
+                        del pol_logits_flat, g_tok, g_lp, g_thr
+
+                    total_loss = sft_loss + args.kl_coef * kl_loss
+                    scaled_loss = total_loss / accum_steps
                     scaled_loss.backward()
 
                     with torch.no_grad():
                         batch_action_tokens = sum(mb_al)
                         epoch_loss_acc += float(sft_loss.item())
+                        epoch_kl_acc += float(kl_loss.item())
                         epoch_tokens_acc += batch_action_tokens
                         epoch_seqs_acc += len(mb_al)
                         local_fwd_count += 1
 
-                    del mb_ids, mb_attn, logits, outputs, logp, scaled_loss, sft_loss
+                    del mb_ids, mb_attn, logits, outputs, logp, scaled_loss, sft_loss, kl_loss, total_loss
 
                 except torch.cuda.OutOfMemoryError:
                     for v in ("mb_ids", "mb_attn", "logits", "outputs",
-                              "logp", "scaled_loss", "sft_loss"):
+                              "logp", "scaled_loss", "sft_loss", "kl_loss",
+                              "total_loss"):
                         locals().pop(v, None)
                     torch.cuda.empty_cache()
                     if is_main_rank():
-                        print(f"[OOM] batch {step_in_epoch+1} — retrying {len(mb_idx)} samples individually")
+                        print(f"[OOM] batch {step_in_epoch+1} — retrying {len(mb_idx)} samples individually (distill skipped)")
 
                     n_samples = len(mb_idx)
                     batch_loss_acc = 0.0
@@ -812,6 +1000,7 @@ def main():
             if is_accum_boundary or is_last_step:
                 allreduce_coalesced_grads(trainable_params)
                 torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)
+                torch.cuda.empty_cache()
                 optim.step()
                 optim.zero_grad(set_to_none=False)
                 global_step += 1
@@ -819,9 +1008,13 @@ def main():
                 # Log at optimizer step boundaries
                 if is_main_rank() and global_step % args.log_every == 0:
                     avg_loss = epoch_loss_acc / max(1, local_fwd_count)
+                    kl_str = ""
+                    if args.kl_coef > 0:
+                        avg_kl = epoch_kl_acc / max(1, local_fwd_count)
+                        kl_str = f" kl={avg_kl:.4f}"
                     print(
                         f"[epoch {epoch}] step={global_step}/{total_steps} "
-                        f"loss={avg_loss:.4f} lr={lr:.2e} "
+                        f"loss={avg_loss:.4f}{kl_str} lr={lr:.2e} "
                         f"fwd={step_in_epoch + 1}/{len(my_batch_order)} "
                         f"seqs={epoch_seqs_acc}"
                     )
@@ -832,6 +1025,7 @@ def main():
         if world_size > 1:
             local_metrics = {
                 "loss": epoch_loss_acc,
+                "kl": epoch_kl_acc,
                 "tokens": float(epoch_tokens_acc),
                 "seqs": float(epoch_seqs_acc),
                 "n_fwd": float(local_fwd_count),
@@ -839,18 +1033,24 @@ def main():
             agg = allreduce_scalars(local_metrics)
             total_fwd = int(agg["n_fwd"])
             epoch_loss_acc = agg["loss"]
+            epoch_kl_acc = agg["kl"]
             epoch_tokens_acc = int(agg["tokens"])
             epoch_seqs_acc = int(agg["seqs"])
         else:
             total_fwd = local_fwd_count
 
         avg_epoch_loss = epoch_loss_acc / max(1, total_fwd)
+        avg_epoch_kl = epoch_kl_acc / max(1, total_fwd)
         epoch_time = t_epoch_end - t_epoch_start
 
         if is_main_rank():
+            kl_str = ""
+            if args.kl_coef > 0:
+                avg_total = avg_epoch_loss + args.kl_coef * avg_epoch_kl
+                kl_str = f" kl={avg_epoch_kl:.4f} total={avg_total:.4f}"
             print(
                 f"\n[Epoch {epoch}/{args.num_epochs}] "
-                f"avg_loss={avg_epoch_loss:.4f} "
+                f"avg_loss={avg_epoch_loss:.4f}{kl_str} "
                 f"seqs={epoch_seqs_acc:,} "
                 f"tokens={epoch_tokens_acc:,} "
                 f"fwd_passes={total_fwd} "
@@ -859,7 +1059,7 @@ def main():
             )
 
             if wandb:
-                wandb.log({
+                log_dict = {
                     "sft/epoch": epoch,
                     "sft/loss": avg_epoch_loss,
                     "sft/action_tokens": epoch_tokens_acc,
@@ -868,7 +1068,11 @@ def main():
                     "sft/epoch_time_sec": epoch_time,
                     "sft/fwd_passes": total_fwd,
                     "sft/optim_steps": global_step,
-                }, step=global_step)
+                }
+                if args.kl_coef > 0:
+                    log_dict["sft/kl_loss"] = avg_epoch_kl
+                    log_dict["sft/total_loss"] = avg_epoch_loss + args.kl_coef * avg_epoch_kl
+                wandb.log(log_dict, step=global_step)
 
         # ---- Save checkpoint ----
         if (epoch + 1) % args.save_every == 0 or epoch == args.num_epochs - 1:
