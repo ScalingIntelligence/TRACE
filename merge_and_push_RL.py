@@ -1,7 +1,7 @@
 import os
-os.environ["HF_HOME"] = "/workspace/.cache/huggingface"
-os.environ["TMPDIR"] = "/workspace/tmp"
-os.makedirs("/workspace/tmp", exist_ok=True)
+os.environ["HF_HOME"] = "/home/ubuntu/.cache/huggingface"
+os.environ["TMPDIR"] = "/home/ubuntu/tmp"
+os.makedirs("/home/ubuntu/tmp", exist_ok=True)
 
 from unsloth import FastLanguageModel
 from huggingface_hub import HfApi
@@ -10,13 +10,11 @@ import gc
 import shutil
 
 ADAPTER_PATHs = [
-    "/home/ubuntu/.cache/huggingface/adversarial_policy/grpo_ckpt_iter_20_20260313_181607","/home/ubuntu/.cache/huggingface/adversarial_policy/grpo_ckpt_iter_25_20260313_194228","/home/ubuntu/.cache/huggingface/adversarial_policy/grpo_ckpt_iter_30_20260313_210428","/home/ubuntu/.cache/huggingface/adversarial_policy/grpo_ckpt_iter_35_20260313_222857",                                                      
+    "/home/ubuntu/.cache/huggingface/default/sft/sft_ckpt_epoch_0_20260315_070421","/home/ubuntu/.cache/huggingface/default/sft/sft_ckpt_epoch_0_20260315_064157",                                                     
 ]                                                                   
 TARGET_REPOs = [                                                                                                          
-    "tarsur909/mix-multistep-structured-20",
-    "tarsur909/mix-multistep-structured-25",
-    "tarsur909/mix-multistep-structured-30",
-    "tarsur909/mix-multistep-structured-35",
+    "tarsur909/sft-distill-kl-mini",
+    "tarsur909/sft-distill-kl",
 ] 
 HF_TOKEN = "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"
 MAX_SEQ_LENGTH = 16000
@@ -36,7 +34,7 @@ for ADAPTER_PATH, TARGET_REPO in zip(ADAPTER_PATHs, TARGET_REPOs):
         use_exact_model_name=True,
     )
 
-    save_dir = f"/merged_upload/{TARGET_REPO.split('/')[-1]}"
+    save_dir = f"/home/ubuntu/merged_upload/{TARGET_REPO.split('/')[-1]}"
     print(f"Merging and saving to {save_dir}...")
     model.save_pretrained_merged(save_dir, tokenizer, save_method="merged_16bit")
 

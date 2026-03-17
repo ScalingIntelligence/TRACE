@@ -1,0 +1,69 @@
+# SkyRL training configuration for skill games
+#
+# Usage:
+#   1. Generate dataset:
+#      python skill_skyrl_dataset.py --output_dir ~/data/skill_games
+#
+#   2. Train:
+#      python skill_skyrl_train.py \
+#        --config skill_skyrl_config.yaml
+#
+#   Or override from CLI:
+#      python skill_skyrl_train.py \
+#        data.train_data=[~/data/skill_games/train.parquet] \
+#        ...
+
+data:
+  train_data:
+    - ~/data/skill_games/train.parquet
+  val_data:
+    - ~/data/skill_games/validation.parquet
+
+environment:
+  env_class: skill_game
+  skyrl_gym:
+    max_env_workers: 32
+    # Required for adversarial_policy / tau_tool_calling games.
+    # Can also be set via USER_LLM_BASE_URL / USER_LLM_MODEL env vars.
+    skill_game:
+      user_llm_base_url: null   # e.g. http://localhost:8001/v1
+      user_llm_model: null      # e.g. Qwen/Qwen2.5-7B-Instruct
+
+generator:
+  n_samples_per_prompt: 5
+  max_turns: 30
+  batched: false
+  use_conversation_multi_turn: true
+  sampling_params:
+    max_generate_length: 1024
+    temperature: 1.0
+    top_p: 1.0
+    stop: null
+  inference_engine:
+    backend: vllm
+    num_engines: 1
+    tensor_parallel_size: 1
+    gpu_memory_utilization: 0.85
+    enable_prefix_caching: true
+
+trainer:
+  policy:
+    model:
+      path: Qwen/Qwen2.5-7B-Instruct
+  algorithm:
+    advantage_estimator: grpo
+    use_kl_loss: true
+    kl_loss_coef: 0.001
+    grpo_norm_by_std: true
+  epochs: 1
+  train_batch_size: 64
+  policy_mini_batch_size: 16
+  micro_train_batch_size_per_gpu: 1
+  max_prompt_length: 4096
+  eval_interval: 5
+  eval_before_train: true
+  ckpt_interval: 10
+  seed: 42
+  project_name: skill_games
+  run_name: skill_grpo
+  logger: wandb
