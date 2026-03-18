@@ -2,54 +2,88 @@
 set -x
 
 # =============================================================================
-# SkyRL GRPO training — 3-game mix
+# SkyRL On-Policy Distillation — multi-skill with per-skill teacher routing
 #
-# Games: structured_data_reasoning (0.34), multistep_task (0.33), tau_tool_calling (0.33)
+# On-policy distillation (GLM-5 §3.5, Agarwal et al.):
+#   1. Student generates on-policy trajectories across skill games
+#   2. Per-skill teacher LoRAs (external vLLM server) grade each token
+#   3. Per-token reverse KL drives a clipped surrogate loss
+#   4. Student policy is updated, repeat
 #
-# Multi-turn games (multistep_task, tau_tool_calling) require:
-#   - max_turns=30, batched=false, use_conversation_multi_turn=true
-#   - A user LLM server for tau_tool_calling (set USER_LLM_BASE_URL)
-#   - GPU 7 reserved for user LLM → training on GPUs 0-6 (7 GPUs)
+# Teacher setup (run BEFORE this script):
+#   # Launch teacher vLLM server with all skill LoRA adapters:
+#   CUDA_VISIBLE_DEVICES=6 python -m vllm.entrypoints.openai.api_server \
+#     --model Qwen/Qwen3-30B-A3B-Instruct-2507 \
+#     --enable-lora --max-loras 5 --max-lora-rank 32 \
+#     --lora-modules \
+#       sdr_teacher=/path/to/structured_data_reasoning_adapter \
+#       mt_teacher=/path/to/multistep_task_adapter \
+#       tc_teacher=/path/to/tau_tool_calling_adapter \
+#     --port 9100 --max-model-len 8192 \
+#     --gpu-memory-utilization 0.9 --dtype bfloat16
 #
-# Prerequisites:
-#   1. Launch user LLM server on GPU 7:
-#      CUDA_VISIBLE_DEVICES=7 python -m vllm.entrypoints.openai.api_server \
-#        --model Qwen/Qwen3-4B-Instruct-2507 --port 8001 \
-#        --max-model-len 4096 --gpu-memory-utilization 0.9 --dtype bfloat16
+# User LLM (needed for tau_tool_calling, adversarial_policy):
+#   CUDA_VISIBLE_DEVICES=7 python -m vllm.entrypoints.openai.api_server \
+#     --model Qwen/Qwen3-4B-Instruct-2507 --port 8001 \
+#     --max-model-len 4096 --gpu-memory-utilization 0.9 --dtype bfloat16
 #
-#   2. Train (dataset is generated automatically if missing):
-#      bash run_skill_skyrl_mix3.sh
+# Run distillation (GPUs 0-5 for training):
+#   bash run_skill_skyrl_distill.sh
 #
-#   Override games or tag:
-#      GAMES="game_a game_b" GAME_TAG=mix_2game bash run_skill_skyrl_mix3.sh
+# Single-teacher mode (one teacher for all skills):
+#   TEACHER_ADAPTERS="my_teacher_lora" bash run_skill_skyrl_distill.sh
+#
+# Override games:
+#   GAMES="structured_data_reasoning multistep_task" bash run_skill_skyrl_distill.sh
 # =============================================================================
 
 # -- Configurable --
 : "${GAMES:=structured_data_reasoning multistep_task tau_tool_calling}"
-: "${GAME_TAG:=mix_3game}"
+: "${GAME_TAG:=distill_3skill}"
 : "${DATA_DIR:=$HOME/data/skill_${GAME_TAG}}"
-: "${NUM_GPUS:=7}"                          # GPU 7 reserved for user LLM
+: "${NUM_GPUS:=6}"                          # GPUs 6=teacher, 7=user LLM
 : "${MODEL:=Qwen/Qwen3-30B-A3B-Instruct-2507}"
 : "${LOGGER:=wandb}"
 : "${CKPT_DIR:=$HOME/ckpts/skill_${GAME_TAG}}"
-: "${RUN_NAME:=skill_${GAME_TAG}_grpo}"
+: "${RUN_NAME:=skill_${GAME_TAG}}"
+
+# -- Teacher configuration --
+: "${TEACHER_VLLM_URL:=http://localhost:9100}"
+: "${TEACHER_MODEL:=Qwen/Qwen3-30B-A3B-Instruct-2507}"
+# Per-skill adapter mapping: "skill_name=lora_name,..."
+# Use "__default__" or a single name for single-teacher mode
+: "${TEACHER_ADAPTERS:=structured_data_reasoning=sdr_teacher,multistep_task=mt_teacher,tau_tool_calling=tc_teacher}"
+: "${TEACHER_CONCURRENCY:=32}"
+
+# -- User LLM (for tau_tool_calling, adversarial_policy) --
 : "${USER_LLM_BASE_URL:=http://localhost:8001/v1}"
 : "${USER_LLM_MODEL:=Qwen/Qwen3-4B-Instruct-2507}"
+
+# -- Dataset seeds --
 : "${NUM_TRAIN_SEEDS:=500}"
 : "${NUM_VAL_SEEDS:=50}"
+
+# Export teacher config as env vars (read by SkillDistillationTrainer)
+export TEACHER_VLLM_URL
+export TEACHER_MODEL
+export TEACHER_ADAPTERS
+export TEACHER_CONCURRENCY
 
 # Auto-extract WANDB_API_KEY from .netrc if not set
 if [ -z "$WANDB_API_KEY" ] && [ -f "$HOME/.netrc" ]; then
   export WANDB_API_KEY=$(awk '/api.wandb.ai/{getline; getline; print $2}' "$HOME/.netrc")
 fi
 
-# Restrict training to GPUs 0-6 (GPU 7 = user LLM server)
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6
+# Restrict training to GPUs 0..NUM_GPUS-1
+GPU_LIST=$(seq -s, 0 $((NUM_GPUS - 1)))
+export CUDA_VISIBLE_DEVICES=${GPU_LIST}
 
-# -- GRPO structure --
-N_SAMPLES=8                   # lower than 16 to keep batch manageable with multi-turn
-TRAIN_BATCH_SIZE=56           # 8 groups × 7 (divisible by NUM_GPUS=7)
-POLICY_MINI_BATCH_SIZE=56     # = train_batch_size (single mini-batch per step)
+# -- Distillation structure --
+# group_size=1 equivalent: n_samples_per_prompt=1 (each prompt gets 1 rollout)
+# For distillation, dense token-level signal replaces group-relative advantages
+N_SAMPLES=1
+TRAIN_BATCH_SIZE=$((NUM_GPUS * 8))     # 48 for 6 GPUs
+POLICY_MINI_BATCH_SIZE=${TRAIN_BATCH_SIZE}
 
 cd "$(dirname "$0")"
 
@@ -65,7 +99,7 @@ if [ ! -f "${DATA_DIR}/train.parquet" ] || [ ! -f "${DATA_DIR}/validation.parque
     --output_dir "${DATA_DIR}"
 fi
 
-python skill_skyrl_train.py \
+python skill_skyrl_distill.py \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
   environment.env_class=skill_game \
@@ -94,16 +128,16 @@ python skill_skyrl_train.py \
   trainer.policy.model.lora.rank=32 \
   trainer.policy.model.lora.alpha=32 \
   \
-  trainer.algorithm.advantage_estimator=grpo \
-  trainer.algorithm.use_kl_loss=true \
-  trainer.algorithm.kl_loss_coef=0.001 \
+  trainer.algorithm.advantage_estimator=no_op \
+  trainer.algorithm.policy_loss_type=importance_sampling \
+  trainer.algorithm.use_kl_loss=false \
   trainer.algorithm.use_kl_in_reward=false \
   trainer.algorithm.eps_clip_low=0.2 \
   trainer.algorithm.eps_clip_high=0.2 \
-  trainer.algorithm.grpo_norm_by_std=true \
-  trainer.algorithm.zero_variance_filter=true \
+  trainer.algorithm.grpo_norm_by_std=false \
+  trainer.algorithm.zero_variance_filter=false \
   \
-  trainer.policy.optimizer_config.lr=3e-5 \
+  trainer.policy.optimizer_config.lr=1e-5 \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
   trainer.policy.optimizer_config.weight_decay=0.01 \
   \
@@ -133,7 +167,7 @@ python skill_skyrl_train.py \
   trainer.use_sample_packing=true \
   \
   trainer.logger=${LOGGER} \
-  trainer.project_name=skill_games \
+  trainer.project_name=skill_distillation \
   trainer.run_name=${RUN_NAME} \
   trainer.resume_mode=null \
   trainer.ckpt_path=${CKPT_DIR} \

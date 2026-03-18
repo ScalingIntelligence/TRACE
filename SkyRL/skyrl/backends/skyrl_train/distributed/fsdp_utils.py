@@ -560,10 +560,16 @@ def collect_lora_params(module: FSDP) -> OrderedDict:
         with FSDP.summon_full_params(module, writeback=False):
             # If base model is synced, we can get the full state dict from peft model
             lora_params = get_peft_model_state_dict(peft_model)
-            lora_params = {
-                name: param.full_tensor().detach().cpu() if hasattr(param, "full_tensor") else param.detach().cpu()
-                for name, param in lora_params.items()
-            }
+            def _collect_param(param):
+                if hasattr(param, "full_tensor"):
+                    # With cpu_offload, params may be DTensors on CPU;
+                    # full_tensor() requires NCCL (GPU), so move to CUDA first.
+                    if param.device.type == "cpu":
+                        param = param.cuda()
+                    return param.full_tensor().detach().cpu()
+                return param.detach().cpu()
+
+            lora_params = {name: _collect_param(param) for name, param in lora_params.items()}
         torch.cuda.empty_cache()
     else:
         lora_params = get_peft_model_state_dict(peft_model)
