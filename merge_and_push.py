@@ -9,16 +9,18 @@ import gc
 import shutil
 
 ADAPTER_PATHs = [
-    "/home/ubuntu/.cache/huggingface/adversarial_policy/grpo_ckpt_iter_20_20260313_181607",
-    "/home/ubuntu/.cache/huggingface/adversarial_policy/grpo_ckpt_iter_25_20260313_194228",
-    "/home/ubuntu/.cache/huggingface/adversarial_policy/grpo_ckpt_iter_30_20260313_210428",
-    "/home/ubuntu/.cache/huggingface/adversarial_policy/grpo_ckpt_iter_35_20260313_222857",
+    "/home/ubuntu/.cache/huggingface/mixed_3games/grpo_ckpt_iter_10_20260315_121105",
+    "/home/ubuntu/.cache/huggingface/mixed_3games/grpo_ckpt_iter_15_20260315_133205",
+    "/home/ubuntu/.cache/huggingface/mixed_3games/grpo_ckpt_iter_20_20260315_144145",
+    "/home/ubuntu/.cache/huggingface/mixed_3games/grpo_ckpt_iter_25_20260315_160611",
+    "/home/ubuntu/.cache/huggingface/mixed_3games/grpo_ckpt_iter_30_20260315_171940"
 ]
 TARGET_REPOs = [
-    "tarsur909/mix-multistep-structured-20",
-    "tarsur909/mix-multistep-structured-25",
-    "tarsur909/mix-multistep-structured-30",
-    "tarsur909/mix-multistep-structured-35",
+    "tarsur909/mix-std-tool-multi-step-10",
+    "tarsur909/mix-std-tool-multi-step-15",
+    "tarsur909/mix-std-tool-multi-step-20",
+    "tarsur909/mix-std-tool-multi-step-25",
+    "tarsur909/mix-std-tool-multi-step-30",
 ]
 HF_TOKEN = "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"
 MAX_SEQ_LENGTH = 16000

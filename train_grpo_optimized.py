@@ -306,7 +306,7 @@ def parse_grpo_args_optimized():
     )
 
     # -- Game and model --
-    parser.add_argument("--game", type=str, default="adversarial_policy",
+    parser.add_argument("--game", type=str, default="mixed_3games",
         help="Game to train on (from game_registry)")
     parser.add_argument("--games", type=str, default=None,
         help="Multi-game mix (e.g. 'structured_data_reasoning:0.5,multistep_task:0.25,"

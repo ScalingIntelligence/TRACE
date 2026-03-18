@@ -43,6 +43,15 @@ from multistep_task_game import (
     SYSTEM_PROMPT as SYSTEM_PROMPT_MULTISTEP,
 )
 
+try:
+    from precondition_game import (
+        PreconditionGame,
+        extract_action as extract_action_precondition,
+        SYSTEM_PROMPT as SYSTEM_PROMPT_PRECONDITION,
+    )
+except ImportError:
+    PreconditionGame = None
+
 
 class GameEnv(Protocol):
     """Minimal interface expected by the PPO + self-play loop."""
@@ -202,6 +211,27 @@ def _register_builtin_games() -> None:
             max_gen_tokens=1024,
         )
     )
+
+    # Precondition Verification — targets policy compliance failures
+    # Tests whether the model checks policy rules before executing actions.
+    # Uses same airline tools/DB/policy as tau2-bench. 20 tasks (12 REFUSE + 8 ALLOW).
+    if PreconditionGame is not None:
+        def make_precondition(user_client=None) -> PreconditionGame:
+            return PreconditionGame(
+                max_steps=20, user_client=user_client,
+            )
+
+        register_game(
+            GameSpec(
+                name="precondition_check",
+                make_env=make_precondition,
+                extract_action=extract_action_precondition,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_PRECONDITION,
+                max_gen_tokens=1024,
+            )
+        )
 
 
 _register_builtin_games()

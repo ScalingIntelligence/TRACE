@@ -185,6 +185,83 @@ def logprob_action_tokens(
     return summed
 
 
+def per_token_action_logprobs(
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    prompt_lens: List[int],
+    action_lens: List[int],
+    chunk_size: int = 512,
+) -> List[torch.Tensor]:
+    """
+    Compute per-token log probabilities for action regions (memory-efficient chunked).
+
+    Same chunked cross-entropy approach as logprob_action_tokens, but returns
+    individual per-token logprobs instead of summing into a scalar per sample.
+
+    Args:
+        logits: Model output logits [B, T, V]
+        input_ids: Input token IDs [B, T]
+        prompt_lens: Length of prompt for each sample
+        action_lens: Length of action for each sample
+        chunk_size: Number of positions to process at once
+
+    Returns:
+        List of B tensors, each of shape [action_lens[i]], on the same device as logits.
+    """
+    B, T, V = logits.shape
+    device = logits.device
+
+    if T < 2:
+        return [torch.zeros(al, device=device, dtype=torch.float32) for al in action_lens]
+
+    prompt_lens_t = torch.tensor(prompt_lens, device=device, dtype=torch.long)
+    action_lens_t = torch.tensor(action_lens, device=device, dtype=torch.long)
+
+    # Action boundaries in shifted indexing (logits at pos P-1 predict token at pos P)
+    action_start = (prompt_lens_t - 1).clamp(min=0)  # [B]
+    action_end = (action_start + action_lens_t).clamp(max=T - 1)  # [B]
+
+    # Pre-allocate per-token result tensors
+    results = [torch.zeros(al, device=device, dtype=torch.float32) for al in action_lens]
+
+    global_start = int(action_start.min().item())
+    global_end = int(action_end.max().item())
+
+    for chunk_start in range(global_start, global_end, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, global_end, T - 1)
+        if chunk_end <= chunk_start:
+            continue
+
+        chunk_logits = logits[:, chunk_start:chunk_end, :]  # [B, chunk_len, V]
+        chunk_labels = input_ids[:, chunk_start + 1:chunk_end + 1]  # [B, chunk_len]
+        chunk_len = chunk_end - chunk_start
+
+        flat_logits = chunk_logits.reshape(-1, V)
+        flat_labels = chunk_labels.reshape(-1).clamp(0, V - 1)
+
+        chunk_nll = F.cross_entropy(flat_logits, flat_labels, reduction='none')
+        chunk_logp = -chunk_nll.view(B, chunk_len)
+
+        del chunk_logits, chunk_labels, flat_logits, flat_labels, chunk_nll
+
+        # Scatter per-token logprobs into result tensors
+        chunk_positions = torch.arange(chunk_start, chunk_end, device=device)  # [chunk_len]
+        for i in range(B):
+            a_s = int(action_start[i].item())
+            a_e = int(action_end[i].item())
+            # Positions in this chunk that fall within sample i's action region
+            mask = (chunk_positions >= a_s) & (chunk_positions < a_e)
+            if not mask.any():
+                continue
+            # Offset into the result tensor
+            local_pos = chunk_positions[mask] - a_s
+            results[i][local_pos] = chunk_logp[i][mask].float()
+
+        del chunk_logp
+
+    return results
+
+
 def values_from_hidden(last_hidden: torch.Tensor, value_head, prompt_lens: List[int]) -> torch.Tensor:
     """
     Extract value predictions from hidden states (vectorized implementation).
