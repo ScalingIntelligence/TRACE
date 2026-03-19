@@ -75,9 +75,9 @@ from game_registry import get_game_spec, list_game_names
 
 
 # Tool-calling games use LLM user for multi-turn conversation
-TOOL_CALLING_GAMES = {"adversarial_policy", "tau_tool_calling", "structured_data_v2"}
+TOOL_CALLING_GAMES = {"adversarial_policy", "tau_tool_calling", "structured_data_v2", "precondition_check"}
 # Tool-calling games that need an LLM user client
-TOOL_CALLING_WITH_USER = {"adversarial_policy", "tau_tool_calling"}
+TOOL_CALLING_WITH_USER = {"adversarial_policy", "tau_tool_calling", "precondition_check"}
 # Observation-based games use observe()/step() interface
 OBSERVE_GAMES = {"multistep_task", "structured_data_reasoning"}
 
@@ -463,7 +463,7 @@ def _print_toolcall_progress(args, result, seed, sample_idx, num_samples,
     r = result.get("reward", 0)
     err = " ERROR" if "error" in result else ""
 
-    if args.env in ("tau_tool_calling", "structured_data_v2"):
+    if args.env in ("tau_tool_calling", "structured_data_v2", "precondition_check"):
         domain = result.get("domain", "?")
         stype = result.get("scenario_type", result.get("error", "err"))[:14]
         print(f"  [{passed_seeds:3d}/{completed_seeds}/{total_seeds}] "
@@ -817,6 +817,9 @@ def main():
         elif args.env == "structured_data_v2":
             from structured_data_new_game import StructuredDataGame as SDGameV2
             return SDGameV2(domain=args.domain)
+        elif args.env == "precondition_check":
+            from precondition_game.game import PreconditionGame
+            return PreconditionGame(max_steps=20, user_client=user_client)
         else:
             raise ValueError(f"Unknown env: {args.env}")
 
