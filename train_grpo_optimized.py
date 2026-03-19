@@ -430,7 +430,7 @@ def parse_grpo_args_optimized():
 def build_env_kwargs(game_spec: GameSpec, args) -> Dict[str, Any]:
     """Build env_kwargs for a single GameSpec from CLI args."""
     kwargs: Dict[str, Any] = {}
-    if args.user_llm_url and game_spec.name in ("adversarial_policy", "tau_tool_calling"):
+    if args.user_llm_url and game_spec.name in ("adversarial_policy", "tau_tool_calling", "precondition_check"):
         from adversarial_policy_game import UserLLMClient
         kwargs["user_client"] = UserLLMClient(
             base_url=args.user_llm_url,
