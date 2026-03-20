@@ -139,6 +139,14 @@ def parse_distill_args():
              "LoRA names must match --lora-modules on the teacher vLLM server.")
     parser.add_argument("--teacher-concurrency", type=int, default=16,
         help="Max concurrent requests to teacher vLLM server")
+    parser.add_argument("--teacher-max-loras", type=int, default=None,
+        help="Max LoRA adapters loaded simultaneously on the teacher server. "
+             "When set, adapters are hot-swapped between query batches. "
+             "Requires --teacher-adapter-paths.")
+    parser.add_argument("--teacher-adapter-paths", type=str, default=None,
+        help="LoRA adapter disk paths for hot-swapping, format: 'lora_name=/path,...'. "
+             "Required when --teacher-max-loras is set. "
+             "Names must match those in --teacher-adapters.")
 
     # -- Loss function --
     parser.add_argument("--loss-type", type=str, default="reverse_kl",
@@ -292,6 +300,46 @@ def get_skill_value(
 # vLLM teacher logprob query (per-skill routing)
 # ============================================================================
 
+def _swap_teacher_adapters(
+    teacher_url: str,
+    to_load: Dict[str, str],
+    to_unload: List[str],
+    timeout: int = 60,
+) -> None:
+    """Hot-swap LoRA adapters on the teacher vLLM server.
+
+    Unloads old adapters first, then loads new ones.  Each load is preceded
+    by a best-effort unload to handle adapters already present on the server
+    (e.g. pre-loaded via --lora-modules at server startup).
+    """
+    for name in to_unload:
+        try:
+            requests.post(
+                f"{teacher_url}/v1/unload_lora_adapter",
+                json={"lora_name": name},
+                timeout=timeout,
+            )
+        except Exception:
+            pass
+
+    for name, path in to_load.items():
+        # Best-effort unload first (handles pre-loaded adapters)
+        try:
+            requests.post(
+                f"{teacher_url}/v1/unload_lora_adapter",
+                json={"lora_name": name},
+                timeout=timeout,
+            )
+        except Exception:
+            pass
+        resp = requests.post(
+            f"{teacher_url}/v1/load_lora_adapter",
+            json={"lora_name": name, "lora_path": path},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+
+
 def _fetch_logprobs_one(
     teacher_url: str,
     model_name: str,
@@ -340,6 +388,11 @@ def query_teacher_logprobs_vllm(
     game_names: List[str],
     concurrency: int = 16,
     timeout: int = 120,
+    teacher_max_loras: Optional[int] = None,
+    teacher_adapter_paths: Optional[Dict[str, str]] = None,
+    rank: int = 0,
+    world_size: int = 1,
+    dist_barrier: Optional[Any] = None,
 ) -> torch.Tensor:
     """Query vLLM teacher(s) for per-token action logprobs with per-skill routing.
 
@@ -347,6 +400,9 @@ def query_teacher_logprobs_vllm(
       - teacher_urls: per-skill URL mapping (or single __default__)
       - teacher_adapters (LoRA name) takes priority over teacher_models for model name
       - teacher_models: per-skill model name mapping (or single __default__)
+
+    When teacher_max_loras is set, hot-swaps LoRA adapters on the teacher
+    server in chunks to stay within the server's --max-loras limit.
 
     Only queries samples at `sample_indices` (this rank's shard).
     Returns padded tensor [N, max_al] with zeros for non-shard samples
@@ -369,17 +425,87 @@ def query_teacher_logprobs_vllm(
         )
         return idx, lps
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
-        futures = {executor.submit(fetch_one, i): i for i in sample_indices}
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                idx, lps = future.result()
-                al = action_lens[idx]
-                result[idx, :al] = lps[:al]
-            except Exception as e:
-                orig_idx = futures[future]
-                print(f"[Teacher vLLM] Error for sample {orig_idx} "
-                      f"(game={game_names[orig_idx]}): {e}")
+    def _query_batch(indices: List[int]) -> None:
+        """Fire concurrent queries for a batch of sample indices."""
+        if not indices:
+            return
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = {executor.submit(fetch_one, i): i for i in indices}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    idx, lps = future.result()
+                    al = action_lens[idx]
+                    result[idx, :al] = lps[:al]
+                except Exception as e:
+                    orig_idx = futures[future]
+                    print(f"[Teacher vLLM] Error for sample {orig_idx} "
+                          f"(game={game_names[orig_idx]}): {e}")
+
+    # --- No hot-swap: original path (all adapters pre-loaded on server) ---
+    if teacher_max_loras is None or not teacher_adapter_paths:
+        _query_batch(sample_indices)
+        return result
+
+    # --- Hot-swap path: group by adapter, process in chunks ---
+    my_indices_set = set(sample_indices)
+
+    # Group ALL samples (not just this rank's) by adapter for deterministic
+    # chunking — all ranks must agree on the same chunks for barrier sync.
+    all_lora_groups: Dict[str, List[int]] = defaultdict(list)
+    non_lora_indices: List[int] = []
+    for idx in range(N):
+        skill = game_names[idx]
+        adapter_name = get_skill_value(skill, teacher_adapters, "")
+        if adapter_name and adapter_name in teacher_adapter_paths:
+            all_lora_groups[adapter_name].append(idx)
+        else:
+            non_lora_indices.append(idx)
+
+    # Query non-LoRA samples immediately (base model, no swap needed)
+    _query_batch([i for i in non_lora_indices if i in my_indices_set])
+
+    unique_adapters = sorted(all_lora_groups.keys())
+    if not unique_adapters:
+        return result
+
+    # Resolve teacher base URL for swap API calls
+    swap_url = (teacher_urls.get("__default__")
+                or next(iter(teacher_urls.values())))
+
+    # Chunk adapters into groups of teacher_max_loras
+    adapter_chunks = [
+        unique_adapters[i:i + teacher_max_loras]
+        for i in range(0, len(unique_adapters), teacher_max_loras)
+    ]
+
+    loaded: set = set()
+
+    for ci, chunk in enumerate(adapter_chunks):
+        chunk_set = set(chunk)
+        to_unload = [n for n in loaded if n not in chunk_set]
+        to_load = {n: teacher_adapter_paths[n]
+                   for n in chunk if n not in loaded}
+
+        if to_unload or to_load:
+            # Only rank 0 performs the swap; all ranks wait for completion
+            if rank == 0:
+                t0 = time.time()
+                _swap_teacher_adapters(swap_url, to_load, to_unload)
+                print(f"[Teacher swap] chunk {ci+1}/{len(adapter_chunks)}: "
+                      f"-{to_unload} +{list(to_load)} ({time.time() - t0:.1f}s)")
+            if dist_barrier and world_size > 1:
+                dist_barrier()
+            loaded = (loaded - set(to_unload)) | set(to_load)
+
+        # Collect this rank's indices for this chunk's adapters
+        chunk_all_indices = []
+        for adapter_name in chunk:
+            chunk_all_indices.extend(all_lora_groups[adapter_name])
+        _query_batch([i for i in chunk_all_indices if i in my_indices_set])
+
+        # Barrier: ensure all ranks finish querying before next swap
+        if dist_barrier and world_size > 1:
+            dist_barrier()
 
     return result
 
@@ -402,6 +528,7 @@ def main():
     teacher_urls = parse_skill_mapping(args.teacher_url or "")
     teacher_models = parse_skill_mapping(args.teacher_model or "")
     teacher_adapters = parse_skill_mapping(args.teacher_adapters or "")
+    teacher_adapter_paths = parse_skill_mapping(args.teacher_adapter_paths or "")
     has_teacher_url = bool(teacher_urls)
 
     # Validate teacher args
@@ -411,6 +538,14 @@ def main():
         raise ValueError("--teacher-model or --teacher-adapters required with --teacher-url")
     if teacher_adapters and not has_teacher_url:
         raise ValueError("--teacher-adapters requires --teacher-url")
+    if args.teacher_max_loras is not None and not teacher_adapter_paths:
+        raise ValueError("--teacher-max-loras requires --teacher-adapter-paths")
+    if args.teacher_max_loras is not None:
+        for skill, adapter_name in teacher_adapters.items():
+            if adapter_name not in teacher_adapter_paths:
+                raise ValueError(
+                    f"--teacher-adapter-paths missing path for adapter '{adapter_name}' "
+                    f"(skill '{skill}'). Have: {list(teacher_adapter_paths.keys())}")
 
     # Apply distributed LR scaling
     if world_size > 1 and args.dist_lr_scale != 1.0:
@@ -497,6 +632,11 @@ def main():
         print(f"  Teacher adapters:")
         for skill, lora in teacher_adapters.items():
             print(f"    {skill} -> {lora}")
+    if args.teacher_max_loras:
+        print(f"  Teacher max LoRAs:   {args.teacher_max_loras} (hot-swap enabled)")
+        print(f"  Adapter paths:")
+        for name, path in teacher_adapter_paths.items():
+            print(f"    {name} -> {path}")
     print(f"  Rollouts/iter:       {total_rollouts_per_iter} (group_size=1)")
     print(f"  LoRA rank:           {args.lora_rank}")
     print(f"  LoRA alpha:          {args.lora_alpha}")
@@ -848,6 +988,11 @@ def main():
                     max_al=max_al,
                     game_names=game_names,
                     concurrency=args.teacher_concurrency,
+                    teacher_max_loras=args.teacher_max_loras,
+                    teacher_adapter_paths=teacher_adapter_paths if args.teacher_max_loras else None,
+                    rank=rank,
+                    world_size=world_size,
+                    dist_barrier=barrier,
                 )
             else:
                 # --- Local teacher: adapter switch or base model ---

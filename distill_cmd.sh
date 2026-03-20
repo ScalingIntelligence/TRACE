@@ -1,7 +1,7 @@
 #!/bin/bash
 # On-policy distillation (GLM-5 §3.5 / SkyRL-style)
 #
-# Three teacher modes (uncomment the one you need):
+# Five teacher modes (uncomment the one you need):
 #
 # Mode A: Single teacher model on one vLLM server
 #   - vLLM port 8080: student base model (rollout generation)
@@ -15,6 +15,13 @@
 #
 # Mode C: Local LoRA adapter as teacher (no extra vLLM server)
 #   - vLLM port 8080: student base model (rollout generation)
+#
+# Mode D: Multiple teacher LoRAs pre-loaded on one multi-LoRA vLLM server
+#   - All adapters loaded at server start (--max-loras 4), needs TP=2 or large GPU
+#
+# Mode E: Hot-swap LoRA adapters on one vLLM server (memory-efficient Mode D)
+#   - Only 2 adapters loaded at a time (--max-loras 2), fits on single GPU
+#   - Training script swaps adapters between query batches
 #
 # 5 training GPUs (3,4,5,6,7)
 
@@ -70,48 +77,93 @@
 
 # ---- Mode D: Multiple teacher LoRAs on one multi-LoRA vLLM server (uncomment to use) ----
 # Like Mode B but uses per-skill LoRA adapters on a single vLLM server
-# instead of separate vLLM servers per teacher.
+# instead of separate vLLM servers per teacher.  All adapters pre-loaded.
 #   - vLLM port 9000: student base model (rollout generation)
 #   - vLLM port 9001: teacher base model + LoRA adapters (logprob queries)
 #   - vLLM port 9002: user LLM
 #   - LoRA names must match --lora-modules on the teacher vLLM server
+#   - Requires --max-loras >= number of adapters (4 here); needs TP=2 or large GPU
 #
 # Teacher vLLM server launch (port 9001):
-  # python -m vllm.entrypoints.openai.api_server \
-  #   --model Qwen/Qwen3-30B-A3B-Instruct-2507 \
-  #   --enable-lora --max-loras 4 --max-lora-rank 16 \
-  #   --lora-modules \
-  #     sdr_teacher=/home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_40_20260308_080312 \
-  #     mt_teacher=/home/ubuntu/.cache/huggingface/multistep_task/grpo_ckpt_iter_30_20260318_182920 \
-  #     tc_teacher=/home/ubuntu/.cache/huggingface/tau_tool_calling/grpo_ckpt_iter_40_20260311_030533 \
-  #     pre_teacher=/home/ubuntu/.cache/huggingface/precondition/grpo_ckpt_iter_40_20260319_035848 \
-  #   --port 9001 --max-model-len 32000 \
-  #   --gpu-memory-utilization 0.9 --dtype bfloat16
+#   python -m vllm.entrypoints.openai.api_server \
+#     --model Qwen/Qwen3-30B-A3B-Instruct-2507 \
+#     --enable-lora --max-loras 4 --max-lora-rank 16 \
+#     --lora-modules \
+#       sdr_teacher=/home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_40_20260308_080312 \
+#       mt_teacher=/home/ubuntu/.cache/huggingface/multistep_task/grpo_ckpt_iter_30_20260318_182920 \
+#       tc_teacher=/home/ubuntu/.cache/huggingface/tau_tool_calling/grpo_ckpt_iter_40_20260311_030533 \
+#       pre_teacher=/home/ubuntu/.cache/huggingface/precondition/grpo_ckpt_iter_40_20260319_035848 \
+#     --port 9001 --max-model-len 32000 \
+#     --gpu-memory-utilization 0.9 --dtype bfloat16
 #
-CUDA_VISIBLE_DEVICES=4,5,6,7 \
+CUDA_VISIBLE_DEVICES=3,4,5,6,7 \
   NCCL_P2P_DISABLE=1 \
   WANDB_API_KEY=f4ef099e7073d103963e5c986e4f818f5a526ee8 \
   WANDB_PROJECT=games \
   VLLM_BASE_URLS=http://localhost:9000 \
-  VLLM_MODEL=tarsur909/merged-tc-sd-ms-pre \
+  VLLM_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507 \
   VLLM_TIMEOUT_S=2000 \
   VLLM_ALLOW_RUNTIME_LORA_UPDATING=True \
   PYTHONUNBUFFERED=1 \
-  torchrun --nproc_per_node=4 --master-port 29501 train_distill.py \
+  torchrun --nproc_per_node=5 --master-port 29501 train_distill.py \
     --teacher-url http://localhost:9001 \
     --teacher-model Qwen/Qwen3-30B-A3B-Instruct-2507 \
     --teacher-adapters "structured_data_reasoning=sdr_teacher,multistep_task=mt_teacher,tau_tool_calling=tc_teacher,precondition_check=pre_teacher" \
     --teacher-concurrency 16 \
     --loss-type ppo_surrogate \
     --games "structured_data_reasoning:0.25,multistep_task:0.25,tau_tool_calling:0.25,precondition_check:0.25" \
-    --model tarsur909/merged-tc-sd-ms-pre \
+    --model Qwen/Qwen3-30B-A3B-Instruct-2507 \
     --compact-tools \
     --groups-per-batch 32 \
     --temperature 1.0 \
     --lr 1e-5 \
     --mini-batch-size 2 \
     --stats-chunk-size 2 \
-    --save-every 5 --user-llm-url http://localhost:9002/v1 --user-llm-model "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    --save-every 5 --user-llm-url http://localhost:9001/v1 --user-llm-model "Qwen/Qwen3-30B-A3B-Instruct-2507"
+
+# ---- Mode E: Hot-swap LoRA adapters on one vLLM server (memory-efficient Mode D) ----
+# Like Mode D but only keeps --max-loras 2 adapters loaded at a time.
+# The training script hot-swaps adapters between query batches.
+# Fits on a single GPU (no TP=2 needed).
+#   - vLLM port 9000: student base model (rollout generation)
+#   - vLLM port 9001: teacher base model (logprob queries, adapters hot-swapped)
+#   - No --lora-modules needed; training script loads adapters at runtime
+#
+# Teacher vLLM server launch (port 9001):
+#   VLLM_ALLOW_RUNTIME_LORA_UPDATING=True \
+#   CUDA_VISIBLE_DEVICES=2 \
+#   python -m vllm.entrypoints.openai.api_server \
+#     --model Qwen/Qwen3-30B-A3B-Instruct-2507 \
+#     --enable-lora --max-loras 2 --max-lora-rank 16 \
+#     --port 9001 --max-model-len 32000 \
+#     --gpu-memory-utilization 0.9 --dtype bfloat16
+#
+# CUDA_VISIBLE_DEVICES=3,4,5,6,7 \
+#   NCCL_P2P_DISABLE=1 \
+#   WANDB_API_KEY=f4ef099e7073d103963e5c986e4f818f5a526ee8 \
+#   WANDB_PROJECT=games \
+#   VLLM_BASE_URLS=http://localhost:9000 \
+#   VLLM_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507 \
+#   VLLM_TIMEOUT_S=2000 \
+#   VLLM_ALLOW_RUNTIME_LORA_UPDATING=True \
+#   PYTHONUNBUFFERED=1 \
+#   torchrun --nproc_per_node=5 --master-port 29501 train_distill.py \
+#     --teacher-url http://localhost:9001 \
+#     --teacher-model Qwen/Qwen3-30B-A3B-Instruct-2507 \
+#     --teacher-adapters "structured_data_reasoning=sdr_teacher,multistep_task=mt_teacher,tau_tool_calling=tc_teacher,precondition_check=pre_teacher" \
+#     --teacher-concurrency 16 \
+#     --teacher-max-loras 2 \
+#     --teacher-adapter-paths "sdr_teacher=/home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_40_20260308_080312,mt_teacher=/home/ubuntu/.cache/huggingface/multistep_task/grpo_ckpt_iter_30_20260318_182920,tc_teacher=/home/ubuntu/.cache/huggingface/tau_tool_calling/grpo_ckpt_iter_40_20260311_030533,pre_teacher=/home/ubuntu/.cache/huggingface/precondition/grpo_ckpt_iter_40_20260319_035848" \
+#     --loss-type ppo_surrogate \
+#     --games "structured_data_reasoning:0.25,multistep_task:0.25,tau_tool_calling:0.25,precondition_check:0.25" \
+#     --model Qwen/Qwen3-30B-A3B-Instruct-2507 \
+#     --compact-tools \
+#     --groups-per-batch 32 \
+#     --temperature 1.0 \
+#     --lr 1e-5 \
+#     --mini-batch-size 2 \
+#     --stats-chunk-size 2 \
+#     --save-every 5 --user-llm-url http://localhost:9001/v1 --user-llm-model "Qwen/Qwen3-30B-A3B-Instruct-2507"
 
 # ---- Mode C: Local LoRA adapter as teacher (uncomment to use) ----
 # CUDA_VISIBLE_DEVICES=3,4,5,6,7 \
