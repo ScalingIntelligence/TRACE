@@ -64,6 +64,15 @@ try:
 except ImportError:
     PreconditionGame = None
 
+try:
+    from awm_game import (
+        AWMGame,
+        extract_action as extract_action_awm,
+        SYSTEM_PROMPT as SYSTEM_PROMPT_AWM,
+    )
+except ImportError:
+    AWMGame = None
+
 
 class GameEnv(Protocol):
     """Minimal interface expected by the PPO + self-play loop."""
@@ -140,6 +149,28 @@ def _register_builtin_games() -> None:
             GameSpec(
                 name="adversarial_policy",
                 make_env=make_adversarial_policy,
+                extract_action=extract_action_adversarial,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_ADVERSARIAL,
+                max_gen_tokens=1024,
+            )
+        )
+
+    # SkillRL variant — same game with SkillBank injected into system prompt
+    if AdversarialPolicyGame is not None:
+        def make_adversarial_policy_skillrl(user_client=None, adversarial_ratio=0.2,
+                                            skillbank=None) -> AdversarialPolicyGame:
+            return AdversarialPolicyGame(
+                max_steps=30, user_client=user_client,
+                adversarial_ratio=adversarial_ratio,
+                skillbank=skillbank,
+            )
+
+        register_game(
+            GameSpec(
+                name="adversarial_policy_skillrl",
+                make_env=make_adversarial_policy_skillrl,
                 extract_action=extract_action_adversarial,
                 action_space=[],
                 stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
@@ -275,6 +306,28 @@ def _register_builtin_games() -> None:
                 action_space=[],
                 stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
                 system_prompt=SYSTEM_PROMPT_PRECONDITION,
+                max_gen_tokens=1024,
+            )
+        )
+
+    # AWM Tool Calling — Agent World Model environments
+    # 1K pre-generated SQLite-backed tool-use environments from AWM paper.
+    # Model interacts with application tools to complete user tasks.
+    # Reward from code-based verification of database state changes.
+    if AWMGame is not None:
+        def make_awm(user_client=None, data_dir=None) -> AWMGame:
+            return AWMGame(
+                data_dir=data_dir, max_steps=20, user_client=user_client,
+            )
+
+        register_game(
+            GameSpec(
+                name="awm_tool_calling",
+                make_env=make_awm,
+                extract_action=extract_action_awm,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_AWM,
                 max_gen_tokens=1024,
             )
         )
