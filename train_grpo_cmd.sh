@@ -16,7 +16,7 @@ VLLM_RPC_TIMEOUT=2000 \
 PYTHONUNBUFFERED=1 \
 torchrun --nproc_per_node=6 --master-port 29501 train_grpo_optimized.py \
     --game structured_data_reasoning \
-    --model tarsur909/Qwen/Qwen3-30B-A3B-Instruct-2507 \
+    --model Qwen/Qwen3-30B-A3B-Instruct-2507 \
     --compact-tools \
     --temperature-range "0.7,0.9,1.0" \
     --save-every 5 \
