@@ -698,13 +698,14 @@ def _gen_presentation_return(
 RETAIL_SCENARIO_WEIGHTS = {
     "single_exchange": 10,
     "multi_exchange": 10,
-    "single_modify": 0,       # 100% solved — zero gradient, skip
-    "extremal_exchange": 30,
-    "conditional_exchange": 25,
-    "cross_ref_exchange": 25,
-    "return_items": 0,        # 100% solved — zero gradient, skip
-    "no_match": 0,            # no tau-bench counterpart; teaches "don't call tool" which
-                              # conflicts with action scenarios and causes unlearning
+    "single_modify": 5,
+    "extremal_exchange": 20,
+    "conditional_exchange": 15,
+    "cross_ref_exchange": 15,
+    "return_items": 10,
+    "order_selection": 10,
+    "payment_selection_retail": 5,
+    "no_match": 0,
 }
 
 
@@ -1500,14 +1501,195 @@ def _gen_no_match_scenario(rng: random.Random) -> Dict[str, Any]:
     }
 
 
+def _gen_order_selection_scenario(rng: random.Random) -> Dict[str, Any]:
+    """Pick the correct order from multiple orders based on user description.
+
+    User describes an order by item name/options. Model must find the right
+    order_id from 3-4 orders visible in the conversation prefix.
+    """
+    user_info = _gen_user(rng)
+    user = user_info["user"]
+
+    # Target order
+    target_tmpl = rng.choice(PRODUCT_CATALOG)
+    target_options = {k: rng.choice(v) for k, v in target_tmpl["options_template"].items()}
+    target_item_id = _gen_item_id(rng)
+    target_price = round(rng.uniform(20, 300), 2)
+    target_product = {
+        "name": target_tmpl["name"], "product_id": _gen_product_id(rng),
+        "item_id": target_item_id, "price": target_price,
+        "options": target_options,
+    }
+
+    action_type = rng.choice(["return", "cancel"])
+    target_status = "delivered" if action_type == "return" else "pending"
+    target_order = _gen_order(rng, user_info["user_id"], target_status,
+                              [target_product], user_info["cc_id"])
+
+    # 2-3 distractor orders
+    distractor_orders = []
+    for _ in range(rng.randint(2, 3)):
+        d = _gen_distractor_order(rng, user_info["user_id"])
+        distractor_orders.append(d)
+
+    all_order_ids = [target_order["order_id"]] + [d["order_id"] for d in distractor_orders]
+    rng.shuffle(all_order_ids)
+    user["orders"] = all_order_ids
+
+    target_desc = _describe_options(target_options)
+    payment_desc, payment_id = _describe_payment(rng, user_info)
+
+    if action_type == "return":
+        user_msg = (
+            f"Hi, I'm {user_info['first_name']} {user_info['last_name']}, "
+            f"zip code {user_info['zip']}. I'd like to return the "
+            f"{target_tmpl['name']} ({target_desc}) I ordered. "
+            f"Please refund to {payment_desc}."
+        )
+        presentation = (
+            f"I found your orders and located the {target_tmpl['name']}. "
+            f"Shall I proceed with the return?"
+        )
+        gold_action = {
+            "name": "return_delivered_order_items",
+            "arguments": {
+                "order_id": target_order["order_id"],
+                "item_ids": [target_item_id],
+                "payment_method_id": payment_id,
+            },
+            "compare_args": ["order_id", "item_ids", "payment_method_id"],
+        }
+    else:
+        reason = rng.choice(["no longer needed", "ordered by mistake", "found better price"])
+        user_msg = (
+            f"Hi, I'm {user_info['first_name']} {user_info['last_name']}, "
+            f"zip code {user_info['zip']}. I'd like to cancel the order "
+            f"with the {target_tmpl['name']} ({target_desc}). "
+            f"Reason: {reason}."
+        )
+        presentation = (
+            f"I found your orders and located the pending order with the "
+            f"{target_tmpl['name']}. Shall I cancel it?"
+        )
+        gold_action = {
+            "name": "cancel_pending_order",
+            "arguments": {
+                "order_id": target_order["order_id"],
+                "reason": reason,
+            },
+            "compare_args": ["order_id", "reason"],
+        }
+
+    return {
+        "domain": "retail",
+        "scenario_type": "order_selection",
+        "user_info": user_info,
+        "user": user,
+        "order": target_order,
+        "distractor_orders": distractor_orders,
+        "products": {},
+        "user_message": user_msg,
+        "presentation": presentation,
+        "gold_action": gold_action,
+    }
+
+
+def _gen_payment_selection_retail_scenario(rng: random.Random) -> Dict[str, Any]:
+    """Pick the correct payment method from user details for a return.
+
+    User describes a payment method (e.g., 'my visa card ending in 1234').
+    Model must resolve to the correct payment_method_id.
+    """
+    user_info = _gen_user(rng)
+    user = user_info["user"]
+
+    # Ensure multiple payment methods
+    if not user_info["gc_id"]:
+        gc_id = _gen_payment_id(rng, "gift_card")
+        user["payment_methods"][gc_id] = {
+            "source": "gift_card", "id": gc_id,
+            "balance": round(rng.uniform(50, 500), 2),
+        }
+        user_info["gc_id"] = gc_id
+
+    if not user_info["pp_id"]:
+        pp_id = _gen_payment_id(rng, "paypal")
+        user["payment_methods"][pp_id] = {"source": "paypal", "id": pp_id}
+        user_info["pp_id"] = pp_id
+
+    prod_tmpl = rng.choice(PRODUCT_CATALOG)
+    target_options = {k: rng.choice(v) for k, v in prod_tmpl["options_template"].items()}
+    target_item_id = _gen_item_id(rng)
+    target_price = round(rng.uniform(20, 300), 2)
+    target_product = {
+        "name": prod_tmpl["name"], "product_id": _gen_product_id(rng),
+        "item_id": target_item_id, "price": target_price,
+        "options": target_options,
+    }
+
+    order = _gen_order(rng, user_info["user_id"], "delivered",
+                       [target_product], user_info["cc_id"])
+    user["orders"] = [order["order_id"]]
+
+    # Payment constraint
+    constraint = rng.choice(["gift_card", "paypal", "specific_cc"])
+    if constraint == "gift_card" and user_info["gc_id"]:
+        target_pay_id = user_info["gc_id"]
+        pay_desc = "my gift card"
+    elif constraint == "paypal" and user_info["pp_id"]:
+        target_pay_id = user_info["pp_id"]
+        pay_desc = "my PayPal account"
+    else:
+        target_pay_id = user_info["cc_id"]
+        pay_desc = f"my {user_info['cc_brand']} card ending in {user_info['cc_last_four']}"
+
+    target_desc = _describe_options(target_options)
+    user_msg = (
+        f"Hi, I'm {user_info['first_name']} {user_info['last_name']}, "
+        f"zip code {user_info['zip']}. I'd like to return the "
+        f"{prod_tmpl['name']} ({target_desc}) from order {order['order_id']}. "
+        f"Please refund to {pay_desc}."
+    )
+
+    presentation = (
+        f"I found your order with the {prod_tmpl['name']}. "
+        f"Shall I proceed with the return?"
+    )
+
+    gold_action = {
+        "name": "return_delivered_order_items",
+        "arguments": {
+            "order_id": order["order_id"],
+            "item_ids": [target_item_id],
+            "payment_method_id": target_pay_id,
+        },
+        "compare_args": ["order_id", "item_ids", "payment_method_id"],
+    }
+
+    return {
+        "domain": "retail",
+        "scenario_type": "payment_selection_retail",
+        "user_info": user_info,
+        "user": user,
+        "order": order,
+        "products": {},
+        "user_message": user_msg,
+        "presentation": presentation,
+        "gold_action": gold_action,
+    }
+
+
 # ====================================================================
 # Airline scenario generators
 # ====================================================================
 
 AIRLINE_SCENARIO_WEIGHTS = {
-    "flight_selection": 60,
-    "reservation_id": 25,
-    "payment_selection": 15,
+    "flight_selection": 30,
+    "book_flight": 25,
+    "update_baggages": 15,
+    "send_compensation": 10,
+    "payment_selection": 10,
+    "reservation_id": 10,
 }
 
 
@@ -1880,6 +2062,293 @@ def _gen_payment_selection_scenario(rng: random.Random) -> Dict[str, Any]:
     }
 
 
+def _gen_book_flight_scenario(rng: random.Random) -> Dict[str, Any]:
+    """Book a new reservation: pick correct flight + construct all args.
+
+    Trains: construct book_reservation arguments from user request + search
+    results + user details. Model must NOT hallucinate extra passengers,
+    must pick the correct payment method, compute baggage correctly, and
+    respect user's stated preferences (no extras unless asked).
+    """
+    user_info = _gen_user(rng, domain="airline")
+    user = user_info["user"]
+
+    codes = rng.sample(IATA_CODES, 2)
+    origin, destination = codes[0], codes[1]
+    date = f"2024-05-{rng.randint(15, 28):02d}"
+    cabin = rng.choice(["economy", "business"])
+
+    # Flight search results
+    n_flights = rng.randint(3, 6)
+    flights = [_gen_flight(rng, origin, destination) for _ in range(n_flights)]
+    target_flight = min(flights, key=lambda f: f["prices"][cabin])
+
+    # Passengers
+    first = user_info["first_name"]
+    last = user_info["last_name"]
+    dob = user["dob"]
+    passengers = [{"first_name": first, "last_name": last, "dob": dob}]
+
+    n_extra = rng.choices([0, 1, 2], weights=[60, 30, 10])[0]
+    extra_passengers = []
+    for _ in range(n_extra):
+        ep_first = rng.choice(FIRST_NAMES)
+        ep_last = last
+        ep_dob = f"{rng.randint(1960, 2005)}-{rng.randint(1,12):02d}-{rng.randint(1,28):02d}"
+        extra_passengers.append({"first_name": ep_first, "last_name": ep_last, "dob": ep_dob})
+        passengers.append(extra_passengers[-1])
+
+    # Put ALL passengers in saved_passengers so model can look up DOBs
+    user["saved_passengers"] = copy.deepcopy(passengers)
+
+    n_passengers = len(passengers)
+
+    # Baggage
+    total_baggages = rng.choices([0, 1, 2], weights=[50, 30, 20])[0]
+    membership = user["membership"]
+    free_per_pax = FREE_BAGS.get((membership, cabin), 0)
+    nonfree = max(0, total_baggages - free_per_pax * n_passengers)
+
+    # Insurance
+    insurance = rng.choice(["yes", "no"])
+
+    # Payment
+    payment_desc, payment_id = _describe_payment(rng, user_info, domain="airline")
+    flight_price = target_flight["prices"][cabin]
+    total_cost = flight_price * n_passengers + nonfree * 50
+    if insurance == "yes":
+        total_cost += 30 * n_passengers
+    payment_methods = [{"payment_id": payment_id, "amount": total_cost}]
+
+    # User message
+    pax_desc = ""
+    if extra_passengers:
+        extras = ", ".join(f"{p['first_name']} {p['last_name']}" for p in extra_passengers)
+        pax_desc = f" I'll be traveling with {extras}."
+
+    bag_desc = ""
+    if total_baggages > 0:
+        bag_desc = f" I need {total_baggages} checked bag{'s' if total_baggages > 1 else ''}."
+
+    ins_desc = ""
+    if insurance == "yes":
+        ins_desc = " Please add travel insurance."
+
+    user_msg = (
+        f"Hi, I'm {first} {last}, "
+        f"zip code {user_info['zip']}. I'd like to book the cheapest "
+        f"{cabin} flight from {origin} to {destination} on {date}.{pax_desc}"
+        f"{bag_desc}{ins_desc} Use {payment_desc} for payment."
+    )
+
+    presentation = (
+        f"I found several {cabin} flights from {origin} to {destination} "
+        f"on {date}. Let me find the cheapest option and book it for you. "
+        f"Shall I proceed?"
+    )
+
+    gold_action = {
+        "name": "book_reservation",
+        "arguments": {
+            "user_id": user_info["user_id"],
+            "origin": origin,
+            "destination": destination,
+            "flight_type": "one_way",
+            "cabin": cabin,
+            "flights": [{"flight_number": target_flight["flight_number"], "date": date}],
+            "passengers": passengers,
+            "payment_methods": payment_methods,
+            "total_baggages": total_baggages,
+            "nonfree_baggages": nonfree,
+            "insurance": insurance,
+        },
+        "compare_args": ["origin", "destination", "cabin", "flights",
+                         "passengers", "payment_methods", "total_baggages",
+                         "nonfree_baggages", "insurance"],
+    }
+
+    return {
+        "domain": "airline",
+        "scenario_type": "book_flight",
+        "user_info": user_info,
+        "user": user,
+        "reservation": None,
+        "distractor_reservations": [],
+        "search_results": flights,
+        "search_origin": origin,
+        "search_destination": destination,
+        "search_date": date,
+        "user_message": user_msg,
+        "presentation": presentation,
+        "gold_action": gold_action,
+    }
+
+
+def _gen_update_baggages_scenario(rng: random.Random) -> Dict[str, Any]:
+    """Add checked bags to a reservation: compute nonfree correctly.
+
+    The model must look up membership + cabin -> free bags per passenger,
+    then compute nonfree_baggages = max(0, total - free_per_pax * n_pax).
+    """
+    user_info = _gen_user(rng, domain="airline")
+    user = user_info["user"]
+    membership = user["membership"]
+
+    codes = rng.sample(IATA_CODES, 2)
+    origin, destination = codes[0], codes[1]
+    cabin = rng.choice(CABIN_CLASSES)
+    n_passengers = rng.randint(1, 3)
+    reservation = _gen_reservation(rng, user_info["user_id"], origin, destination,
+                                    cabin, "one_way", n_passengers)
+
+    current_bags = reservation["total_baggages"]
+    bags_to_add = rng.randint(1, 3)
+    new_total = current_bags + bags_to_add
+
+    free_per_pax = FREE_BAGS.get((membership, cabin), 0)
+    free_total = free_per_pax * n_passengers
+    nonfree = max(0, new_total - free_total)
+
+    user["reservations"] = [reservation["reservation_id"]]
+    payment_desc, payment_id = _describe_payment(rng, user_info, domain="airline")
+
+    user_msg = (
+        f"Hi, I'm {user_info['first_name']} {user_info['last_name']}, "
+        f"zip code {user_info['zip']}. I'd like to add {bags_to_add} "
+        f"checked bag{'s' if bags_to_add > 1 else ''} to my reservation "
+        f"{reservation['reservation_id']}. Use {payment_desc} for payment."
+    )
+
+    presentation = (
+        f"I found your reservation {reservation['reservation_id']} "
+        f"({origin} to {destination}, {cabin} class, "
+        f"{n_passengers} passenger{'s' if n_passengers > 1 else ''}, "
+        f"currently {current_bags} checked bag{'s' if current_bags != 1 else ''}). "
+        f"Shall I add {bags_to_add} more bag{'s' if bags_to_add > 1 else ''}?"
+    )
+
+    gold_action = {
+        "name": "update_reservation_baggages",
+        "arguments": {
+            "reservation_id": reservation["reservation_id"],
+            "total_baggages": new_total,
+            "nonfree_baggages": nonfree,
+            "payment_id": payment_id,
+        },
+        "compare_args": ["reservation_id", "total_baggages",
+                         "nonfree_baggages", "payment_id"],
+    }
+
+    return {
+        "domain": "airline",
+        "scenario_type": "update_baggages",
+        "user_info": user_info,
+        "user": user,
+        "reservation": reservation,
+        "distractor_reservations": [],
+        "search_results": [],
+        "search_origin": origin,
+        "search_destination": destination,
+        "search_date": reservation["flights"][0]["date"],
+        "user_message": user_msg,
+        "presentation": presentation,
+        "gold_action": gold_action,
+    }
+
+
+def _gen_send_compensation_scenario(rng: random.Random) -> Dict[str, Any]:
+    """Issue travel certificate for delayed/cancelled flight.
+
+    Amount depends on reason and number of passengers:
+      - Cancelled: $100 * n_passengers
+      - Delayed (with change/cancel): $50 * n_passengers
+    Only eligible if: silver/gold member OR has insurance OR flies business.
+    """
+    user_info = _gen_user(rng, domain="airline")
+    user = user_info["user"]
+
+    # Make user eligible
+    eligible_reason = rng.choice(["membership", "insurance", "cabin"])
+    if eligible_reason == "membership":
+        user["membership"] = rng.choice(["silver", "gold"])
+    elif eligible_reason == "insurance":
+        user["membership"] = "regular"
+
+    codes = rng.sample(IATA_CODES, 2)
+    origin, destination = codes[0], codes[1]
+    cabin = "business" if eligible_reason == "cabin" else rng.choice(["basic_economy", "economy"])
+
+    n_passengers = rng.randint(1, 3)
+    reservation = _gen_reservation(rng, user_info["user_id"], origin, destination,
+                                    cabin, "one_way", n_passengers)
+
+    if eligible_reason == "insurance":
+        reservation["insurance"] = "yes"
+    elif rng.random() < 0.5:
+        reservation["insurance"] = "no"
+
+    flight_issue = rng.choice(["cancelled", "delayed"])
+    flight_number = reservation["flights"][0]["flight_number"]
+    flight_date = reservation["flights"][0]["date"]
+
+    if flight_issue == "cancelled":
+        flight_status = {
+            "flight_number": flight_number, "date": flight_date,
+            "status": "cancelled",
+        }
+        amount = 100 * n_passengers
+    else:
+        flight_status = {
+            "flight_number": flight_number, "date": flight_date,
+            "status": "delayed",
+            "estimated_departure_time_est": f"{flight_date}T{rng.randint(14,20):02d}:00:00",
+            "estimated_arrival_time_est": f"{flight_date}T{rng.randint(20,23):02d}:00:00",
+        }
+        amount = 50 * n_passengers
+
+    user["reservations"] = [reservation["reservation_id"]]
+
+    issue_desc = f"My flight {flight_number} on {flight_date} was {flight_issue}"
+
+    user_msg = (
+        f"Hi, I'm {user_info['first_name']} {user_info['last_name']}, "
+        f"zip code {user_info['zip']}. {issue_desc}. "
+        f"I'd like to request compensation."
+    )
+
+    presentation = (
+        f"I've verified your reservation {reservation['reservation_id']} "
+        f"and confirmed that flight {flight_number} was {flight_issue}. "
+        f"You are eligible for a travel certificate. Shall I issue it?"
+    )
+
+    gold_action = {
+        "name": "send_certificate",
+        "arguments": {
+            "user_id": user_info["user_id"],
+            "amount": amount,
+        },
+        "compare_args": ["user_id", "amount"],
+    }
+
+    return {
+        "domain": "airline",
+        "scenario_type": "send_compensation",
+        "user_info": user_info,
+        "user": user,
+        "reservation": reservation,
+        "distractor_reservations": [],
+        "search_results": [],
+        "search_origin": origin,
+        "search_destination": destination,
+        "search_date": flight_date,
+        "flight_status": flight_status,
+        "user_message": user_msg,
+        "presentation": presentation,
+        "gold_action": gold_action,
+    }
+
+
 # ====================================================================
 # Conversation builders
 # ====================================================================
@@ -1933,6 +2402,11 @@ def _build_retail_conversation(scenario: Dict[str, Any]) -> Tuple[List[Dict], Li
 
     tc_id = add_tool_call("get_order_details", {"order_id": order["order_id"]})
     add_tool_result(tc_id, json.dumps(order))
+
+    # Distractor orders (for order_selection scenarios)
+    for d_order in scenario.get("distractor_orders", []):
+        tc_id = add_tool_call("get_order_details", {"order_id": d_order["order_id"]})
+        add_tool_result(tc_id, json.dumps(d_order))
 
     for prod_id, product in products.items():
         tc_id = add_tool_call("get_product_details", {"product_id": prod_id})
@@ -2001,8 +2475,9 @@ def _build_airline_conversation(scenario: Dict[str, Any]) -> Tuple[List[Dict], L
     add_tool_result(tc_id, json.dumps(user))
 
     # Reservation lookups (target + distractors for reservation_id scenarios)
-    tc_id = add_tool_call("get_reservation_details", {"reservation_id": reservation["reservation_id"]})
-    add_tool_result(tc_id, json.dumps(reservation))
+    if reservation is not None:
+        tc_id = add_tool_call("get_reservation_details", {"reservation_id": reservation["reservation_id"]})
+        add_tool_result(tc_id, json.dumps(reservation))
 
     for d_res in distractor_res:
         tc_id = add_tool_call("get_reservation_details", {"reservation_id": d_res["reservation_id"]})
@@ -2016,6 +2491,15 @@ def _build_airline_conversation(scenario: Dict[str, Any]) -> Tuple[List[Dict], L
             "date": scenario["search_date"],
         })
         add_tool_result(tc_id, json.dumps(search_results))
+
+    # Flight status lookup (for compensation scenarios)
+    flight_status = scenario.get("flight_status")
+    if flight_status:
+        tc_id = add_tool_call("get_flight_status", {
+            "flight_number": flight_status.get("flight_number", ""),
+            "date": flight_status.get("date", ""),
+        })
+        add_tool_result(tc_id, json.dumps(flight_status))
 
     add_assistant_text(scenario["presentation"])
     add_user_text(scenario.get("confirmation", "Yes, please go ahead."))
@@ -2062,6 +2546,8 @@ def generate_scenario(seed: int, domain: Optional[str] = None) -> Dict[str, Any]
             "conditional_exchange": _gen_conditional_exchange_scenario,
             "cross_ref_exchange": _gen_cross_ref_exchange_scenario,
             "return_items": _gen_return_scenario,
+            "order_selection": _gen_order_selection_scenario,
+            "payment_selection_retail": _gen_payment_selection_retail_scenario,
             "no_match": _gen_no_match_scenario,
         }
         scenario = generators.get(scenario_type, _gen_exchange_scenario)(rng)
@@ -2077,8 +2563,11 @@ def generate_scenario(seed: int, domain: Optional[str] = None) -> Dict[str, Any]
 
         generators = {
             "flight_selection": _gen_flight_selection_scenario,
-            "reservation_id": _gen_reservation_id_scenario,
+            "book_flight": _gen_book_flight_scenario,
+            "update_baggages": _gen_update_baggages_scenario,
+            "send_compensation": _gen_send_compensation_scenario,
             "payment_selection": _gen_payment_selection_scenario,
+            "reservation_id": _gen_reservation_id_scenario,
         }
         scenario = generators.get(scenario_type, _gen_flight_selection_scenario)(rng)
         if scenario.get("gold_action") is None:
@@ -2217,6 +2706,38 @@ class StructuredDataGame:
                             return 0.0, f"Wrong flight[{i}]: {af.get('flight_number')} (expected {ef.get('flight_number')})"
                     elif str(ef) != str(af):
                         return 0.0, f"Wrong flight[{i}]: {af} (expected {ef})"
+            elif key == "passengers":
+                # Compare as sets of (first_name, last_name, dob) tuples
+                exp_set = set()
+                for p in (expected or []):
+                    if isinstance(p, dict):
+                        exp_set.add((p.get("first_name", ""), p.get("last_name", ""), p.get("dob", "")))
+                    else:
+                        exp_set.add(str(p))
+                act_set = set()
+                for p in (actual or []):
+                    if isinstance(p, dict):
+                        act_set.add((p.get("first_name", ""), p.get("last_name", ""), p.get("dob", "")))
+                    else:
+                        act_set.add(str(p))
+                if exp_set != act_set:
+                    return 0.0, f"Wrong {key}: {len(actual or [])} passengers (expected {len(expected or [])})"
+            elif key == "payment_methods":
+                # Compare as sets of (payment_id, amount) tuples
+                exp_set = set()
+                for p in (expected or []):
+                    if isinstance(p, dict):
+                        exp_set.add((p.get("payment_id", ""), round(float(p.get("amount", 0)), 2)))
+                    else:
+                        exp_set.add(str(p))
+                act_set = set()
+                for p in (actual or []):
+                    if isinstance(p, dict):
+                        act_set.add((p.get("payment_id", ""), round(float(p.get("amount", 0)), 2)))
+                    else:
+                        act_set.add(str(p))
+                if exp_set != act_set:
+                    return 0.0, f"Wrong {key}: {actual} (expected {expected})"
             elif key in ("item_ids", "new_item_ids"):
                 compare_args = gold.get("compare_args", [])
                 both_present = "item_ids" in compare_args and "new_item_ids" in compare_args
