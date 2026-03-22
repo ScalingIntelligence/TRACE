@@ -1,643 +1,1916 @@
-"""
-Structured Data Reasoning Game - Training Environment 1
+"""Structured Data Reasoning Game - tau2-bench Aligned (Airline + Retail)
 
-Trains the model to parse JSON data, filter/sort by criteria, select correct
-entities, and compute derived values. Single-turn, 3 questions per episode.
-No LLM user needed.
+Multi-turn game using EXACT tau2-bench tools, system prompt, and format.
+Trains the model to reason over structured JSON data returned by tools
+and take the correct action or communicate the correct answer.
 
-Directly addresses ~44% of tau2-bench failures:
-- 30 retail wrong item/variant selection failures
-- 6 airline wrong flight selection failures
-- 12 airline argument computation errors
+Airline scenario types:
+  1. flight_selection (30%):  User wants cheapest/shortest/earliest flight from
+     search results. Agent must search, compare, and book or communicate.
+  2. baggage_computation (20%):  User asks about free/paid baggage. Agent must
+     look up reservation + user details, apply the policy table, and respond.
+  3. reservation_comparison (20%):  User asks which reservation is cheapest,
+     which has the most passengers, etc. Agent must look up multiple
+     reservations and compare.
+  4. cost_computation (15%):  User wants total cost of upgrading cabin or adding
+     bags. Agent must look up details, search flights, compute differences.
+  5. flight_status_check (15%):  User asks about flight status for a reservation.
+     Agent must get reservation details, then check flight status, and report.
 
-Reward: fraction of correct answers -> {0, 0.33, 0.67, 1.0}
+Retail scenario types:
+  1. variant_selection (40%):  User wants to exchange an item for a specific
+     variant. Agent must get_product_details, find matching variant from 10+
+     variants, and identify the correct item_id.
+  2. price_comparison (30%):  User asks which order is cheapest, which item
+     costs most, total across orders, etc. Agent must get_order_details for
+     multiple orders and compare.
+  3. order_status_check (30%):  User asks about order status, item details,
+     payment methods. Agent must look up and report correctly.
+
+Uses LLM user simulator, ToolExecutor, and the same GameEnv protocol as
+precondition_game and tau_tool_calling_env.
+
+Reward: binary 0/1 based on whether the agent communicates the correct answer.
 """
 
 import random
+import copy
 import json
-import math
-from typing import List, Optional, Dict, Any, Tuple
+import re
+from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 
-
-# =============================================================================
-# Constants for data generation
-# =============================================================================
-
-COLORS = ["red", "blue", "green", "black", "white", "silver", "navy", "pink", "gray", "orange"]
-SIZES = ["small", "medium", "large", "extra-large"]
-MATERIALS = ["plastic", "metal", "wood", "fabric", "glass", "carbon-fiber"]
-CONNECTIVITY_TYPES = ["wired", "wireless", "bluetooth"]
-POWER_SOURCES = ["AC", "battery", "USB", "solar"]
-
-PRODUCT_TYPES = [
-    "Speaker", "Headphones", "Keyboard", "Mouse", "Monitor", "Laptop Stand",
-    "USB Hub", "Webcam", "Desk Lamp", "Phone Charger", "Tablet Case",
-    "Power Bank", "Smart Watch", "Camera", "Microphone",
-]
-
-AIRPORTS = [
-    "JFK", "LAX", "ORD", "ATL", "DFW", "SFO", "SEA", "BOS", "DEN", "MIA",
-    "PHL", "EWR", "IAH", "MSP", "DTW", "FLL", "SAN", "TPA", "PDX", "STL",
-]
-
-AIRLINES = ["HorizonAir", "SkyWest", "Atlantic", "Pacific", "United", "Delta"]
-
-MEMBERSHIP_TIERS = ["regular", "silver", "gold"]
-CABINS = ["basic_economy", "economy", "business"]
-
-# Baggage allowance table (matching airline policy)
-BAGGAGE_ALLOWANCE = {
-    "regular": {"basic_economy": 0, "economy": 1, "business": 2},
-    "silver": {"basic_economy": 0, "economy": 2, "business": 3},
-    "gold": {"basic_economy": 0, "economy": 3, "business": 3},
-}
-
-# Difficulty presets: (min_items, max_items), max_constraints, question_pool
-DIFFICULTY_CONFIG = {
-    1: {"items": (3, 5), "constraints": 0,
-        "types": ["select_cheapest", "select_max_attr", "count"]},
-    2: {"items": (5, 10), "constraints": 1,
-        "types": ["select_cheapest", "select_max_attr", "compute_sum", "count"]},
-    3: {"items": (10, 15), "constraints": 2,
-        "types": ["select_cheapest", "select_nth", "compute_sum", "multi_constraint", "compare"]},
-    4: {"items": (15, 20), "constraints": 3,
-        "types": ["select_nth", "compute_sum", "compute_derived", "multi_constraint", "compare"]},
-    5: {"items": (20, 30), "constraints": 4,
-        "types": ["select_nth", "compute_sum", "compute_derived", "multi_constraint", "compare"]},
-}
+from adversarial_policy_game.tools import ToolExecutor
+from adversarial_policy_game.constants import (
+    AIRLINE_POLICY,
+    AIRLINE_TOOL_SCHEMAS,
+    RETAIL_POLICY,
+    RETAIL_TOOL_SCHEMAS,
+)
+from adversarial_policy_game.llm_user import LLMUser, UserLLMClient, build_user_system_prompt
+from adversarial_policy_game.database import (
+    sample_airline_multi_reservations,
+    sample_retail_multi_orders,
+)
+from adversarial_policy_game.synthetic_db import build_airline_db, build_retail_db
 
 
-# =============================================================================
+# =====================================================================
 # Data structures
-# =============================================================================
+# =====================================================================
 
 @dataclass
-class Question:
-    text: str
-    answer: Any           # str (item_id/flight_number), float, int, or "yes"/"no"
-    answer_type: str      # "item_id", "number", "boolean"
+class SDRScenario:
+    """A structured data reasoning scenario."""
+    domain: str  # "airline" or "retail"
+    scenario_type: str
+    user_system_prompt: str
+    initial_message: str
+    expected_answer: Any  # the value(s) the agent must communicate
+    communicate_info: List[str] = field(default_factory=list)
+    description: str = ""
+    key_facts: Dict[str, Any] = field(default_factory=dict)
+    db: Dict[str, Any] = field(default_factory=dict)
+    # For mutation scenarios: expected tool call the agent must make
+    expected_tool_call: Optional[Dict[str, Any]] = None  # {"name": ..., "key_args": {...}}
 
 
-@dataclass
-class Episode:
-    data_json: str        # JSON string of the dataset
-    data_label: str       # e.g. "Product Catalog"
-    data_type: str        # "products", "flights", "baggage"
-    questions: List[Question]
-    difficulty: int
-    items: List[Dict]     # raw data for internal use
-    baggage_context: Optional[Dict] = None
+# =====================================================================
+# Constants
+# =====================================================================
+
+IATA_CODES = [
+    "JFK", "LAX", "ORD", "ATL", "DFW", "DEN", "SFO", "SEA",
+    "MIA", "EWR", "PHX", "IAH", "LAS", "PHL", "DTW", "BOS",
+    "MSP", "CLT", "MCO", "TPA",
+]
+
+CABIN_CLASSES = ["basic_economy", "economy", "business"]
+
+# Free checked baggage per passenger by (membership, cabin) — airline only
+FREE_BAGS = {
+    ("regular", "basic_economy"): 0, ("regular", "economy"): 1, ("regular", "business"): 2,
+    ("silver", "basic_economy"): 1, ("silver", "economy"): 2, ("silver", "business"): 3,
+    ("gold", "basic_economy"): 2, ("gold", "economy"): 3, ("gold", "business"): 4,
+}
+
+_COOPERATIVE_STYLES = [
+    "You are polite and cooperative.",
+    "You are concise and business-like.",
+    "You are friendly and patient.",
+    "You are direct and efficient.",
+    "You are calm and straightforward.",
+]
+
+SCENARIO_WEIGHTS = {
+    # Exact match to eval SD failure distribution (excl. policy tasks):
+    # 67% mutation, 33% report — from 18 non-policy airline SD failures
+    "book_flight": 28,             # 5/18 eval failures: wrong book_reservation args
+    "change_flight": 22,           # 4/18: wrong update_reservation_flights args
+    "send_compensation": 17,       # 3/18: wrong send_certificate amount
+    "reservation_comparison": 11,  # 2/18: multi-lookup comparison
+    "flight_selection": 8,         # 1/18: search + report
+    "baggage_computation": 6,      # 1/18: lookup + compute
+    "cost_computation": 4,         # general report
+    "flight_status_check": 4,      # general report
+}
+
+RETAIL_SCENARIO_WEIGHTS = {
+    # Exact match to eval SD failure distribution (excl. policy tasks):
+    # 79% mutation, 21% report — from 38 non-policy retail SD failures
+    "execute_exchange": 32,        # 12/38: wrong variant in exchange
+    "execute_modify": 24,          # 9/38: wrong variant in modify
+    "execute_return": 18,          # 7/38: wrong item in return
+    "price_comparison": 8,         # 3/38: communicate fail on comparison
+    "order_status_check": 8,       # 2/38: communicate fail on lookup
+    "execute_cancel": 5,           # 2/38: wrong cancel args
+    "variant_selection": 5,        # 1/38: report-only variant
+}
 
 
-# =============================================================================
-# Data generation
-# =============================================================================
+# =====================================================================
+# Synthetic DB helpers (airline)
+# =====================================================================
 
-def _gen_product_catalog(rng: random.Random, n: int) -> List[Dict]:
-    """Generate n products with unique prices and diverse attributes."""
-    items = []
-    used_prices = set()
+def _gen_flight(rng: random.Random, origin: str, dest: str, date: str,
+                base_price: float, status: str = "available") -> Tuple[str, Dict]:
+    """Generate a single flight entry for the flights DB."""
+    fnum = f"SDR{rng.randint(100, 999)}"
+    hour = rng.randint(6, 21)
+    minute = rng.choice([0, 15, 30, 45])
+    dep_time = f"{hour:02d}:{minute:02d}:00"
+    duration_h = rng.randint(2, 8)
+    duration_m = rng.choice([0, 15, 30, 45])
+    arr_hour = (hour + duration_h + (minute + duration_m) // 60) % 24
+    arr_min = (minute + duration_m) % 60
+    arr_time = f"{arr_hour:02d}:{arr_min:02d}:00"
 
-    for i in range(n):
-        # Unique price
-        price = round(rng.uniform(15.0, 300.0), 2)
-        while price in used_prices:
-            price = round(price + 0.01, 2)
-        used_prices.add(price)
+    econ_price = round(base_price + rng.uniform(-50, 50), 0)
+    be_price = round(econ_price * rng.uniform(0.55, 0.75), 0)
+    biz_price = round(econ_price * rng.uniform(2.0, 3.0), 0)
 
-        color = rng.choice(COLORS)
-        size = rng.choice(SIZES)
-        ptype = rng.choice(PRODUCT_TYPES)
-        battery = rng.choice([4, 6, 8, 10, 12, 16, 20, 24, 30, 36, 48])
+    flight_data = {
+        "flight_number": fnum,
+        "origin": origin,
+        "destination": dest,
+        "scheduled_departure_time_est": dep_time,
+        "scheduled_arrival_time_est": arr_time,
+        "dates": {
+            date: {
+                "status": status,
+                "available_seats": {
+                    "basic_economy": rng.randint(0, 30),
+                    "economy": rng.randint(5, 50),
+                    "business": rng.randint(2, 15),
+                },
+                "prices": {
+                    "basic_economy": be_price,
+                    "economy": econ_price,
+                    "business": biz_price,
+                },
+            }
+        },
+    }
 
-        items.append({
-            "item_id": f"item_{1000 + i}",
-            "name": f"{color.title()} {size.title()} {ptype}",
-            "product_type": ptype,
-            "price": price,
-            "color": color,
-            "size": size,
-            "material": rng.choice(MATERIALS),
-            "connectivity": rng.choice(CONNECTIVITY_TYPES),
-            "power_source": rng.choice(POWER_SOURCES),
-            "battery_life_hours": battery,
-            "weight_oz": round(rng.uniform(2.0, 40.0), 1),
-            "rating": round(rng.uniform(1.0, 5.0), 1),
-            "warranty_months": rng.choice([6, 12, 18, 24, 36]),
-            "in_stock": rng.random() > 0.1,
-        })
+    if status == "delayed":
+        flight_data["dates"][date] = {
+            "status": "delayed",
+            "estimated_departure_time_est": f"{date}T{(hour+2)%24:02d}:{minute:02d}:00",
+            "estimated_arrival_time_est": f"{date}T{(arr_hour+2)%24:02d}:{arr_min:02d}:00",
+        }
+    elif status == "cancelled":
+        flight_data["dates"][date] = {"status": "cancelled"}
 
-    # Shuffle so position doesn't correlate with item_id order
-    rng.shuffle(items)
-    return items
+    return fnum, flight_data
 
 
-def _gen_flight_list(rng: random.Random, n: int) -> List[Dict]:
-    """Generate n flights with unique prices."""
-    airports = list(AIRPORTS)
-    rng.shuffle(airports)
-    origins = airports[:3]
-    destinations = airports[3:6]
+def _gen_user_with_reservations(rng: random.Random, n_reservations: int = 3,
+                                 membership: Optional[str] = None) -> Tuple[Dict, List[Dict], Dict]:
+    """Generate a user with multiple reservations and supporting flights DB."""
+    from adversarial_policy_game.synthetic_db import (
+        FIRST_NAMES, LAST_NAMES, CITIES_STATES_ZIPS, STREETS,
+        _gen_dob, _gen_email, _gen_payment_id,
+    )
 
-    flights = []
-    used_prices = set()
+    first = rng.choice(FIRST_NAMES)
+    last = rng.choice(LAST_NAMES)
+    uid = f"{first.lower()}_{last.lower()}_{rng.randint(1000, 9999)}"
+    membership = membership or rng.choice(["regular", "silver", "gold"])
 
-    for i in range(n):
-        origin = rng.choice(origins)
-        dest = rng.choice(destinations)
-        while dest == origin:
-            dest = rng.choice(destinations)
+    # Payment methods
+    payment_methods = {}
+    cc_id = _gen_payment_id(rng, "credit_card")
+    payment_methods[cc_id] = {
+        "source": "credit_card", "id": cc_id,
+        "brand": rng.choice(["visa", "mastercard", "amex"]),
+        "last_four": str(rng.randint(1000, 9999)),
+    }
+    gc_id = _gen_payment_id(rng, "gift_card")
+    payment_methods[gc_id] = {
+        "source": "gift_card", "id": gc_id,
+        "amount": rng.choice([100, 200, 300, 500]),
+    }
 
-        price = round(rng.uniform(80.0, 800.0), 2)
-        while price in used_prices:
-            price = round(price + 0.01, 2)
-        used_prices.add(price)
+    city, state, zipcode = rng.choice(CITIES_STATES_ZIPS)
+    dob = _gen_dob(rng)
 
-        stops = rng.choices([0, 1, 2], weights=[50, 35, 15])[0]
-        base_dur = rng.randint(120, 360)
-        duration = base_dur + stops * rng.randint(60, 120)
+    user = {
+        "user_id": uid,
+        "name": {"first_name": first, "last_name": last},
+        "address": {
+            "address1": f"{rng.randint(100, 999)} {rng.choice(STREETS)}",
+            "address2": "", "city": city, "state": state, "zip": zipcode, "country": "USA",
+        },
+        "email": _gen_email(first, last, rng),
+        "dob": dob,
+        "payment_methods": payment_methods,
+        "saved_passengers": [{"first_name": first, "last_name": last, "dob": dob}],
+        "membership": membership,
+        "reservations": [],
+    }
 
-        cabin = rng.choice(["economy", "business"])
-        day = rng.randint(16, 22)
-        hour = rng.randint(6, 22)
-        minute = rng.choice([0, 15, 30, 45])
+    # Generate reservations
+    flights_db = {}
+    reservations = []
+    used_routes = set()
 
-        flights.append({
-            "flight_number": f"HAT{100 + i}",
+    for i in range(n_reservations):
+        # Pick unique route
+        origin = rng.choice(IATA_CODES)
+        dest = rng.choice([c for c in IATA_CODES if c != origin])
+        while (origin, dest) in used_routes:
+            origin = rng.choice(IATA_CODES)
+            dest = rng.choice([c for c in IATA_CODES if c != origin])
+        used_routes.add((origin, dest))
+
+        day = rng.randint(15, 28)
+        date = f"2024-05-{day:02d}"
+        cabin = rng.choice(CABIN_CLASSES)
+        base_price = rng.uniform(150, 600)
+
+        fnum, flight_data = _gen_flight(rng, origin, dest, date, base_price)
+        flights_db[fnum] = flight_data
+
+        price = flight_data["dates"][date]["prices"][cabin]
+        n_pax = rng.randint(1, 3)
+        total_bags = rng.randint(0, n_pax * 3)
+        free_per_pax = FREE_BAGS.get((membership, cabin), 0)
+        nonfree = max(0, total_bags - free_per_pax * n_pax)
+
+        passengers = [{"first_name": first, "last_name": last, "dob": dob}]
+        for _ in range(n_pax - 1):
+            pax_first = rng.choice(FIRST_NAMES)
+            pax_last = last
+            passengers.append({
+                "first_name": pax_first, "last_name": pax_last,
+                "dob": _gen_dob(rng),
+            })
+
+        res_id = f"SDR{rng.randint(10000, 99999)}"
+        reservation = {
+            "reservation_id": res_id,
+            "user_id": uid,
             "origin": origin,
             "destination": dest,
-            "date": f"2024-05-{day:02d}",
-            "departure_time": f"{hour:02d}:{minute:02d}",
+            "flight_type": "one_way",
             "cabin": cabin,
-            "price": price,
-            "stops": stops,
-            "duration_minutes": duration,
-            "airline": rng.choice(AIRLINES),
-            "seats_available": rng.randint(1, 50),
-        })
-
-    rng.shuffle(flights)
-    return flights
-
-
-def _gen_baggage_context(rng: random.Random) -> Tuple[Dict, List[Dict]]:
-    """Generate a membership/baggage scenario with reservations."""
-    tier = rng.choice(MEMBERSHIP_TIERS)
-    reservations = []
-    for i in range(rng.randint(3, 6)):
-        cabin = rng.choice(CABINS)
-        reservations.append({
-            "reservation_id": f"RES{10000 + i}",
-            "cabin": cabin,
-            "num_passengers": rng.randint(1, 4),
-            "total_baggages": rng.randint(0, 8),
+            "flights": [{"flight_number": fnum, "date": date,
+                         "origin": origin, "destination": dest, "price": price}],
+            "passengers": passengers,
+            "payment_history": [{"payment_id": cc_id, "amount": price * n_pax}],
+            "created_at": f"2024-05-{rng.randint(1, 14):02d}T{rng.randint(8, 18):02d}:00:00",
+            "total_baggages": total_bags,
+            "nonfree_baggages": nonfree,
             "insurance": rng.choice(["yes", "no"]),
-            "trip_price": round(rng.uniform(200, 3000), 2),
-        })
+            "status": None,
+        }
+        reservations.append(reservation)
+        user["reservations"].append(res_id)
 
-    context = {
-        "membership_tier": tier,
-        "baggage_policy": BAGGAGE_ALLOWANCE,
-        "reservations": reservations,
-    }
-    return context, reservations
+    return user, reservations, flights_db
 
 
-# =============================================================================
-# Question generators
-# =============================================================================
+# =====================================================================
+# Scenario generators
+# =====================================================================
 
-def _q_select_cheapest(rng: random.Random, items: List[Dict], dtype: str,
-                       constraints: int) -> Optional[Question]:
-    """Which item is the cheapest (optionally with filter constraints)?"""
-    filtered = list(items)
-    desc_parts = []
+def _gen_flight_selection(rng: random.Random) -> SDRScenario:
+    """User wants cheapest/shortest/earliest flight. Agent must search and report."""
+    user, reservations, flights_db = _gen_user_with_reservations(rng, n_reservations=1)
+    uid = user["user_id"]
+    name = user["name"]
 
-    if dtype == "products":
-        price_key = "price"
-        id_key = "item_id"
-        id_label = "item_id"
-        noun = "product"
-        filter_attrs = ["color", "size", "connectivity", "material"]
-    elif dtype == "flights":
-        price_key = "price"
-        id_key = "flight_number"
-        id_label = "flight_number"
-        noun = "flight"
-        filter_attrs = ["cabin", "origin", "destination"]
-    else:
-        return None
+    origin = rng.choice(IATA_CODES)
+    dest = rng.choice([c for c in IATA_CODES if c != origin])
+    day = rng.randint(18, 25)
+    date = f"2024-05-{day:02d}"
 
-    for _ in range(min(constraints, len(filter_attrs))):
-        if len(filtered) <= 2:
-            break
-        attr = rng.choice(filter_attrs)
-        filter_attrs.remove(attr)
-        values = list(set(item[attr] for item in filtered))
-        if len(values) < 2:
-            continue
-        target = rng.choice(values)
-        new_filtered = [x for x in filtered if x[attr] == target]
-        if len(new_filtered) >= 1:
-            filtered = new_filtered
-            desc_parts.append(f"{attr}=\"{target}\"")
+    # Pick selection criterion first so we can ensure no ties
+    cabin = rng.choice(["economy", "business"])
+    criterion = rng.choice(["cheapest", "earliest", "most_seats"])
 
-    if not filtered:
-        return None
+    # Generate 4-8 flights for the search results, ensuring no ties on criterion
+    n_flights = rng.randint(4, 8)
+    search_flights = []
+    used_dep_times = set()
+    used_prices = set()
+    used_seats = set()
+    for _ in range(n_flights):
+        fnum, fdata = _gen_flight(rng, origin, dest, date,
+                                   base_price=rng.uniform(150, 600))
+        # Break ties based on criterion
+        if criterion == "earliest":
+            dep = fdata["scheduled_departure_time_est"]
+            while dep in used_dep_times:
+                # Shift by 15 min
+                h, m = int(dep[:2]), int(dep[3:5])
+                m = (m + 15) % 60
+                if m == 0: h = (h + 1) % 24
+                dep = f"{h:02d}:{m:02d}:00"
+                fdata["scheduled_departure_time_est"] = dep
+            used_dep_times.add(dep)
+        elif criterion == "cheapest":
+            p = fdata["dates"][date]["prices"][cabin]
+            while p in used_prices:
+                p += 1
+            used_prices.add(p)
+            fdata["dates"][date]["prices"][cabin] = p
+        else:  # most_seats
+            s = fdata["dates"][date]["available_seats"][cabin]
+            while s in used_seats:
+                s += 1
+            used_seats.add(s)
+            fdata["dates"][date]["available_seats"][cabin] = s
 
-    cheapest = min(filtered, key=lambda x: x[price_key])
-    if desc_parts:
-        constraint_str = " with " + " and ".join(desc_parts)
-    else:
-        constraint_str = ""
+        flights_db[fnum] = fdata
+        search_flights.append((fnum, fdata))
 
-    return Question(
-        text=f"Which {noun} is the cheapest{constraint_str}? Answer with the {id_label}.",
-        answer=cheapest[id_key],
-        answer_type="item_id",
+    if criterion == "cheapest":
+        best = min(search_flights,
+                   key=lambda x: x[1]["dates"][date]["prices"][cabin])
+        best_fnum = best[0]
+        best_price = best[1]["dates"][date]["prices"][cabin]
+        question = f"I need the cheapest {cabin} flight from {origin} to {dest} on May {day}."
+        communicate = [best_fnum, str(int(best_price))]
+        expected = {"flight": best_fnum, "price": best_price}
+    elif criterion == "earliest":
+        best = min(search_flights,
+                   key=lambda x: x[1]["scheduled_departure_time_est"])
+        best_fnum = best[0]
+        dep_time = best[1]["scheduled_departure_time_est"]
+        question = f"I need the earliest {cabin} flight from {origin} to {dest} on May {day}."
+        communicate = [best_fnum, dep_time[:5]]
+        expected = {"flight": best_fnum, "departure": dep_time}
+    else:  # most_seats
+        best = max(search_flights,
+                   key=lambda x: x[1]["dates"][date]["available_seats"][cabin])
+        best_fnum = best[0]
+        seats = best[1]["dates"][date]["available_seats"][cabin]
+        question = f"Which {cabin} flight from {origin} to {dest} on May {day} has the most available seats?"
+        communicate = [best_fnum, str(seats)]
+        expected = {"flight": best_fnum, "seats": seats}
+
+    initial_msg = (
+        f"Hi, my name is {name['first_name']} {name['last_name']}. "
+        f"My user ID is {uid}. {question} "
+        f"Can you search and tell me which flight that is?"
+    )
+
+    user_sys = build_user_system_prompt(
+        customer_context=(
+            f"Your name is {name['first_name']} {name['last_name']}. "
+            f"Your user id is {uid}. {question}"
+        ),
+        goal=question,
+        approach="cooperative",
+        required_communication="Confirm when the agent gives you the flight number and details.",
+    )
+
+    db = build_airline_db(user, reservations, flights_db)
+
+    return SDRScenario(
+        domain="airline",
+        scenario_type="flight_selection",
+        user_system_prompt=user_sys,
+        initial_message=initial_msg,
+        expected_answer=expected,
+        communicate_info=communicate,
+        description=f"Flight selection: {criterion} {cabin} {origin}->{dest}",
+        key_facts={"criterion": criterion, "cabin": cabin, "origin": origin,
+                   "dest": dest, "date": date, "best_flight": best_fnum},
+        db=db,
     )
 
 
-def _q_select_max_attr(rng: random.Random, items: List[Dict],
-                       dtype: str) -> Optional[Question]:
-    """Which item has the max/min of a numeric attribute?"""
-    if dtype == "products":
-        choices = [
-            ("battery_life_hours", "longest battery life", True),
-            ("weight_oz", "heaviest weight", True),
-            ("rating", "highest rating", True),
-            ("warranty_months", "longest warranty", True),
-        ]
-        id_key = "item_id"
-        noun = "product"
-    elif dtype == "flights":
-        choices = [
-            ("duration_minutes", "longest duration", True),
-            ("seats_available", "most available seats", True),
-        ]
-        id_key = "flight_number"
-        noun = "flight"
-    else:
-        return None
+def _gen_baggage_computation(rng: random.Random) -> SDRScenario:
+    """User asks about baggage allowance. Agent must look up and compute."""
+    membership = rng.choice(["regular", "silver", "gold"])
+    user, reservations, flights_db = _gen_user_with_reservations(
+        rng, n_reservations=rng.randint(2, 4), membership=membership)
+    uid = user["user_id"]
+    name = user["name"]
 
-    attr, desc, is_max = rng.choice(choices)
-    # Sometimes flip to min
-    if rng.random() < 0.3:
-        desc = desc.replace("longest", "shortest").replace("heaviest", "lightest")
-        desc = desc.replace("highest", "lowest").replace("most", "fewest")
-        is_max = not is_max
-
-    target = max(items, key=lambda x: x[attr]) if is_max else min(items, key=lambda x: x[attr])
-    return Question(
-        text=f"Which {noun} has the {desc}? Answer with the {id_key}.",
-        answer=target[id_key],
-        answer_type="item_id",
-    )
-
-
-def _q_select_nth(rng: random.Random, items: List[Dict],
-                  dtype: str) -> Optional[Question]:
-    """Which item is the Nth cheapest/most expensive?"""
-    if len(items) < 3:
-        return None
-
-    n = rng.randint(2, min(5, len(items)))
-    ordinal = {2: "2nd", 3: "3rd", 4: "4th", 5: "5th"}.get(n, f"{n}th")
-
-    if dtype == "products":
-        id_key = "item_id"
-        noun = "product"
-    elif dtype == "flights":
-        id_key = "flight_number"
-        noun = "flight"
-    else:
-        return None
-
-    ascending = rng.random() < 0.6
-    sorted_items = sorted(items, key=lambda x: x["price"], reverse=not ascending)
-    target = sorted_items[n - 1]
-    direction = "cheapest" if ascending else "most expensive"
-
-    return Question(
-        text=f"Which {noun} is the {ordinal} {direction}? Answer with the {id_key}.",
-        answer=target[id_key],
-        answer_type="item_id",
-    )
-
-
-def _q_compute_sum(rng: random.Random, items: List[Dict],
-                   dtype: str) -> Optional[Question]:
-    """What is the total price of items X and Y?"""
-    if len(items) < 2:
-        return None
-
-    k = rng.randint(2, min(3, len(items)))
-    selected = rng.sample(items, k)
-
-    if dtype == "products":
-        ids = [x["item_id"] for x in selected]
-        id_label = "items"
-    elif dtype == "flights":
-        ids = [x["flight_number"] for x in selected]
-        id_label = "flights"
-    else:
-        return None
-
-    total = round(sum(x["price"] for x in selected), 2)
-    ids_str = ", ".join(ids)
-
-    return Question(
-        text=f"What is the total price of {id_label} {ids_str}? Answer with a number.",
-        answer=total,
-        answer_type="number",
-    )
-
-
-def _q_compute_derived(rng: random.Random, context: Dict) -> Optional[Question]:
-    """Compute nonfree bags using tier table + reservation data."""
-    if context is None:
-        return None
-
-    tier = context["membership_tier"]
-    reservations = context["reservations"]
-    policy = context["baggage_policy"]
-
-    if not reservations:
-        return None
-
+    # Pick a reservation to ask about
     res = rng.choice(reservations)
     cabin = res["cabin"]
+    n_pax = len(res["passengers"])
     total_bags = res["total_baggages"]
-    free_bags = policy[tier][cabin]
-    nonfree = max(0, total_bags - free_bags)
+    free_per_pax = FREE_BAGS.get((membership, cabin), 0)
+    free_total = free_per_pax * n_pax
+    nonfree = max(0, total_bags - free_total)
 
-    return Question(
-        text=(
-            f"Reservation {res['reservation_id']} has {total_bags} total bags. "
-            f"The member is {tier} tier in {cabin} cabin. "
-            f"According to the baggage_policy table, how many nonfree (paid) bags "
-            f"does this reservation have? Answer with a number."
+    question_type = rng.choice(["free_bags", "nonfree_bags", "can_add"])
+
+    if question_type == "free_bags":
+        question = (
+            f"How many free checked bags am I allowed per passenger on "
+            f"reservation {res['reservation_id']}?"
+        )
+        communicate = [str(free_per_pax)]
+        expected = {"free_per_pax": free_per_pax}
+    elif question_type == "nonfree_bags":
+        question = (
+            f"How many of my {total_bags} total bags on reservation "
+            f"{res['reservation_id']} are paid (non-free) bags?"
+        )
+        communicate = [str(nonfree)]
+        expected = {"nonfree_bags": nonfree}
+    else:  # can_add
+        max_bags_pp = 3 if cabin == "business" else 2
+        max_total = max_bags_pp * n_pax
+        can_add = max(0, max_total - total_bags)
+        question = (
+            f"How many more bags can I add to reservation {res['reservation_id']}? "
+            f"I currently have {total_bags} bags."
+        )
+        communicate = [str(can_add)]
+        expected = {"can_add": can_add}
+
+    initial_msg = (
+        f"Hi, I'm {name['first_name']} {name['last_name']}. "
+        f"My user ID is {uid}. {question}"
+    )
+
+    user_sys = build_user_system_prompt(
+        customer_context=(
+            f"Your name is {name['first_name']} {name['last_name']}. "
+            f"Your user id is {uid}. {question}"
         ),
-        answer=nonfree,
-        answer_type="number",
+        goal=question,
+        approach="cooperative",
+        required_communication="Wait for the agent's answer. Confirm if correct.",
+    )
+
+    db = build_airline_db(user, reservations, flights_db)
+
+    return SDRScenario(
+        domain="airline",
+        scenario_type="baggage_computation",
+        user_system_prompt=user_sys,
+        initial_message=initial_msg,
+        expected_answer=expected,
+        communicate_info=communicate,
+        description=f"Baggage computation: {question_type} ({membership}/{cabin})",
+        key_facts={"membership": membership, "cabin": cabin, "n_pax": n_pax,
+                   "total_bags": total_bags, "question_type": question_type},
+        db=db,
     )
 
 
-def _q_multi_constraint(rng: random.Random, items: List[Dict],
-                        dtype: str) -> Optional[Question]:
-    """Cheapest item matching 2-3 attribute constraints."""
-    if dtype != "products" or len(items) < 5:
-        return None
+def _gen_reservation_comparison(rng: random.Random) -> SDRScenario:
+    """User asks which reservation is cheapest/has most passengers/etc."""
+    user, reservations, flights_db = _gen_user_with_reservations(
+        rng, n_reservations=rng.randint(3, 5))
+    uid = user["user_id"]
+    name = user["name"]
 
-    attrs = ["color", "size", "connectivity", "material", "power_source"]
-    rng.shuffle(attrs)
-    num_c = rng.randint(2, 3)
+    comparison = rng.choice(["cheapest", "most_passengers", "most_bags"])
 
-    filtered = list(items)
-    desc_parts = []
+    if comparison == "cheapest":
+        # Total cost = sum of payment history amounts
+        def cost(r):
+            return sum(p["amount"] for p in r["payment_history"])
+        best = min(reservations, key=cost)
+        answer_val = cost(best)
+        question = "Which of my reservations has the lowest total cost?"
+        communicate = [best["reservation_id"], str(int(answer_val))]
+        expected = {"reservation_id": best["reservation_id"], "cost": answer_val}
+    elif comparison == "most_passengers":
+        best = max(reservations, key=lambda r: len(r["passengers"]))
+        n = len(best["passengers"])
+        question = "Which of my reservations has the most passengers?"
+        communicate = [best["reservation_id"], str(n)]
+        expected = {"reservation_id": best["reservation_id"], "passengers": n}
+    else:  # most_bags
+        best = max(reservations, key=lambda r: r["total_baggages"])
+        n = best["total_baggages"]
+        question = "Which of my reservations has the most checked bags?"
+        communicate = [best["reservation_id"], str(n)]
+        expected = {"reservation_id": best["reservation_id"], "bags": n}
 
-    for attr in attrs[:num_c]:
-        values = list(set(x[attr] for x in filtered))
-        if len(values) < 2:
-            continue
-        target = rng.choice(values)
-        new_filtered = [x for x in filtered if x[attr] == target]
-        if new_filtered:
-            filtered = new_filtered
-            desc_parts.append(f"{attr}=\"{target}\"")
-
-    if not filtered or len(desc_parts) < 2:
-        return None
-
-    cheapest = min(filtered, key=lambda x: x["price"])
-    constraint_str = " AND ".join(desc_parts)
-
-    return Question(
-        text=f"Which is the cheapest product where {constraint_str}? Answer with the item_id.",
-        answer=cheapest["item_id"],
-        answer_type="item_id",
+    initial_msg = (
+        f"Hi, my name is {name['first_name']} {name['last_name']}. "
+        f"My user ID is {uid}. {question}"
     )
 
-
-def _q_compare(rng: random.Random, items: List[Dict],
-               dtype: str) -> Optional[Question]:
-    """Is item A cheaper than items B + C combined?"""
-    if len(items) < 3:
-        return None
-
-    a, b, c = rng.sample(items, 3)
-
-    if dtype == "products":
-        id_key = "item_id"
-    elif dtype == "flights":
-        id_key = "flight_number"
-    else:
-        return None
-
-    result = "yes" if a["price"] < (b["price"] + c["price"]) else "no"
-
-    return Question(
-        text=(
-            f"Is {a[id_key]} (${a['price']}) cheaper than {b[id_key]} (${b['price']}) "
-            f"and {c[id_key]} (${c['price']}) combined? Answer 'yes' or 'no'."
+    user_sys = build_user_system_prompt(
+        customer_context=(
+            f"Your name is {name['first_name']} {name['last_name']}. "
+            f"Your user id is {uid}. {question}"
         ),
-        answer=result,
-        answer_type="boolean",
+        goal=question,
+        approach="cooperative",
+        required_communication="Wait for the agent's answer.",
+    )
+
+    db = build_airline_db(user, reservations, flights_db)
+
+    return SDRScenario(
+        domain="airline",
+        scenario_type="reservation_comparison",
+        user_system_prompt=user_sys,
+        initial_message=initial_msg,
+        expected_answer=expected,
+        communicate_info=communicate,
+        description=f"Reservation comparison: {comparison}",
+        key_facts={"comparison": comparison,
+                   "best_res": best["reservation_id"]},
+        db=db,
     )
 
 
-def _q_count(rng: random.Random, items: List[Dict],
-             dtype: str) -> Optional[Question]:
-    """How many items match a given criterion?"""
-    if dtype == "products":
-        attr = rng.choice(["color", "size", "connectivity"])
-        values = list(set(x[attr] for x in items))
-        if len(values) < 2:
-            return None
-        target = rng.choice(values)
-        count = sum(1 for x in items if x[attr] == target)
-        return Question(
-            text=f"How many products have {attr}=\"{target}\"? Answer with a number.",
-            answer=count,
-            answer_type="number",
+def _gen_cost_computation(rng: random.Random) -> SDRScenario:
+    """User asks about cost of upgrading or price difference."""
+    user, reservations, flights_db = _gen_user_with_reservations(
+        rng, n_reservations=rng.randint(2, 3))
+    uid = user["user_id"]
+    name = user["name"]
+
+    # Pick a reservation to upgrade
+    res = rng.choice(reservations)
+    flight_info = res["flights"][0]
+    fnum = flight_info["flight_number"]
+    date = flight_info["date"]
+    current_cabin = res["cabin"]
+    current_price = flight_info["price"]
+
+    # Find an upgrade target cabin
+    cabin_order = {"basic_economy": 0, "economy": 1, "business": 2}
+    possible_upgrades = [c for c in CABIN_CLASSES
+                         if cabin_order[c] > cabin_order[current_cabin]]
+
+    if not possible_upgrades:
+        # Already in business - ask about downgrade saving instead
+        possible_upgrades = [c for c in CABIN_CLASSES
+                             if cabin_order[c] < cabin_order[current_cabin]]
+        target_cabin = rng.choice(possible_upgrades) if possible_upgrades else "economy"
+        target_price = flights_db[fnum]["dates"][date]["prices"][target_cabin]
+        diff = current_price - target_price
+        n_pax = len(res["passengers"])
+        total_diff = diff * n_pax
+
+        question = (
+            f"How much would I save per passenger if I downgraded reservation "
+            f"{res['reservation_id']} from {current_cabin} to {target_cabin}?"
         )
-    elif dtype == "flights":
-        attr = rng.choice(["cabin", "stops"])
-        if attr == "cabin":
-            target = rng.choice(["economy", "business"])
-            count = sum(1 for f in items if f["cabin"] == target)
-            return Question(
-                text=f"How many flights have cabin=\"{target}\"? Answer with a number.",
-                answer=count,
-                answer_type="number",
-            )
-        else:
-            target = rng.choice([0, 1])
-            count = sum(1 for f in items if f["stops"] == target)
-            label = "direct (0 stops)" if target == 0 else "1-stop"
-            return Question(
-                text=f"How many {label} flights are there? Answer with a number.",
-                answer=count,
-                answer_type="number",
-            )
-    return None
-
-
-def _q_price_lookup(rng: random.Random, items: List[Dict],
-                    dtype: str) -> Question:
-    """Simple fallback: what is the price of item X?"""
-    item = rng.choice(items)
-    if dtype == "products":
-        return Question(
-            text=f"What is the price of {item['item_id']}? Answer with a number.",
-            answer=item["price"],
-            answer_type="number",
-        )
-    elif dtype == "flights":
-        return Question(
-            text=f"What is the price of flight {item['flight_number']}? Answer with a number.",
-            answer=item["price"],
-            answer_type="number",
-        )
-    else:  # baggage
-        return Question(
-            text=f"What is the trip_price of reservation {item['reservation_id']}? Answer with a number.",
-            answer=item["trip_price"],
-            answer_type="number",
-        )
-
-
-# =============================================================================
-# Episode generation
-# =============================================================================
-
-def generate_episode(seed: int, difficulty: int = 3) -> Episode:
-    """Generate a single episode with data + 3 questions."""
-    rng = random.Random(seed)
-    difficulty = max(1, min(5, difficulty))
-    config = DIFFICULTY_CONFIG[difficulty]
-
-    num_items = rng.randint(*config["items"])
-
-    # Pick data type; baggage only at difficulty >= 4
-    if difficulty >= 4 and rng.random() < 0.3:
-        data_type = "baggage"
+        communicate = [str(int(diff))]
+        expected = {"saving_per_pax": diff, "total_saving": total_diff}
     else:
-        data_type = rng.choice(["products", "flights"])
+        target_cabin = rng.choice(possible_upgrades)
+        target_price = flights_db[fnum]["dates"][date]["prices"][target_cabin]
+        diff = target_price - current_price
+        n_pax = len(res["passengers"])
+        total_diff = diff * n_pax
 
-    # Generate data
-    baggage_ctx = None
-    if data_type == "products":
-        items = _gen_product_catalog(rng, num_items)
-        data_json = json.dumps(items, indent=2)
-        data_label = "Product Catalog"
-    elif data_type == "flights":
-        items = _gen_flight_list(rng, num_items)
-        data_json = json.dumps(items, indent=2)
-        data_label = "Flight Search Results"
+        question = (
+            f"How much extra per passenger would it cost to upgrade reservation "
+            f"{res['reservation_id']} from {current_cabin} to {target_cabin}?"
+        )
+        communicate = [str(int(diff))]
+        expected = {"cost_per_pax": diff, "total_cost": total_diff}
+
+    initial_msg = (
+        f"Hi, I'm {name['first_name']} {name['last_name']}. "
+        f"My user ID is {uid}. {question}"
+    )
+
+    user_sys = build_user_system_prompt(
+        customer_context=(
+            f"Your name is {name['first_name']} {name['last_name']}. "
+            f"Your user id is {uid}. {question}"
+        ),
+        goal=question,
+        approach="cooperative",
+        required_communication="Wait for the agent to calculate and tell you the cost.",
+    )
+
+    db = build_airline_db(user, reservations, flights_db)
+
+    return SDRScenario(
+        domain="airline",
+        scenario_type="cost_computation",
+        user_system_prompt=user_sys,
+        initial_message=initial_msg,
+        expected_answer=expected,
+        communicate_info=communicate,
+        description=f"Cost computation: {current_cabin}->{target_cabin}",
+        key_facts={"reservation": res["reservation_id"], "current_cabin": current_cabin,
+                   "target_cabin": target_cabin, "diff": diff},
+        db=db,
+    )
+
+
+def _gen_flight_status_check(rng: random.Random) -> SDRScenario:
+    """User asks about flight status. Agent must look up and report."""
+    user, reservations, flights_db = _gen_user_with_reservations(
+        rng, n_reservations=rng.randint(2, 3))
+    uid = user["user_id"]
+    name = user["name"]
+
+    # Pick a reservation and set its flight to a status
+    res = rng.choice(reservations)
+    flight_info = res["flights"][0]
+    fnum = flight_info["flight_number"]
+    date = flight_info["date"]
+
+    status = rng.choice(["available", "delayed", "cancelled"])
+    old_data = flights_db[fnum]["dates"][date]
+
+    if status == "delayed":
+        dep = flights_db[fnum]["scheduled_departure_time_est"]
+        arr = flights_db[fnum]["scheduled_arrival_time_est"]
+        dep_h = int(dep[:2])
+        arr_h = int(arr[:2])
+        delay_h = rng.randint(1, 4)
+        flights_db[fnum]["dates"][date] = {
+            "status": "delayed",
+            "estimated_departure_time_est": f"{date}T{(dep_h + delay_h) % 24:02d}:{dep[3:5]}:00",
+            "estimated_arrival_time_est": f"{date}T{(arr_h + delay_h) % 24:02d}:{arr[3:5]}:00",
+        }
+        communicate = ["delayed"]
+        expected = {"status": "delayed", "flight": fnum}
+    elif status == "cancelled":
+        flights_db[fnum]["dates"][date] = {"status": "cancelled"}
+        communicate = ["cancelled"]
+        expected = {"status": "cancelled", "flight": fnum}
     else:
-        baggage_ctx, items = _gen_baggage_context(rng)
-        data_json = json.dumps(baggage_ctx, indent=2)
-        data_label = "Membership & Reservations"
+        # on time / available — tool returns "available" so accept either phrasing
+        communicate = ["available", fnum]
+        expected = {"status": "available", "flight": fnum}
 
-    constraints = config["constraints"]
-    avail_types = list(config["types"])
+    question = (
+        f"Can you check the status of my flight on reservation "
+        f"{res['reservation_id']}? Is it on time?"
+    )
 
-    # Build generator map
-    generators = {
-        "select_cheapest": lambda: _q_select_cheapest(rng, items, data_type, constraints),
-        "select_max_attr": lambda: _q_select_max_attr(rng, items, data_type),
-        "select_nth": lambda: _q_select_nth(rng, items, data_type),
-        "compute_sum": lambda: _q_compute_sum(rng, items, data_type),
-        "compute_derived": lambda: _q_compute_derived(rng, baggage_ctx),
-        "multi_constraint": lambda: _q_multi_constraint(rng, items, data_type),
-        "compare": lambda: _q_compare(rng, items, data_type),
-        "count": lambda: _q_count(rng, items, data_type),
+    initial_msg = (
+        f"Hi, I'm {name['first_name']} {name['last_name']}. "
+        f"My user ID is {uid}. {question}"
+    )
+
+    user_sys = build_user_system_prompt(
+        customer_context=(
+            f"Your name is {name['first_name']} {name['last_name']}. "
+            f"Your user id is {uid}. {question}"
+        ),
+        goal=question,
+        approach="cooperative",
+        required_communication="Wait for the agent to tell you the flight status.",
+    )
+
+    db = build_airline_db(user, reservations, flights_db)
+
+    return SDRScenario(
+        domain="airline",
+        scenario_type="flight_status_check",
+        user_system_prompt=user_sys,
+        initial_message=initial_msg,
+        expected_answer=expected,
+        communicate_info=communicate,
+        description=f"Flight status: {fnum} is {status}",
+        key_facts={"flight": fnum, "status": status,
+                   "reservation": res["reservation_id"]},
+        db=db,
+    )
+
+
+def _gen_book_flight(rng: random.Random) -> SDRScenario:
+    """User wants to book a flight with specific constraints.
+
+    Agent must search flights, pick the right one meeting constraints
+    (cheapest economy, specific date, payment method), and call book_reservation.
+    Mirrors eval failure: wrong arguments on book_reservation (21% of airline SD failures).
+    """
+    user, reservations, flights_db = _gen_user_with_reservations(rng, n_reservations=1)
+    uid = user["user_id"]
+    name = user["name"]
+    membership = user["membership"]
+
+    origin = rng.choice(IATA_CODES)
+    dest = rng.choice([c for c in IATA_CODES if c != origin])
+    day = rng.randint(18, 25)
+    date = f"2024-05-{day:02d}"
+    cabin = rng.choice(["economy", "business"])
+
+    # Generate 4-6 flights, ensure unique prices for the target cabin
+    n_flights = rng.randint(4, 6)
+    search_flights = []
+    used_prices = set()
+    for _ in range(n_flights):
+        fnum, fdata = _gen_flight(rng, origin, dest, date,
+                                   base_price=rng.uniform(150, 600))
+        p = fdata["dates"][date]["prices"][cabin]
+        while p in used_prices:
+            p += 1
+        used_prices.add(p)
+        fdata["dates"][date]["prices"][cabin] = p
+        flights_db[fnum] = fdata
+        search_flights.append((fnum, fdata))
+
+    # Pick cheapest flight as the expected booking
+    best = min(search_flights, key=lambda x: x[1]["dates"][date]["prices"][cabin])
+    best_fnum = best[0]
+    best_price = best[1]["dates"][date]["prices"][cabin]
+
+    # Pick payment method — sometimes specify credit card, sometimes gift card
+    pm_ids = list(user["payment_methods"].keys())
+    pm_id = rng.choice(pm_ids)
+    pm_info = user["payment_methods"][pm_id]
+    if pm_info["source"] == "credit_card":
+        pm_desc = f"my credit card ending in {pm_info['last_four']}"
+    elif pm_info["source"] == "gift_card":
+        pm_desc = "my gift card"
+    else:
+        pm_desc = f"payment method {pm_id}"
+
+    n_passengers = rng.randint(1, 2)
+    pax_list = user["saved_passengers"][:n_passengers]
+    if n_passengers > len(pax_list):
+        pax_list = user["saved_passengers"][:1]
+        n_passengers = 1
+
+    question = (
+        f"I need to book the cheapest {cabin} flight from {origin} to {dest} "
+        f"on May {day}. Please use {pm_desc} for payment. "
+        f"There will be {n_passengers} passenger{'s' if n_passengers > 1 else ''}."
+    )
+
+    initial_msg = (
+        f"Hi, my name is {name['first_name']} {name['last_name']}. "
+        f"My user ID is {uid}. {question}"
+    )
+
+    user_sys = build_user_system_prompt(
+        customer_context=(
+            f"Your name is {name['first_name']} {name['last_name']}. "
+            f"Your user id is {uid}. {question}"
+        ),
+        goal=question,
+        approach="cooperative",
+        required_communication="Confirm when the booking is made. Provide the flight number.",
+    )
+
+    db = build_airline_db(user, reservations, flights_db)
+
+    expected_tool = {
+        "name": "book_reservation",
+        "key_args": {
+            "user_id": uid,
+            "origin": origin,
+            "destination": dest,
+            "flight_type": "one_way",
+            "cabin": cabin,
+            "payment_id": pm_id,
+        },
     }
 
-    questions: List[Question] = []
-    used_answers = set()
-    attempts = 0
-
-    while len(questions) < 3 and attempts < 50:
-        attempts += 1
-        qtype = rng.choice(avail_types)
-        gen = generators.get(qtype)
-        if gen is None:
-            continue
-        q = gen()
-        if q is None:
-            continue
-        # Avoid duplicate answers
-        ans_key = str(q.answer)
-        if ans_key in used_answers:
-            continue
-        used_answers.add(ans_key)
-        questions.append(q)
-
-    # Pad with simple price-lookup fallbacks if needed
-    while len(questions) < 3:
-        q = _q_price_lookup(rng, items, data_type)
-        if str(q.answer) not in used_answers:
-            used_answers.add(str(q.answer))
-            questions.append(q)
-
-    return Episode(
-        data_json=data_json,
-        data_label=data_label,
-        data_type=data_type,
-        questions=questions[:3],
-        difficulty=difficulty,
-        items=items,
-        baggage_context=baggage_ctx,
+    return SDRScenario(
+        domain="airline",
+        scenario_type="book_flight",
+        user_system_prompt=user_sys,
+        initial_message=initial_msg,
+        expected_answer={"flight": best_fnum, "price": best_price},
+        communicate_info=[best_fnum],
+        description=f"Book flight: cheapest {cabin} {origin}->{dest} May {day}",
+        key_facts={"origin": origin, "dest": dest, "date": date, "cabin": cabin,
+                   "best_flight": best_fnum, "payment_id": pm_id},
+        db=db,
+        expected_tool_call=expected_tool,
     )
 
 
-# =============================================================================
-# Answer checking
-# =============================================================================
+def _gen_change_flight(rng: random.Random) -> SDRScenario:
+    """User wants to change their flight to a different one on the same route.
 
-def _check_answer(predicted: Any, expected: Any, answer_type: str) -> bool:
-    """Check if a predicted answer matches the expected answer."""
-    if predicted is None:
-        return False
+    Agent must look up reservation, search for alternatives, pick the right one,
+    and call update_reservation_flights.
+    Mirrors eval failure: wrong arguments on update_reservation_flights (12.5%).
+    """
+    user, reservations, flights_db = _gen_user_with_reservations(
+        rng, n_reservations=rng.randint(2, 3))
+    uid = user["user_id"]
+    name = user["name"]
 
-    if answer_type == "item_id":
-        return str(predicted).strip() == str(expected).strip()
+    # Pick a reservation to change
+    res = rng.choice(reservations)
+    flight_info = res["flights"][0]
+    fnum = flight_info["flight_number"]
+    origin = res["origin"]
+    dest = res["destination"]
+    date = flight_info["date"]
+    cabin = res["cabin"]
 
-    elif answer_type == "number":
+    # Add 3-5 alternative flights on the same route
+    alternatives = []
+    used_prices = {flights_db[fnum]["dates"][date]["prices"][cabin]}
+    for _ in range(rng.randint(3, 5)):
+        alt_fnum, alt_fdata = _gen_flight(rng, origin, dest, date,
+                                           base_price=rng.uniform(150, 600))
+        p = alt_fdata["dates"][date]["prices"][cabin]
+        while p in used_prices:
+            p += 1
+        used_prices.add(p)
+        alt_fdata["dates"][date]["prices"][cabin] = p
+        flights_db[alt_fnum] = alt_fdata
+        alternatives.append((alt_fnum, alt_fdata))
+
+    # User wants the cheapest alternative
+    best_alt = min(alternatives, key=lambda x: x[1]["dates"][date]["prices"][cabin])
+    new_fnum = best_alt[0]
+    new_price = best_alt[1]["dates"][date]["prices"][cabin]
+
+    pm_id = list(user["payment_methods"].keys())[0]
+
+    question = (
+        f"I'd like to change the flight on reservation {res['reservation_id']} "
+        f"to the cheapest available {cabin} flight on the same route. "
+        f"Please use my payment method on file."
+    )
+
+    initial_msg = (
+        f"Hi, my name is {name['first_name']} {name['last_name']}. "
+        f"My user ID is {uid}. {question}"
+    )
+
+    user_sys = build_user_system_prompt(
+        customer_context=(
+            f"Your name is {name['first_name']} {name['last_name']}. "
+            f"Your user id is {uid}. {question}"
+        ),
+        goal=question,
+        approach="cooperative",
+        required_communication="Confirm when the flight has been changed. Tell me the new flight number.",
+    )
+
+    db = build_airline_db(user, reservations, flights_db)
+
+    expected_tool = {
+        "name": "update_reservation_flights",
+        "key_args": {
+            "reservation_id": res["reservation_id"],
+            "cabin": cabin,
+        },
+    }
+
+    return SDRScenario(
+        domain="airline",
+        scenario_type="change_flight",
+        user_system_prompt=user_sys,
+        initial_message=initial_msg,
+        expected_answer={"new_flight": new_fnum, "new_price": new_price},
+        communicate_info=[new_fnum],
+        description=f"Change flight: {res['reservation_id']} to cheapest {cabin}",
+        key_facts={"reservation": res["reservation_id"], "cabin": cabin,
+                   "new_flight": new_fnum, "origin": origin, "dest": dest},
+        db=db,
+        expected_tool_call=expected_tool,
+    )
+
+
+def _gen_send_compensation(rng: random.Random) -> SDRScenario:
+    """User has a cancelled/delayed flight and requests compensation certificate.
+
+    Agent must look up reservation, check flight status, compute the correct amount,
+    and call send_certificate.
+    Mirrors eval failure: wrong send_certificate amount (8%).
+    """
+    membership = rng.choice(["silver", "gold"])  # must be eligible
+    user, reservations, flights_db = _gen_user_with_reservations(
+        rng, n_reservations=rng.randint(2, 4), membership=membership)
+    uid = user["user_id"]
+    name = user["name"]
+
+    # Pick a reservation and set its flight to cancelled or delayed
+    res = rng.choice(reservations)
+    flight_info = res["flights"][0]
+    fnum = flight_info["flight_number"]
+    date = flight_info["date"]
+
+    status = rng.choice(["cancelled", "delayed"])
+    if status == "delayed":
+        dep = flights_db[fnum]["scheduled_departure_time_est"]
+        dep_h = int(dep[:2])
+        delay_h = rng.randint(2, 5)
+        flights_db[fnum]["dates"][date] = {
+            "status": "delayed",
+            "estimated_departure_time_est": f"{date}T{(dep_h + delay_h) % 24:02d}:{dep[3:5]}:00",
+            "estimated_arrival_time_est": f"{date}T{(dep_h + delay_h + 3) % 24:02d}:{dep[3:5]}:00",
+        }
+    else:
+        flights_db[fnum]["dates"][date] = {"status": "cancelled"}
+
+    # Compute expected certificate amount: $100 per passenger for cancelled,
+    # $50 per passenger for delayed (matching typical airline policy)
+    n_pax = len(res["passengers"])
+    cabin = res["cabin"]
+    insurance = res.get("insurance", "no")
+
+    # Amount depends on cabin and status per policy
+    if status == "cancelled":
+        per_pax = 100
+    else:
+        per_pax = 50
+    amount = per_pax * n_pax
+
+    question = (
+        f"My flight {fnum} on reservation {res['reservation_id']} appears to be "
+        f"{status}. I'd like to request a travel certificate as compensation."
+    )
+
+    initial_msg = (
+        f"Hi, my name is {name['first_name']} {name['last_name']}. "
+        f"My user ID is {uid}. {question}"
+    )
+
+    user_sys = build_user_system_prompt(
+        customer_context=(
+            f"Your name is {name['first_name']} {name['last_name']}. "
+            f"Your user id is {uid}. {question}"
+        ),
+        goal=question,
+        approach="cooperative",
+        required_communication="Confirm the certificate amount. Confirm it has been issued.",
+    )
+
+    db = build_airline_db(user, reservations, flights_db)
+
+    expected_tool = {
+        "name": "send_certificate",
+        "key_args": {
+            "user_id": uid,
+            "amount": amount,
+        },
+    }
+
+    return SDRScenario(
+        domain="airline",
+        scenario_type="send_compensation",
+        user_system_prompt=user_sys,
+        initial_message=initial_msg,
+        expected_answer={"amount": amount, "status": status},
+        communicate_info=[str(amount)],
+        description=f"Compensation: {status} flight, {n_pax} pax, ${amount}",
+        key_facts={"flight": fnum, "status": status, "amount": amount,
+                   "reservation": res["reservation_id"]},
+        db=db,
+        expected_tool_call=expected_tool,
+    )
+
+
+# =====================================================================
+# Retail scenario generators
+# =====================================================================
+
+def _gen_retail_sample(rng: random.Random, n_orders: int = 3,
+                       min_items: int = 2, need_delivered: bool = False,
+                       many_variants: bool = False) -> Dict[str, Any]:
+    """Helper: generate a retail user with multiple orders via synthetic_db.
+
+    Returns the raw dict from generate_retail_multi_orders with keys:
+      user, orders, order_ids, user_id, products_db
+    """
+    order_specs = []
+    for i in range(n_orders):
+        if need_delivered and i == 0:
+            status = "delivered"
+        else:
+            status = rng.choice(["pending", "delivered"])
+        order_specs.append({"status": status, "min_items": min_items})
+
+    criteria = {
+        "has_gift_card": rng.random() < 0.3,
+        "has_multiple_payment_types": rng.random() < 0.4,
+    }
+    sample = sample_retail_multi_orders(rng, criteria, order_specs)
+
+    # For variant_selection scenarios, bulk up the variant count to 10+
+    if many_variants and sample:
+        from adversarial_policy_game.synthetic_db import (
+            PRODUCT_CATALOG, _gen_item_id,
+        )
+        for prod_id, prod_entry in sample["products_db"].items():
+            variants = prod_entry["variants"]
+            # Find the product template for option generation
+            tmpl = None
+            for p in PRODUCT_CATALOG:
+                if p["name"] == prod_entry["name"]:
+                    tmpl = p
+                    break
+            if tmpl is None:
+                continue
+            # Pad to at least 10 variants
+            while len(variants) < 12:
+                v_id = _gen_item_id(rng)
+                v_opts = {}
+                for opt_name, opt_values in tmpl["options_template"].items():
+                    v_opts[opt_name] = rng.choice(opt_values)
+                v_price = round(rng.uniform(15, 350), 2)
+                variants[v_id] = {
+                    "item_id": v_id,
+                    "options": v_opts,
+                    "available": rng.random() > 0.15,
+                    "price": v_price,
+                }
+
+    return sample
+
+
+def _gen_variant_selection(rng: random.Random) -> SDRScenario:
+    """User wants to exchange a delivered item for a specific variant.
+
+    Agent must get_product_details, scan 10+ variants, and find the one
+    matching the requested options.  Key failure: picking wrong variant
+    from a dense option space.
+    """
+    sample = _gen_retail_sample(rng, n_orders=2, min_items=2,
+                                need_delivered=True, many_variants=True)
+    user = sample["user"]
+    orders = sample["orders"]
+    products_db = sample["products_db"]
+    name = user["name"]
+    zipcode = user["address"]["zip"]
+
+    # Pick a delivered order with items
+    delivered = [o for o in orders if o["status"] == "delivered"]
+    if not delivered:
+        # Fallback: force one to be delivered
+        orders[0]["status"] = "delivered"
+        orders[0]["fulfillments"] = [{
+            "tracking_id": [str(rng.randint(100000000000, 999999999999))],
+            "item_ids": [it["item_id"] for it in orders[0]["items"]],
+        }]
+        delivered = [orders[0]]
+
+    order = rng.choice(delivered)
+    item = rng.choice(order["items"])
+    prod_id = item["product_id"]
+    prod_entry = products_db[prod_id]
+    variants = prod_entry["variants"]
+
+    # Pick a target variant that is available, different from current item,
+    # and has UNIQUE options (no other available variant shares the same options)
+    all_option_sets = {}  # frozen options -> list of variant ids
+    for v_id, v in variants.items():
+        key = tuple(sorted(v["options"].items()))
+        all_option_sets.setdefault(key, []).append(v_id)
+
+    available_variants = [
+        v for v_id, v in variants.items()
+        if v["available"] and v_id != item["item_id"]
+        and len(all_option_sets[tuple(sorted(v["options"].items()))]) == 1  # unique options
+    ]
+    if not available_variants:
+        # Fallback: deduplicate by removing extra variants with same options
+        seen_opts = set()
+        for v_id in list(variants.keys()):
+            key = tuple(sorted(variants[v_id]["options"].items()))
+            if key in seen_opts:
+                del variants[v_id]
+            else:
+                seen_opts.add(key)
+        available_variants = [
+            v for v_id, v in variants.items()
+            if v["available"] and v_id != item["item_id"]
+        ]
+        if not available_variants:
+            for v_id, v in variants.items():
+                if v_id != item["item_id"]:
+                    v["available"] = True
+                    available_variants = [v]
+                    break
+
+    target = rng.choice(available_variants)
+    target_item_id = target["item_id"]
+    target_options = target["options"]
+    target_price = target["price"]
+
+    # Build natural language description of desired options
+    opt_desc = ", ".join(f"{k}: {v}" for k, v in target_options.items())
+
+    question = (
+        f"I'd like to exchange the {item['name']} (item {item['item_id']}) "
+        f"from order {order['order_id']} for a different variant. "
+        f"I want the one with {opt_desc}. "
+        f"Can you find the right item ID for that variant?"
+    )
+
+    communicate = [target_item_id]
+    expected = {
+        "target_item_id": target_item_id,
+        "target_options": target_options,
+        "product_id": prod_id,
+    }
+
+    initial_msg = (
+        f"Hi, my name is {name['first_name']} {name['last_name']}. "
+        f"My zip code is {zipcode}. {question}"
+    )
+
+    user_sys = build_user_system_prompt(
+        customer_context=(
+            f"Your name is {name['first_name']} {name['last_name']}. "
+            f"Your zip code is {zipcode}. "
+            f"You want to exchange your {item['name']} for a variant with {opt_desc}."
+        ),
+        goal=question,
+        approach="cooperative",
+        required_communication="Wait for the agent to confirm the item ID of the variant.",
+    )
+
+    db = build_retail_db(user, orders, products_db)
+
+    return SDRScenario(
+        domain="retail",
+        scenario_type="variant_selection",
+        user_system_prompt=user_sys,
+        initial_message=initial_msg,
+        expected_answer=expected,
+        communicate_info=communicate,
+        description=f"Variant selection: {item['name']} -> {opt_desc}",
+        key_facts={"product_id": prod_id, "target_item_id": target_item_id,
+                   "target_options": target_options, "order_id": order["order_id"]},
+        db=db,
+    )
+
+
+def _gen_price_comparison(rng: random.Random) -> SDRScenario:
+    """User asks which order is cheapest, which item costs most, total across orders, etc.
+
+    Agent must get_order_details for multiple orders and compare prices.
+    """
+    n_orders = rng.randint(3, 5)
+    sample = _gen_retail_sample(rng, n_orders=n_orders, min_items=2)
+    user = sample["user"]
+    orders = sample["orders"]
+    products_db = sample["products_db"]
+    name = user["name"]
+    zipcode = user["address"]["zip"]
+
+    comparison = rng.choice([
+        "cheapest_order", "most_expensive_order",
+        "cheapest_item", "most_expensive_item", "total_all_orders",
+    ])
+
+    if comparison == "cheapest_order":
+        def order_total(o):
+            return sum(it["price"] for it in o["items"])
+        # Ensure no ties by adding small perturbations
+        totals = {}
+        for o in orders:
+            t = order_total(o)
+            while t in totals.values():
+                o["items"][0]["price"] = round(o["items"][0]["price"] + 0.01, 2)
+                t = order_total(o)
+            totals[o["order_id"]] = t
+        best = min(orders, key=order_total)
+        val = round(order_total(best), 2)
+        question = "Which of my orders has the lowest total cost?"
+        communicate = [best["order_id"], str(val)]
+        expected = {"order_id": best["order_id"], "total": val}
+
+    elif comparison == "most_expensive_order":
+        def order_total(o):
+            return sum(it["price"] for it in o["items"])
+        totals = {}
+        for o in orders:
+            t = order_total(o)
+            while t in totals.values():
+                o["items"][0]["price"] = round(o["items"][0]["price"] + 0.01, 2)
+                t = order_total(o)
+            totals[o["order_id"]] = t
+        best = max(orders, key=order_total)
+        val = round(order_total(best), 2)
+        question = "Which of my orders has the highest total cost?"
+        communicate = [best["order_id"], str(val)]
+        expected = {"order_id": best["order_id"], "total": val}
+
+    elif comparison == "cheapest_item":
+        all_items = []
+        for o in orders:
+            for it in o["items"]:
+                all_items.append((o["order_id"], it))
+        # Break ties
+        prices = set()
+        for oid, it in all_items:
+            while it["price"] in prices:
+                it["price"] = round(it["price"] + 0.01, 2)
+            prices.add(it["price"])
+        best_oid, best_item = min(all_items, key=lambda x: x[1]["price"])
+        question = "Across all my orders, which single item is the cheapest? Tell me the item name, price, and which order it's in."
+        communicate = [best_item["name"], str(best_item["price"])]
+        expected = {"item_name": best_item["name"], "price": best_item["price"],
+                    "order_id": best_oid}
+
+    elif comparison == "most_expensive_item":
+        all_items = []
+        for o in orders:
+            for it in o["items"]:
+                all_items.append((o["order_id"], it))
+        prices = set()
+        for oid, it in all_items:
+            while it["price"] in prices:
+                it["price"] = round(it["price"] + 0.01, 2)
+            prices.add(it["price"])
+        best_oid, best_item = max(all_items, key=lambda x: x[1]["price"])
+        question = "Across all my orders, which single item is the most expensive? Tell me the item name, price, and which order it's in."
+        communicate = [best_item["name"], str(best_item["price"])]
+        expected = {"item_name": best_item["name"], "price": best_item["price"],
+                    "order_id": best_oid}
+
+    else:  # total_all_orders
+        grand_total = round(sum(
+            sum(it["price"] for it in o["items"]) for o in orders
+        ), 2)
+        question = f"What is the total cost across all {len(orders)} of my orders combined?"
+        communicate = [str(grand_total)]
+        expected = {"grand_total": grand_total, "n_orders": len(orders)}
+
+    initial_msg = (
+        f"Hi, my name is {name['first_name']} {name['last_name']}. "
+        f"My zip code is {zipcode}. {question}"
+    )
+
+    user_sys = build_user_system_prompt(
+        customer_context=(
+            f"Your name is {name['first_name']} {name['last_name']}. "
+            f"Your zip code is {zipcode}. {question}"
+        ),
+        goal=question,
+        approach="cooperative",
+        required_communication="Wait for the agent's answer.",
+    )
+
+    db = build_retail_db(user, orders, products_db)
+
+    return SDRScenario(
+        domain="retail",
+        scenario_type="price_comparison",
+        user_system_prompt=user_sys,
+        initial_message=initial_msg,
+        expected_answer=expected,
+        communicate_info=communicate,
+        description=f"Price comparison: {comparison}",
+        key_facts={"comparison": comparison, "n_orders": len(orders)},
+        db=db,
+    )
+
+
+def _gen_order_status_check(rng: random.Random) -> SDRScenario:
+    """User asks about order status, item details, or payment methods.
+
+    Agent must look up and report correctly.
+    """
+    sample = _gen_retail_sample(rng, n_orders=rng.randint(2, 4), min_items=2)
+    user = sample["user"]
+    orders = sample["orders"]
+    products_db = sample["products_db"]
+    name = user["name"]
+    zipcode = user["address"]["zip"]
+
+    query_type = rng.choice([
+        "order_status", "item_count", "payment_method", "item_options",
+    ])
+
+    order = rng.choice(orders)
+    order_id = order["order_id"]
+
+    if query_type == "order_status":
+        question = f"What is the status of my order {order_id}?"
+        communicate = [order["status"]]
+        expected = {"order_id": order_id, "status": order["status"]}
+
+    elif query_type == "item_count":
+        n_items = len(order["items"])
+        question = f"How many items are in my order {order_id}?"
+        communicate = [str(n_items)]
+        expected = {"order_id": order_id, "item_count": n_items}
+
+    elif query_type == "payment_method":
+        # Ask about payment method used for an order
+        pay_hist = order["payment_history"]
+        if pay_hist:
+            pay_id = pay_hist[0]["payment_method_id"]
+            pay_method = user["payment_methods"].get(pay_id, {})
+            source = pay_method.get("source", "unknown")
+            question = f"What payment method was used for my order {order_id}?"
+            communicate = [source]
+            expected = {"order_id": order_id, "payment_source": source,
+                        "payment_id": pay_id}
+        else:
+            question = f"What is the status of my order {order_id}?"
+            communicate = [order["status"]]
+            expected = {"order_id": order_id, "status": order["status"]}
+
+    else:  # item_options
+        item = rng.choice(order["items"])
+        opts = item["options"]
+        opt_strs = [f"{v}" for v in opts.values()]
+        question = (
+            f"Can you tell me the options/details for the {item['name']} "
+            f"in my order {order_id}?"
+        )
+        communicate = opt_strs
+        expected = {"order_id": order_id, "item_name": item["name"],
+                    "options": opts}
+
+    initial_msg = (
+        f"Hi, my name is {name['first_name']} {name['last_name']}. "
+        f"My zip code is {zipcode}. {question}"
+    )
+
+    user_sys = build_user_system_prompt(
+        customer_context=(
+            f"Your name is {name['first_name']} {name['last_name']}. "
+            f"Your zip code is {zipcode}. {question}"
+        ),
+        goal=question,
+        approach="cooperative",
+        required_communication="Wait for the agent to provide the information.",
+    )
+
+    db = build_retail_db(user, orders, products_db)
+
+    return SDRScenario(
+        domain="retail",
+        scenario_type="order_status_check",
+        user_system_prompt=user_sys,
+        initial_message=initial_msg,
+        expected_answer=expected,
+        communicate_info=communicate,
+        description=f"Order status check: {query_type} on {order_id}",
+        key_facts={"query_type": query_type, "order_id": order_id},
+        db=db,
+    )
+
+
+def _gen_execute_exchange(rng: random.Random) -> SDRScenario:
+    """User wants to exchange a delivered item for a different variant.
+
+    Agent must find user, look up MULTIPLE orders to find the right one,
+    get product details, scan 10+ variants for the right one, and call
+    exchange_delivered_order_items.
+    Mirrors eval: 32% of retail SD failures. Eval has mean 4+ lookups.
+    """
+    # More orders = more lookups needed (eval mean = 4.1 lookups)
+    sample = _gen_retail_sample(rng, n_orders=rng.randint(3, 5), min_items=2,
+                                need_delivered=True, many_variants=True)
+    user = sample["user"]
+    orders = sample["orders"]
+    products_db = sample["products_db"]
+    name = user["name"]
+    zipcode = user["address"]["zip"]
+
+    delivered = [o for o in orders if o["status"] == "delivered"]
+    if not delivered:
+        orders[0]["status"] = "delivered"
+        orders[0]["fulfillments"] = [{
+            "tracking_id": [str(rng.randint(100000000000, 999999999999))],
+            "item_ids": [it["item_id"] for it in orders[0]["items"]],
+        }]
+        delivered = [orders[0]]
+
+    order = rng.choice(delivered)
+    item = rng.choice(order["items"])
+    prod_id = item["product_id"]
+    prod_entry = products_db[prod_id]
+    variants = prod_entry["variants"]
+
+    # Pick a target variant (available, different, unique options)
+    all_option_sets = {}
+    for v_id, v in variants.items():
+        key = tuple(sorted(v["options"].items()))
+        all_option_sets.setdefault(key, []).append(v_id)
+
+    available_variants = [
+        v for v_id, v in variants.items()
+        if v["available"] and v_id != item["item_id"]
+        and len(all_option_sets[tuple(sorted(v["options"].items()))]) == 1
+    ]
+    if not available_variants:
+        seen_opts = set()
+        for v_id in list(variants.keys()):
+            key = tuple(sorted(variants[v_id]["options"].items()))
+            if key in seen_opts:
+                del variants[v_id]
+            else:
+                seen_opts.add(key)
+        available_variants = [
+            v for v_id, v in variants.items()
+            if v["available"] and v_id != item["item_id"]
+        ]
+        if not available_variants:
+            for v_id, v in variants.items():
+                if v_id != item["item_id"]:
+                    v["available"] = True
+                    available_variants = [v]
+                    break
+
+    target = rng.choice(available_variants)
+    target_item_id = target["item_id"]
+    opt_desc = ", ".join(f"{k}: {v}" for k, v in target["options"].items())
+
+    pm_id = list(user["payment_methods"].keys())[0]
+
+    # Describe the item indirectly — by name + current options, NOT order_id/item_id.
+    # Agent must look up orders to find which one has this item.
+    current_opts = ", ".join(f"{v}" for v in item.get("options", {}).values())
+    question = (
+        f"I have a {item['name']} ({current_opts}) that was delivered. "
+        f"I'd like to exchange it for the variant with {opt_desc}. "
+        f"Can you find the order and process the exchange?"
+    )
+
+    initial_msg = (
+        f"Hi, my name is {name['first_name']} {name['last_name']}. "
+        f"My zip code is {zipcode}. {question}"
+    )
+
+    user_sys = build_user_system_prompt(
+        customer_context=(
+            f"Your name is {name['first_name']} {name['last_name']}. "
+            f"Your zip code is {zipcode}. {question}"
+        ),
+        goal=question,
+        approach="cooperative",
+        required_communication="Confirm when the exchange has been processed.",
+    )
+
+    db = build_retail_db(user, orders, products_db)
+
+    expected_tool = {
+        "name": "exchange_delivered_order_items",
+        "key_args": {
+            "order_id": order["order_id"],
+            "item_ids": [item["item_id"]],
+            "new_item_ids": [target_item_id],
+            "payment_method_id": pm_id,
+        },
+    }
+
+    return SDRScenario(
+        domain="retail",
+        scenario_type="execute_exchange",
+        user_system_prompt=user_sys,
+        initial_message=initial_msg,
+        expected_answer={"target_item_id": target_item_id, "order_id": order["order_id"]},
+        communicate_info=[target_item_id],
+        description=f"Execute exchange: {item['name']} -> {opt_desc}",
+        key_facts={"order_id": order["order_id"], "target_item_id": target_item_id},
+        db=db,
+        expected_tool_call=expected_tool,
+    )
+
+
+def _gen_execute_modify(rng: random.Random) -> SDRScenario:
+    """User wants to modify an item in a pending order to a different variant.
+
+    Agent must find user, look up multiple orders to find the pending one with
+    this item, get product details, find the right variant, and call
+    modify_pending_order_items.
+    Mirrors eval: 24% of retail SD failures. Eval has mean 4+ lookups.
+    """
+    sample = _gen_retail_sample(rng, n_orders=rng.randint(3, 5), min_items=2,
+                                many_variants=True)
+    user = sample["user"]
+    orders = sample["orders"]
+    products_db = sample["products_db"]
+    name = user["name"]
+    zipcode = user["address"]["zip"]
+
+    # Need a pending order
+    pending = [o for o in orders if o["status"] == "pending"]
+    if not pending:
+        orders[0]["status"] = "pending"
+        pending = [orders[0]]
+
+    order = rng.choice(pending)
+    item = rng.choice(order["items"])
+    prod_id = item["product_id"]
+    prod_entry = products_db[prod_id]
+    variants = prod_entry["variants"]
+
+    available_variants = [
+        v for v_id, v in variants.items()
+        if v["available"] and v_id != item["item_id"]
+    ]
+    if not available_variants:
+        for v_id, v in variants.items():
+            if v_id != item["item_id"]:
+                v["available"] = True
+                available_variants = [v]
+                break
+
+    target = rng.choice(available_variants)
+    target_item_id = target["item_id"]
+    opt_desc = ", ".join(f"{k}: {v}" for k, v in target["options"].items())
+
+    pm_id = list(user["payment_methods"].keys())[0]
+
+    # Indirect reference — describe item by name, not order_id
+    current_opts = ", ".join(f"{v}" for v in item.get("options", {}).values())
+    question = (
+        f"I have a pending order with a {item['name']} ({current_opts}). "
+        f"I'd like to change it to the variant with {opt_desc}. "
+        f"Can you find the order and update it?"
+    )
+
+    initial_msg = (
+        f"Hi, my name is {name['first_name']} {name['last_name']}. "
+        f"My zip code is {zipcode}. {question}"
+    )
+
+    user_sys = build_user_system_prompt(
+        customer_context=(
+            f"Your name is {name['first_name']} {name['last_name']}. "
+            f"Your zip code is {zipcode}. {question}"
+        ),
+        goal=question,
+        approach="cooperative",
+        required_communication="Confirm when the modification has been made.",
+    )
+
+    db = build_retail_db(user, orders, products_db)
+
+    expected_tool = {
+        "name": "modify_pending_order_items",
+        "key_args": {
+            "order_id": order["order_id"],
+            "item_ids": [item["item_id"]],
+            "new_item_ids": [target_item_id],
+            "payment_method_id": pm_id,
+        },
+    }
+
+    return SDRScenario(
+        domain="retail",
+        scenario_type="execute_modify",
+        user_system_prompt=user_sys,
+        initial_message=initial_msg,
+        expected_answer={"target_item_id": target_item_id, "order_id": order["order_id"]},
+        communicate_info=[target_item_id],
+        description=f"Execute modify: {item['name']} -> {opt_desc}",
+        key_facts={"order_id": order["order_id"], "target_item_id": target_item_id},
+        db=db,
+        expected_tool_call=expected_tool,
+    )
+
+
+def _gen_execute_return(rng: random.Random) -> SDRScenario:
+    """User wants to return an item from a delivered order.
+
+    Agent must find user, look up multiple orders to find the delivered one,
+    identify the correct item, and call return_delivered_order_items.
+    Mirrors eval: 18% of retail SD failures. Eval has mean 4+ lookups.
+    """
+    sample = _gen_retail_sample(rng, n_orders=rng.randint(3, 5), min_items=3,
+                                need_delivered=True)
+    user = sample["user"]
+    orders = sample["orders"]
+    products_db = sample["products_db"]
+    name = user["name"]
+    zipcode = user["address"]["zip"]
+
+    delivered = [o for o in orders if o["status"] == "delivered"]
+    if not delivered:
+        orders[0]["status"] = "delivered"
+        orders[0]["fulfillments"] = [{
+            "tracking_id": [str(rng.randint(100000000000, 999999999999))],
+            "item_ids": [it["item_id"] for it in orders[0]["items"]],
+        }]
+        delivered = [orders[0]]
+
+    order = rng.choice(delivered)
+    item = rng.choice(order["items"])
+    pm_id = list(user["payment_methods"].keys())[0]
+
+    # Indirect reference — describe item by name and options, not order_id
+    current_opts = ", ".join(f"{v}" for v in item.get("options", {}).values())
+    question = (
+        f"I received a {item['name']} ({current_opts}) recently and I'd like to "
+        f"return it. Can you find the order and process the return? "
+        f"Please refund to my payment method on file."
+    )
+
+    initial_msg = (
+        f"Hi, my name is {name['first_name']} {name['last_name']}. "
+        f"My zip code is {zipcode}. {question}"
+    )
+
+    user_sys = build_user_system_prompt(
+        customer_context=(
+            f"Your name is {name['first_name']} {name['last_name']}. "
+            f"Your zip code is {zipcode}. {question}"
+        ),
+        goal=question,
+        approach="cooperative",
+        required_communication="Confirm when the return has been processed.",
+    )
+
+    db = build_retail_db(user, orders, products_db)
+
+    expected_tool = {
+        "name": "return_delivered_order_items",
+        "key_args": {
+            "order_id": order["order_id"],
+            "item_ids": [item["item_id"]],
+            "payment_method_id": pm_id,
+        },
+    }
+
+    return SDRScenario(
+        domain="retail",
+        scenario_type="execute_return",
+        user_system_prompt=user_sys,
+        initial_message=initial_msg,
+        expected_answer={"item_id": item["item_id"], "order_id": order["order_id"]},
+        communicate_info=[order["order_id"]],
+        description=f"Execute return: {item['name']} from {order['order_id']}",
+        key_facts={"order_id": order["order_id"], "item_id": item["item_id"]},
+        db=db,
+        expected_tool_call=expected_tool,
+    )
+
+
+def _gen_execute_cancel(rng: random.Random) -> SDRScenario:
+    """User wants to cancel a pending order.
+
+    Agent must find user, look up multiple orders to identify the pending one,
+    and call cancel_pending_order.
+    """
+    sample = _gen_retail_sample(rng, n_orders=rng.randint(3, 5), min_items=2)
+    user = sample["user"]
+    orders = sample["orders"]
+    products_db = sample["products_db"]
+    name = user["name"]
+    zipcode = user["address"]["zip"]
+
+    pending = [o for o in orders if o["status"] == "pending"]
+    if not pending:
+        orders[0]["status"] = "pending"
+        pending = [orders[0]]
+
+    order = rng.choice(pending)
+    reason = rng.choice(["no longer needed", "ordered by mistake"])
+
+    # Describe by item contents, not order_id (forces lookup)
+    item_names = [it["name"] for it in order["items"][:2]]
+    items_desc = " and ".join(item_names)
+    question = (
+        f"I have a pending order with {items_desc} that I need to cancel. "
+        f"The reason is: {reason}. Can you find it and cancel it?"
+    )
+
+    initial_msg = (
+        f"Hi, my name is {name['first_name']} {name['last_name']}. "
+        f"My zip code is {zipcode}. {question}"
+    )
+
+    user_sys = build_user_system_prompt(
+        customer_context=(
+            f"Your name is {name['first_name']} {name['last_name']}. "
+            f"Your zip code is {zipcode}. {question}"
+        ),
+        goal=question,
+        approach="cooperative",
+        required_communication="Confirm when the order has been cancelled.",
+    )
+
+    db = build_retail_db(user, orders, products_db)
+
+    expected_tool = {
+        "name": "cancel_pending_order",
+        "key_args": {
+            "order_id": order["order_id"],
+            "reason": reason,
+        },
+    }
+
+    return SDRScenario(
+        domain="retail",
+        scenario_type="execute_cancel",
+        user_system_prompt=user_sys,
+        initial_message=initial_msg,
+        expected_answer={"order_id": order["order_id"]},
+        communicate_info=[order["order_id"]],
+        description=f"Execute cancel: {order['order_id']}",
+        key_facts={"order_id": order["order_id"], "reason": reason},
+        db=db,
+        expected_tool_call=expected_tool,
+    )
+
+
+# =====================================================================
+# Master scenario generator
+# =====================================================================
+
+_GENERATORS = {
+    "flight_selection": _gen_flight_selection,
+    "baggage_computation": _gen_baggage_computation,
+    "reservation_comparison": _gen_reservation_comparison,
+    "cost_computation": _gen_cost_computation,
+    "flight_status_check": _gen_flight_status_check,
+    "book_flight": _gen_book_flight,
+    "change_flight": _gen_change_flight,
+    "send_compensation": _gen_send_compensation,
+}
+
+_RETAIL_GENERATORS = {
+    "variant_selection": _gen_variant_selection,
+    "price_comparison": _gen_price_comparison,
+    "order_status_check": _gen_order_status_check,
+    "execute_exchange": _gen_execute_exchange,
+    "execute_modify": _gen_execute_modify,
+    "execute_return": _gen_execute_return,
+    "execute_cancel": _gen_execute_cancel,
+}
+
+
+def generate_scenario(seed: int, domain: Optional[str] = None) -> SDRScenario:
+    """Generate a scenario from a seed. Deterministic.
+
+    Args:
+        seed: Random seed for deterministic generation.
+        domain: "airline", "retail", or None (random 50/50).
+    """
+    rng = random.Random(seed)
+
+    if domain is None:
+        domain = rng.choice(["airline", "retail"])
+
+    if domain == "retail":
+        types = list(RETAIL_SCENARIO_WEIGHTS.keys())
+        weights = list(RETAIL_SCENARIO_WEIGHTS.values())
+        scenario_type = rng.choices(types, weights=weights)[0]
+        return _RETAIL_GENERATORS[scenario_type](rng)
+    else:
+        types = list(SCENARIO_WEIGHTS.keys())
+        weights = list(SCENARIO_WEIGHTS.values())
+        scenario_type = rng.choices(types, weights=weights)[0]
+        return _GENERATORS[scenario_type](rng)
+
+
+# =====================================================================
+# Reward computation
+# =====================================================================
+
+def _check_tool_call_match(conversation: List[Dict], expected: Dict) -> Tuple[bool, str]:
+    """Check if the expected tool call was made in the conversation."""
+    expected_name = expected["name"]
+    key_args = expected.get("key_args", {})
+
+    for msg in conversation:
+        if msg.get("role") != "tool_call":
+            continue
         try:
-            # Strip $ and commas from string predictions
-            pred_str = str(predicted).replace("$", "").replace(",", "").strip()
-            pred_val = float(pred_str)
-            exp_val = float(expected)
-            return abs(pred_val - exp_val) < 0.02
-        except (ValueError, TypeError):
-            return False
+            tc = json.loads(msg["text"])
+        except (json.JSONDecodeError, KeyError):
+            continue
 
-    elif answer_type == "boolean":
-        pred_str = str(predicted).strip().lower()
-        exp_str = str(expected).strip().lower()
-        return pred_str == exp_str
+        if tc.get("name") != expected_name:
+            continue
 
-    return str(predicted).strip() == str(expected).strip()
+        args = tc.get("arguments", {})
+        # Check key args match
+        all_match = True
+        for k, expected_val in key_args.items():
+            actual_val = args.get(k)
+            if actual_val is None:
+                all_match = False
+                break
+            # Numeric comparison
+            if isinstance(expected_val, (int, float)):
+                try:
+                    if abs(float(actual_val) - float(expected_val)) > 1:
+                        all_match = False
+                        break
+                except (ValueError, TypeError):
+                    all_match = False
+                    break
+            # List comparison (e.g. item_ids)
+            elif isinstance(expected_val, list):
+                if not isinstance(actual_val, list):
+                    all_match = False
+                    break
+                if set(str(x) for x in expected_val) != set(str(x) for x in actual_val):
+                    all_match = False
+                    break
+            # String comparison
+            elif str(actual_val).strip() != str(expected_val).strip():
+                all_match = False
+                break
+
+        if all_match:
+            return True, f"Tool call matched: {expected_name}"
+
+    return False, f"Expected {expected_name} not found or args mismatch"
 
 
-# =============================================================================
+def compute_reward(conversation: List[Dict], scenario: SDRScenario) -> Tuple[float, str]:
+    """Check if the agent communicated the correct answer AND made required tool calls.
+
+    For mutation scenarios (expected_tool_call set): checks tool call match.
+    For report scenarios: checks communicate_info strings in agent messages.
+    Returns (reward, reason).
+    """
+    # --- Check tool call if mutation scenario ---
+    tool_reward = None
+    tool_reason = ""
+    if scenario.expected_tool_call is not None:
+        tool_match, tool_reason = _check_tool_call_match(
+            conversation, scenario.expected_tool_call)
+        tool_reward = 1.0 if tool_match else 0.0
+
+    # --- Check communicate_info ---
+    agent_text = ""
+    for msg in conversation:
+        if msg.get("role") == "assistant":
+            agent_text += " " + msg.get("text", msg.get("content", ""))
+
+    agent_text_lower = agent_text.lower()
+
+    found = []
+    missing = []
+    for info in scenario.communicate_info:
+        info_lower = info.lower().strip()
+        if info_lower in agent_text_lower:
+            found.append(info)
+        else:
+            try:
+                num = float(info)
+                agent_no_commas = agent_text.replace(",", "")
+                if (str(int(num)) in agent_no_commas or
+                    f"{num:.0f}" in agent_no_commas or
+                    f"${int(num)}" in agent_no_commas or
+                    f"${num:.2f}" in agent_no_commas or
+                    f"{num:.2f}" in agent_no_commas or
+                    info in agent_no_commas):
+                    found.append(info)
+                else:
+                    missing.append(info)
+            except ValueError:
+                missing.append(info)
+
+    if scenario.communicate_info:
+        comm_reward = 1.0 if not missing else 0.0
+        comm_reason = f"Communicated: {found}" if not missing else f"Missing: {missing}"
+    else:
+        comm_reward = 1.0
+        comm_reason = "No communicate_info required"
+
+    # --- Combine rewards ---
+    if tool_reward is not None:
+        # Mutation scenario: tool call is primary, communicate is secondary
+        reward = tool_reward
+        reason = f"{tool_reason}. {comm_reason}"
+    else:
+        # Report scenario: communicate_info only
+        reward = comm_reward
+        reason = comm_reason
+
+    return reward, reason
+
+
+# =====================================================================
 # Game class
-# =============================================================================
+# =====================================================================
 
 class StructuredDataGame:
-    """Single-turn structured data reasoning game.
+    """Multi-turn structured data reasoning game in tau2-bench format.
 
-    The model sees a JSON dataset + 3 questions, outputs answers as JSON.
-    Reward = fraction of correct answers (0, 0.33, 0.67, 1.0).
+    Supports both airline and retail domains.
+
+    Implements the tool-calling game interface (supports_structured_messages):
+    - get_system_prompt() / get_messages() / get_tool_schemas() / step()
+
+    Also implements GameEnv protocol for GRPO training compatibility.
     """
 
-    def __init__(self, difficulty: int = 3):
-        self._difficulty = difficulty
-        self._episode: Optional[Episode] = None
+    supports_structured_messages = True
+
+    def __init__(self, user_client: Optional[UserLLMClient] = None,
+                 domain: Optional[str] = None):
+        self._user_client = user_client
+        self._domain_filter = domain  # None=random 50/50, "airline", "retail"
 
         # GameEnv protocol
         self.done: bool = False
@@ -645,83 +1918,221 @@ class StructuredDataGame:
         self.rewards: Dict[int, float] = {0: 0.0}
         self.invalid_player: Optional[int] = None
 
+        # Internal state
+        self._scenario: Optional[SDRScenario] = None
+        self._tools: Optional[ToolExecutor] = None
+        self._llm_user: Optional[LLMUser] = None
+        self._conversation: List[Dict[str, str]] = []
+        self._step_count: int = 0
+        self._transferred: bool = False
+        self._pending_stop: bool = False
+        self._last_call_key: Optional[str] = None
+        self._repeat_count: int = 0
+        self.max_steps: int = 30
+
     def reset(self, seed: int) -> None:
-        self._episode = generate_episode(seed, self._difficulty)
+        """Reset with new seed."""
+        self._scenario = generate_scenario(seed, domain=self._domain_filter)
+        self._tools = ToolExecutor(
+            self._scenario.domain,
+            copy.deepcopy(self._scenario.db),
+        )
+
+        if self._user_client is None:
+            raise ValueError(
+                "StructuredDataGame requires a UserLLMClient. "
+                "Pass user_client= when constructing the environment."
+            )
+
+        self._llm_user = LLMUser(
+            self._scenario.user_system_prompt,
+            self._scenario.initial_message,
+            self._user_client,
+        )
+        initial_msg = self._llm_user.get_initial_message()
+
+        self._conversation = [{"role": "user", "text": initial_msg}]
+        self._step_count = 0
+        self._transferred = False
+        self._pending_stop = False
+        self._last_call_key = None
+        self._repeat_count = 0
+
         self.done = False
         self.current_player = 0
         self.rewards = {0: 0.0}
         self.invalid_player = None
 
-    def observe(self, player_id: int) -> str:
-        ep = self._episode
-        if ep is None:
-            return "No episode loaded."
+    # -----------------------------------------------------------------
+    # Structured message interface (tool-calling games)
+    # -----------------------------------------------------------------
 
-        lines = [
-            "You are a customer service agent. Answer the following questions "
-            "about the data provided below.",
-            "Output your answers using the submit_answers tool.",
-            "",
-            f"<data type=\"{ep.data_label}\">",
-            ep.data_json,
-            "</data>",
-            "",
-            "Please answer ALL three questions based ONLY on the data above:",
-            "",
-        ]
-        for i, q in enumerate(ep.questions, 1):
-            lines.append(f"Question {i}: {q.text}")
-        lines.extend([
-            "",
-            "Respond with exactly one JSON object:",
-            '{"name": "submit_answers", "arguments": {"answer_1": ..., "answer_2": ..., "answer_3": ...}}',
-            "",
-            "Rules:",
-            '- For item_id / flight_number answers, use the exact string (e.g., "item_1003")',
-            "- For numeric answers, use a number (e.g., 145.50)",
-            '- For yes/no answers, use a string (e.g., "yes" or "no")',
-        ])
-        return "\n".join(lines)
+    def get_system_prompt(self) -> str:
+        """Return full system prompt with domain-appropriate policy."""
+        domain = self._scenario.domain if self._scenario else "airline"
+        policy = AIRLINE_POLICY if domain == "airline" else RETAIL_POLICY
+        return (
+            "<instructions>\n"
+            "You are a customer service agent that helps the user according to "
+            "the <policy> provided below.\n"
+            "In each turn you can either:\n"
+            "- Send a message to the user.\n"
+            "- Make a tool call.\n"
+            "You cannot do both at the same time.\n"
+            "\n"
+            "Try to be helpful and always follow the policy. "
+            "Always make sure you generate valid JSON only.\n"
+            "</instructions>\n"
+            "<policy>\n"
+            f"{policy}\n"
+            "</policy>"
+        )
+
+    def get_tool_schemas(self) -> List[Dict[str, Any]]:
+        """Return OpenAI-format tool schemas for the current domain."""
+        if self._scenario is not None and self._scenario.domain == "retail":
+            return RETAIL_TOOL_SCHEMAS
+        return AIRLINE_TOOL_SCHEMAS
+
+    def get_messages(self) -> List[Dict[str, Any]]:
+        """Return conversation as chat API format messages."""
+        msgs = []
+        for msg in self._conversation:
+            role = msg["role"]
+            text = msg["text"]
+            if role == "user":
+                msgs.append({"role": "user", "content": text})
+            elif role == "assistant":
+                msgs.append({"role": "assistant", "content": text})
+            elif role == "tool_call":
+                try:
+                    tc = json.loads(text)
+                    msgs.append({
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": f"call_{len(msgs)}",
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": json.dumps(tc["arguments"]),
+                            },
+                        }],
+                    })
+                except (json.JSONDecodeError, KeyError):
+                    msgs.append({"role": "assistant", "content": text})
+            elif role == "tool_result":
+                msgs.append({
+                    "role": "tool",
+                    "tool_call_id": f"call_{len(msgs) - 1}",
+                    "content": text,
+                })
+        return msgs
+
+    # -----------------------------------------------------------------
+    # GameEnv protocol
+    # -----------------------------------------------------------------
+
+    def observe(self, player_id: int) -> str:
+        return "This game uses tool-calling interface, not observe()."
 
     def legal_actions(self) -> List[str]:
         if self.done:
             return []
-        return ['{"name": "submit_answers", "arguments": {"answer_1": ..., "answer_2": ..., "answer_3": ...}}']
+        return ['{"name": "...", "arguments": {...}}']
 
     def step(self, action: Optional[str]) -> None:
+        """Process one agent action (tool call or message)."""
         if self.done:
             return
+
+        self._step_count += 1
 
         if action is None:
             self._finalize(0.0, "No action provided")
             return
 
-        # Parse JSON
         tool_call = _parse_tool_call(action)
         if tool_call is None:
             self._finalize(0.0, "Invalid JSON format")
             self.invalid_player = 0
             return
 
-        args = tool_call.get("arguments", {})
+        tool_name = tool_call.get("name", "")
+        tool_args = tool_call.get("arguments", {})
 
-        # Check each answer
-        ep = self._episode
-        correct = 0
-        details = []
-        for i, q in enumerate(ep.questions, 1):
-            predicted = args.get(f"answer_{i}")
-            is_correct = _check_answer(predicted, q.answer, q.answer_type)
-            if is_correct:
-                correct += 1
-            details.append(
-                f"Q{i}: predicted={predicted!r} expected={q.answer!r} -> "
-                f"{'CORRECT' if is_correct else 'WRONG'}"
-            )
+        # --- Transfer to human ---
+        if tool_name == "transfer_to_human_agents":
+            self._transferred = True
+            self._conversation.append({"role": "tool_call", "text": json.dumps(tool_call)})
+            self._conversation.append({"role": "tool_result", "text": '{"transfer": "success"}'})
+            reward, reason = compute_reward(self._conversation, self._scenario)
+            self._finalize(reward, f"Transferred. {reason}")
+            return
 
-        reward = round(correct / 3, 2)
-        reason = f"{correct}/3 correct. " + "; ".join(details)
-        self._finalize(reward, reason)
+        # --- Message to user ---
+        if tool_name == "respond_to_user" or tool_name == "send_message":
+            message = tool_args.get("message", tool_args.get("content", ""))
+            self._conversation.append({"role": "assistant", "text": message})
+
+            # Check if user simulator signals stop
+            if self._pending_stop:
+                reward, reason = compute_reward(self._conversation, self._scenario)
+                self._finalize(reward, reason)
+                return
+
+            # Get user response
+            visible = self._get_visible_conversation()
+            user_response = self._llm_user.get_response(visible)
+
+            if user_response is None:
+                reward, reason = compute_reward(self._conversation, self._scenario)
+                self._finalize(reward, reason)
+                return
+            elif "###STOP###" in user_response or "###TRANSFER###" in user_response:
+                clean = user_response.replace("###STOP###", "").replace("###TRANSFER###", "").strip()
+                if clean:
+                    self._conversation.append({"role": "user", "text": clean})
+                reward, reason = compute_reward(self._conversation, self._scenario)
+                self._finalize(reward, reason)
+                return
+
+            self._conversation.append({"role": "user", "text": user_response})
+
+        # --- Tool call ---
+        else:
+            self._conversation.append({"role": "tool_call", "text": json.dumps(tool_call)})
+
+            # Loop detection
+            call_key = json.dumps(tool_call, sort_keys=True)
+            if call_key == self._last_call_key:
+                self._repeat_count += 1
+                if self._repeat_count >= 3:
+                    reward, reason = compute_reward(self._conversation, self._scenario)
+                    self._finalize(reward, f"Loop detected. {reason}")
+                    return
+            else:
+                self._last_call_key = call_key
+                self._repeat_count = 0
+
+            # Execute tool
+            try:
+                result = self._tools.execute(tool_name, tool_args)
+            except Exception as e:
+                result = json.dumps({"error": str(e)})
+
+            self._conversation.append({"role": "tool_result", "text": result})
+
+        # Max steps check
+        if self._step_count >= self.max_steps:
+            reward, reason = compute_reward(self._conversation, self._scenario)
+            self._finalize(reward, f"Max steps. {reason}")
+
+    def _get_visible_conversation(self) -> List[Dict[str, str]]:
+        """Get conversation visible to the customer (text only, no tool calls)."""
+        return [
+            msg for msg in self._conversation
+            if msg["role"] in ("user", "assistant")
+        ]
 
     def _finalize(self, reward: float, reason: str) -> None:
         self.done = True
@@ -729,23 +2140,19 @@ class StructuredDataGame:
         self._reason = reason
 
     def get_summary(self) -> Dict[str, Any]:
-        ep = self._episode
         return {
-            "data_type": ep.data_type if ep else "",
-            "difficulty": ep.difficulty if ep else 0,
-            "num_items": len(ep.items) if ep else 0,
-            "questions": [
-                {"text": q.text, "answer": q.answer, "type": q.answer_type}
-                for q in (ep.questions if ep else [])
-            ],
+            "scenario_type": self._scenario.scenario_type if self._scenario else "",
+            "description": self._scenario.description if self._scenario else "",
+            "steps": self._step_count,
             "reward": self.rewards.get(0, 0.0),
             "reason": getattr(self, "_reason", ""),
+            "expected_answer": self._scenario.expected_answer if self._scenario else None,
         }
 
 
-# =============================================================================
+# =====================================================================
 # Action parsing
-# =============================================================================
+# =====================================================================
 
 def _parse_tool_call(text: str) -> Optional[Dict[str, Any]]:
     """Parse JSON tool call from model output."""
@@ -767,9 +2174,6 @@ def _parse_tool_call(text: str) -> Optional[Dict[str, Any]]:
                                 "name": obj["name"],
                                 "arguments": obj.get("arguments", obj.get("parameters", {})),
                             }
-                        # Also accept bare answer objects
-                        if "answer_1" in obj:
-                            return {"name": "submit_answers", "arguments": obj}
                     except json.JSONDecodeError:
                         pass
                     start = -1
@@ -780,74 +2184,50 @@ def _parse_tool_call(text: str) -> Optional[Dict[str, Any]]:
 
 def extract_action(text: str, legal_actions: List[str]) -> Optional[str]:
     """Extract action for game registry compatibility."""
-    import re
     tool_call = _parse_tool_call(text)
     if tool_call:
         return json.dumps(tool_call)
-    # Try to find bare JSON answer object after stripping thinking tags
     clean = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    clean = re.sub(r"</?tool_call>", "", clean).strip()
     tool_call = _parse_tool_call(clean)
     if tool_call:
         return json.dumps(tool_call)
+    if clean:
+        return json.dumps({"name": "respond_to_user", "arguments": {"message": clean}})
     return None
 
 
-# =============================================================================
-# System prompt
-# =============================================================================
+# =====================================================================
+# System prompt (for game registry — not used for tool-calling games)
+# =====================================================================
 
-SYSTEM_PROMPT = (
-    "You are a customer service agent skilled at analyzing structured data.\n"
-    "Given a dataset (products, flights, or reservation info) and questions,\n"
-    "analyze the data carefully and provide precise answers.\n"
-    "Always respond with valid JSON using the submit_answers tool.\n"
-)
+SYSTEM_PROMPT = ""
 
 
-# =============================================================================
-# Test
-# =============================================================================
+# =====================================================================
+# Self-test
+# =====================================================================
 
 if __name__ == "__main__":
-    print("Testing Structured Data Reasoning Game")
-    print("=" * 60)
+    print("Testing Structured Data Reasoning Game (tau2-bench aligned)")
+    print("=" * 70)
 
-    for diff in [1, 2, 3, 4, 5]:
-        rewards = []
-        dtypes = {"products": 0, "flights": 0, "baggage": 0}
-        game = StructuredDataGame(difficulty=diff)
+    for domain_label in ["airline", "retail", None]:
+        print(f"\n{'=' * 70}")
+        print(f"Domain filter: {domain_label}")
+        print("=" * 70)
 
+        type_counts = {}
         for seed in range(100):
-            game.reset(seed)
-            ep = game._episode
+            scenario = generate_scenario(seed, domain=domain_label)
+            t = f"{scenario.domain}/{scenario.scenario_type}"
+            type_counts[t] = type_counts.get(t, 0) + 1
+            if seed < 3:
+                print(f"\nSeed {seed}: {scenario.description}")
+                print(f"  Domain: {scenario.domain}")
+                print(f"  Initial msg: {scenario.initial_message[:120]}...")
+                print(f"  Expected: {scenario.expected_answer}")
+                print(f"  Communicate: {scenario.communicate_info}")
+                print(f"  DB keys: {list(scenario.db.keys())}")
 
-            dtypes[ep.data_type] = dtypes.get(ep.data_type, 0) + 1
-
-            # Simulate a "perfect" agent that gives correct answers
-            answers = {}
-            for i, q in enumerate(ep.questions, 1):
-                answers[f"answer_{i}"] = q.answer
-
-            action = json.dumps({
-                "name": "submit_answers",
-                "arguments": answers,
-            })
-            game.step(action)
-            rewards.append(game.rewards[0])
-
-        avg = sum(rewards) / len(rewards)
-        print(f"\nDifficulty {diff}: avg_reward={avg:.2f} (should be ~1.0 with perfect answers)")
-        print(f"  Data types: {dtypes}")
-        print(f"  Items per episode: {game._episode and len(game._episode.items)}")
-
-    # Show example observations
-    print("\n" + "=" * 60)
-    print("Example episode (difficulty=3, seed=42):")
-    game = StructuredDataGame(difficulty=3)
-    game.reset(42)
-    obs = game.observe(0)
-    print(obs[:2000])
-    print("..." if len(obs) > 2000 else "")
-    print(f"\nExpected answers:")
-    for i, q in enumerate(game._episode.questions, 1):
-        print(f"  answer_{i}: {q.answer!r} ({q.answer_type})")
+        print(f"\nScenario type distribution (100 seeds): {type_counts}")

@@ -31,6 +31,12 @@ from structured_data_game import (
     SYSTEM_PROMPT as SYSTEM_PROMPT_STRUCTURED_DATA,
 )
 
+from structured_data_game_deprecated import (
+    StructuredDataGame as StructuredDataGameDeprecated,
+    extract_action as extract_action_structured_data_deprecated,
+    SYSTEM_PROMPT as SYSTEM_PROMPT_STRUCTURED_DATA_DEPRECATED,
+)
+
 from structured_data_new_game import (
     StructuredDataGame as StructuredDataGameV2,
     extract_action as extract_action_structured_data_v2,
@@ -41,6 +47,12 @@ from multistep_task_game import (
     RealisticMultiStepGame,
     extract_action as extract_action_multistep,
     SYSTEM_PROMPT as SYSTEM_PROMPT_MULTISTEP,
+)
+
+from multistep_task_game_deprecated import (
+    RealisticMultiStepGame as RealisticMultiStepGameDeprecated,
+    extract_action as extract_action_multistep_deprecated,
+    SYSTEM_PROMPT as SYSTEM_PROMPT_MULTISTEP_DEPRECATED,
 )
 
 try:
@@ -157,11 +169,11 @@ def _register_builtin_games() -> None:
             )
         )
 
-    # Structured Data Reasoning — targets ~44% of tau2-bench failures
-    # Trains parsing JSON data, filtering/sorting by criteria, computing derived values
-    # Single-turn, 3 questions per episode. No LLM user needed.
-    def make_structured_data(difficulty=3) -> StructuredDataGame:
-        return StructuredDataGame(difficulty=difficulty)
+    # Structured Data Reasoning — tau2-bench aligned (airline)
+    # Multi-turn with LLM user, uses exact tau2-bench airline tools/policy/system prompt.
+    # Trains data reasoning: flight selection, baggage computation, cost comparison, etc.
+    def make_structured_data(user_client=None, domain=None) -> StructuredDataGame:
+        return StructuredDataGame(user_client=user_client, domain=domain)
 
     register_game(
         GameSpec(
@@ -171,6 +183,23 @@ def _register_builtin_games() -> None:
             action_space=[],
             stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
             system_prompt=SYSTEM_PROMPT_STRUCTURED_DATA,
+            max_gen_tokens=1024,
+        )
+    )
+
+    # Structured Data Reasoning (DEPRECATED) — old single-turn submit_answers format
+    # Kept for backwards compatibility with existing LoRA adapters.
+    def make_structured_data_deprecated(difficulty=3) -> StructuredDataGameDeprecated:
+        return StructuredDataGameDeprecated(difficulty=difficulty)
+
+    register_game(
+        GameSpec(
+            name="structured_data_reasoning_deprecated",
+            make_env=make_structured_data_deprecated,
+            extract_action=extract_action_structured_data_deprecated,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_STRUCTURED_DATA_DEPRECATED,
             max_gen_tokens=512,
         )
     )
@@ -194,11 +223,11 @@ def _register_builtin_games() -> None:
         )
     )
 
-    # Multi-Step Task — targets actual tau2-bench multi-step failure modes
-    # One-shot constraints, info retrieval chains, item batching, status-gated tools
-    # Multi-turn, no LLM user needed.
-    def make_multistep() -> RealisticMultiStepGame:
-        return RealisticMultiStepGame(max_steps=30)
+    # Multi-Step Task — tau2-bench aligned (airline)
+    # Multi-turn with LLM user, uses exact tau2-bench airline tools/policy/system prompt.
+    # Trains sequential multi-op completion: cancel, change flights, update bags, etc.
+    def make_multistep(user_client=None, domain=None) -> RealisticMultiStepGame:
+        return RealisticMultiStepGame(max_steps=40, user_client=user_client, domain=domain)
 
     register_game(
         GameSpec(
@@ -208,6 +237,23 @@ def _register_builtin_games() -> None:
             action_space=[],
             stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
             system_prompt=SYSTEM_PROMPT_MULTISTEP,
+            max_gen_tokens=1024,
+        )
+    )
+
+    # Multi-Step Task (DEPRECATED) — old retail-only custom tool format
+    # Kept for backwards compatibility with existing LoRA adapters.
+    def make_multistep_deprecated() -> RealisticMultiStepGameDeprecated:
+        return RealisticMultiStepGameDeprecated(max_steps=30)
+
+    register_game(
+        GameSpec(
+            name="multistep_task_deprecated",
+            make_env=make_multistep_deprecated,
+            extract_action=extract_action_multistep_deprecated,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_MULTISTEP_DEPRECATED,
             max_gen_tokens=1024,
         )
     )
