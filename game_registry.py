@@ -258,7 +258,7 @@ def _register_builtin_games() -> None:
     # Multi-turn with LLM user, uses exact tau2-bench airline tools/policy/system prompt.
     # Trains sequential multi-op completion: cancel, change flights, update bags, etc.
     def make_multistep(user_client=None, domain=None) -> RealisticMultiStepGame:
-        return RealisticMultiStepGame(max_steps=40, user_client=user_client, domain=domain)
+        return RealisticMultiStepGame(max_steps=15, user_client=user_client, domain=domain)
 
     register_game(
         GameSpec(

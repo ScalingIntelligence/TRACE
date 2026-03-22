@@ -1,15 +1,28 @@
 """Multi-Step Task Game - tau2-bench Aligned (Airline + Retail)
 
-Multi-turn game using EXACT tau2-bench tools, system prompt, and format.
-Trains sequential multi-operation completion: the model must execute 3-5
-operations in one conversation, gathering required info along the way.
+Mid-conversation game in exact tau2-bench format. Model is placed after
+auth + lookups, and must produce the correct sequence of write-action
+tool calls to complete 2-5 operations.
+
+Pre-fills the conversation with greeting, authentication, data lookups,
+agent summary, and user confirmation. The model then produces tool calls
+freely (writes and/or additional lookups). Each tool call is executed via
+ToolExecutor with the result appended. Game ends when the model sends text
+(respond_to_user) or hits max_steps.
+
+Matches the dominant tau2-bench eval pattern (verified):
+  Phase 1: Auth + lookups (pre-filled)
+  Phase 2: Agent summary + user confirmation (pre-filled)
+  Phase 3: Model fires write tool calls back-to-back (model's turn)
+
+No LLM user simulator needed. Uses ToolExecutor and the same GameEnv
+protocol as precondition_game and tau_tool_calling_env.
 
 Airline operations:
   - cancel_reservation
   - update_reservation_baggages
   - update_reservation_flights (change to different flight)
   - update_reservation_passengers (correct passenger info)
-  - send_certificate (compensation)
 
 Retail operations:
   - cancel_pending_order (cancel a pending order)
@@ -17,12 +30,7 @@ Retail operations:
   - modify_pending_order_items (modify items in pending order)
   - modify_pending_order_address (change address on pending order)
   - return_delivered_order_items (return items from delivered order)
-
-Each operation requires looking up user/order/product details first.
-The user provides all tasks upfront, and the model must complete all of them.
-
-Uses LLM user simulator, ToolExecutor, and the same GameEnv protocol as
-precondition_game and tau_tool_calling_env.
+  - modify_user_address (change user profile address)
 
 Reward: completion bonus (0.4) + linear partial credit (max 0.6).
 """
@@ -41,7 +49,6 @@ from adversarial_policy_game.constants import (
     RETAIL_POLICY,
     RETAIL_TOOL_SCHEMAS,
 )
-from adversarial_policy_game.llm_user import LLMUser, UserLLMClient, build_user_system_prompt
 from adversarial_policy_game.synthetic_db import (
     FIRST_NAMES, LAST_NAMES, CITIES_STATES_ZIPS, STREETS,
     _gen_dob, _gen_email, _gen_payment_id,
@@ -67,8 +74,7 @@ class TaskOperation:
 class MultiStepScenario:
     """A multi-step scenario with multiple operations."""
     domain: str  # "airline" or "retail"
-    user_system_prompt: str
-    initial_message: str
+    messages: List[Dict[str, Any]]  # Pre-filled conversation (OpenAI format)
     operations: List[TaskOperation]
     description: str = ""
     db: Dict[str, Any] = field(default_factory=dict)
@@ -77,6 +83,18 @@ class MultiStepScenario:
 # =====================================================================
 # Constants
 # =====================================================================
+
+# Exact tau2-bench system prompt instruction (from llm_agent.py AGENT_INSTRUCTION)
+AGENT_INSTRUCTION = (
+    "You are a customer service agent that helps the user according to the "
+    "<policy> provided below.\n"
+    "In each turn you can either:\n"
+    "- Send a message to the user.\n"
+    "- Make a tool call.\n"
+    "You cannot do both at the same time.\n\n"
+    "Try to be helpful and always follow the policy. "
+    "Always make sure you generate valid JSON only."
+)
 
 IATA_CODES = [
     "JFK", "LAX", "ORD", "ATL", "DFW", "DEN", "SFO", "SEA",
@@ -328,10 +346,12 @@ def _op_change_flight(rng: random.Random, res: Dict, flights_db: Dict,
 
     pm_id = list(user["payment_methods"].keys())[0]
 
+    # Vague description: don't give exact flight number, model must pick from search results
+    dep_time = new_flight[1]["scheduled_departure_time_est"]
     return TaskOperation(
         description=(
-            f"change the flight on reservation {res['reservation_id']} "
-            f"to flight {new_fnum}"
+            f"change reservation {res['reservation_id']} to a different "
+            f"{cabin} flight departing around {dep_time[:5]}"
         ),
         tool_name="update_reservation_flights",
         tool_args={
@@ -342,7 +362,7 @@ def _op_change_flight(rng: random.Random, res: Dict, flights_db: Dict,
                          "price": int(new_price)}],
             "payment_id": pm_id,
         },
-        key_args=["reservation_id", "cabin"],
+        key_args=["reservation_id", "cabin", "flights"],
     )
 
 
@@ -535,12 +555,17 @@ def _retail_op_exchange(rng: random.Random, order: Dict, user: Dict,
         return None
 
     pm_id = list(user["payment_methods"].keys())[0]
-    target_desc = _describe_options(new_variant["options"])
+    # Vague description: mention one distinguishing attribute of the target variant
+    new_opts = new_variant["options"]
+    # Pick one attribute to mention (the model must figure out the rest)
+    attr_keys = list(new_opts.keys())
+    hint_key = rng.choice(attr_keys) if attr_keys else ""
+    hint_val = new_opts.get(hint_key, "")
 
     return TaskOperation(
         description=(
             f"exchange the {item['name']} in order {order['order_id']} "
-            f"for the {target_desc} variant"
+            f"for one that is {hint_val}"
         ),
         tool_name="exchange_delivered_order_items",
         tool_args={
@@ -549,7 +574,7 @@ def _retail_op_exchange(rng: random.Random, order: Dict, user: Dict,
             "new_item_ids": [new_variant["item_id"]],
             "payment_method_id": pm_id,
         },
-        key_args=["order_id"],
+        key_args=["order_id", "item_ids", "new_item_ids"],
     )
 
 
@@ -572,12 +597,16 @@ def _retail_op_modify_items(rng: random.Random, order: Dict, user: Dict,
         return None
 
     pm_id = list(user["payment_methods"].keys())[0]
-    target_desc = _describe_options(new_variant["options"])
+    # Vague description: mention one distinguishing attribute
+    new_opts = new_variant["options"]
+    attr_keys = list(new_opts.keys())
+    hint_key = rng.choice(attr_keys) if attr_keys else ""
+    hint_val = new_opts.get(hint_key, "")
 
     return TaskOperation(
         description=(
             f"modify the {item['name']} in order {order['order_id']} "
-            f"to the {target_desc} variant"
+            f"to one that is {hint_val}"
         ),
         tool_name="modify_pending_order_items",
         tool_args={
@@ -586,7 +615,7 @@ def _retail_op_modify_items(rng: random.Random, order: Dict, user: Dict,
             "new_item_ids": [new_variant["item_id"]],
             "payment_method_id": pm_id,
         },
-        key_args=["order_id"],
+        key_args=["order_id", "item_ids", "new_item_ids"],
     )
 
 
@@ -616,7 +645,7 @@ def _retail_op_modify_address(rng: random.Random, order: Dict, user: Dict,
             "order_id": order["order_id"],
             **new_addr,
         },
-        key_args=["order_id"],
+        key_args=["order_id", "city", "zip"],
     )
 
 
@@ -639,25 +668,188 @@ def _retail_op_return(rng: random.Random, order: Dict, user: Dict,
             "item_ids": [item["item_id"]],
             "payment_method_id": pm_id,
         },
-        key_args=["order_id"],
+        key_args=["order_id", "item_ids"],
     )
 
 
-# Weighted by eval failure frequency:
-# modify_items: 28%, return: 23%, modify_address: 21%, exchange: 14%, cancel: 13%
+def _retail_op_modify_user_address(rng: random.Random, order: Dict, user: Dict,
+                                    products_db: Dict) -> Optional[TaskOperation]:
+    """Change the user's profile address."""
+    city, state, zipcode = rng.choice(CITIES_STATES_ZIPS)
+    new_addr = {
+        "address1": f"{rng.randint(100, 999)} {rng.choice(STREETS)}",
+        "address2": "",
+        "city": city,
+        "state": state,
+        "country": "USA",
+        "zip": zipcode,
+    }
+    return TaskOperation(
+        description=(
+            f"update my profile address to "
+            f"{new_addr['address1']}, {city}, {state} {zipcode}"
+        ),
+        tool_name="modify_user_address",
+        tool_args={"user_id": user["user_id"], **new_addr},
+        key_args=["user_id"],
+    )
+
+
+# Weighted by eval failure frequency (from verified multi-step failed tasks):
+# modify_items: 27%, return: 20%, modify_address: 20%, exchange: 13%, cancel: 12%, modify_user_address: 7%
 _RETAIL_OP_GENERATORS = [
-    ("cancel", _retail_op_cancel, "pending", 13),
-    ("exchange", _retail_op_exchange, "delivered", 14),
-    ("modify_items", _retail_op_modify_items, "pending", 28),
-    ("modify_address", _retail_op_modify_address, "pending", 21),
-    ("return", _retail_op_return, "delivered", 23),
+    ("cancel", _retail_op_cancel, "pending", 12),
+    ("exchange", _retail_op_exchange, "delivered", 13),
+    ("modify_items", _retail_op_modify_items, "pending", 27),
+    ("modify_address", _retail_op_modify_address, "pending", 20),
+    ("return", _retail_op_return, "delivered", 20),
+    ("modify_user_address", _retail_op_modify_user_address, "any", 7),
 ]
+
+
+# =====================================================================
+# Pre-filled conversation builder
+# =====================================================================
+
+def _build_prefilled_conversation(
+    scenario_domain: str,
+    user: Dict,
+    operations: List[TaskOperation],
+    db: Dict,
+) -> List[Dict[str, Any]]:
+    """Build pre-filled conversation in OpenAI message format.
+
+    Executes auth + data lookups via ToolExecutor, building the same
+    message sequence the model would see mid-conversation in tau2-bench eval.
+    """
+    te = ToolExecutor(scenario_domain, copy.deepcopy(db))
+    msgs: List[Dict[str, Any]] = []
+    call_id = 0
+
+    def _add_tool_call(name: str, args: Dict) -> str:
+        nonlocal call_id
+        cid = f"call_{call_id:04d}"
+        call_id += 1
+        msgs.append({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": cid,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(args),
+                },
+            }],
+        })
+        result = te.execute(name, args)
+        msgs.append({
+            "role": "tool",
+            "content": result,
+            "tool_call_id": cid,
+        })
+        return result
+
+    # Phase 1: Greeting
+    if scenario_domain == "retail":
+        msgs.append({"role": "assistant", "content": "Hi! How can I help you today?"})
+    else:
+        msgs.append({"role": "assistant", "content":
+                      "Welcome to our airline customer service. How can I assist you today?"})
+
+    # Phase 2: User request with all tasks
+    name_d = user["name"]
+    task_lines = [op.description for op in operations]
+    task_text = "; ".join(task_lines)
+
+    if scenario_domain == "retail":
+        zipcode = user["address"]["zip"]
+        user_msg = (
+            f"Hi, I'm {name_d['first_name']} {name_d['last_name']}, "
+            f"zip code {zipcode}. I need help with the following: {task_text}."
+        )
+    else:
+        uid = user["user_id"]
+        user_msg = (
+            f"Hi, I'm {name_d['first_name']} {name_d['last_name']}. "
+            f"My user ID is {uid}. I need help with: {task_text}."
+        )
+    msgs.append({"role": "user", "content": user_msg})
+
+    # Phase 3: Auth lookups
+    if scenario_domain == "retail":
+        _add_tool_call("find_user_id_by_name_zip", {
+            "first_name": name_d["first_name"],
+            "last_name": name_d["last_name"],
+            "zip": user["address"]["zip"],
+        })
+    _add_tool_call("get_user_details", {"user_id": user["user_id"]})
+
+    # Phase 4: Data lookups
+    if scenario_domain == "retail":
+        # Look up all orders
+        for oid in user.get("orders", []):
+            _add_tool_call("get_order_details", {"order_id": oid})
+        # Look up products referenced by exchange/modify operations
+        seen_products: set = set()
+        for op in operations:
+            if op.tool_name in ("exchange_delivered_order_items",
+                                "modify_pending_order_items"):
+                for oid in user.get("orders", []):
+                    order_data = db.get("orders", {}).get(oid, {})
+                    for item in order_data.get("items", []):
+                        pid = item.get("product_id")
+                        if pid and pid not in seen_products:
+                            _add_tool_call("get_product_details",
+                                           {"product_id": pid})
+                            seen_products.add(pid)
+    else:
+        # Airline: look up all reservations
+        for res_id in user.get("reservations", []):
+            _add_tool_call("get_reservation_details",
+                           {"reservation_id": res_id})
+        # Search for flights if any flight change or book operations
+        searched_routes: set = set()
+        for op in operations:
+            if op.tool_name in ("update_reservation_flights",
+                                "book_reservation"):
+                flight_args = op.tool_args.get("flights", [])
+                origin = (flight_args[0].get("origin", "")
+                          if flight_args
+                          else op.tool_args.get("origin", ""))
+                dest = (flight_args[0].get("destination", "")
+                        if flight_args
+                        else op.tool_args.get("destination", ""))
+                route = (origin, dest)
+                if origin and dest and route not in searched_routes:
+                    _add_tool_call("search_direct_flight",
+                                   {"origin": origin, "destination": dest})
+                    searched_routes.add(route)
+
+    # Phase 5: Agent summary + user confirmation
+    op_summaries = []
+    for i, op in enumerate(operations, 1):
+        op_summaries.append(f"{i}. {op.description}")
+    summary = "\n".join(op_summaries)
+
+    msgs.append({
+        "role": "assistant",
+        "content": (
+            f"I've reviewed your account and found the relevant information. "
+            f"I'll process the following for you:\n{summary}\n\n"
+            f"Shall I proceed with all of these?"
+        ),
+    })
+    msgs.append({"role": "user", "content": "Yes, please proceed with all of them."})
+
+    return msgs
 
 
 def _generate_retail_scenario(rng: random.Random) -> MultiStepScenario:
     """Generate a multi-step retail scenario with 2-5 operations."""
-    # Eval failure distribution: 58% 2-op, 35% 3-op, 3% 4-op, 3% 5-op
-    n_ops_target = rng.choices([2, 3, 4, 5], weights=[58, 35, 3, 3])[0]
+    # Eval failure distribution (verified from qwen-3-30b base results):
+    # 48% 2-op, 39% 3-op, 10% 4-op, 3% 5-op
+    n_ops_target = rng.choices([2, 3, 4, 5], weights=[48, 39, 10, 3])[0]
 
     # We need a mix of pending and delivered orders for diverse ops.
     # Generate enough orders: at least n_ops_target, with a mix of statuses.
@@ -687,11 +879,23 @@ def _generate_retail_scenario(rng: random.Random) -> MultiStepScenario:
                           weights=[t[3] for t in _RETAIL_OP_GENERATORS])[0]
         op_type, gen_fn, required_status, _ = _RETAIL_OP_GENERATORS[idx]
 
-        candidates = [
-            o for o in orders
-            if o["order_id"] not in used_order_ids and o["status"] == required_status
-        ]
+        if required_status == "any":
+            candidates = [
+                o for o in orders
+                if o["order_id"] not in used_order_ids
+            ]
+        else:
+            candidates = [
+                o for o in orders
+                if o["order_id"] not in used_order_ids and o["status"] == required_status
+            ]
         if not candidates:
+            # modify_user_address doesn't need an order
+            if required_status == "any":
+                op = gen_fn(rng, orders[0] if orders else {}, user, products_db)
+                if op is not None:
+                    operations.append(op)
+                continue
             continue
 
         order = rng.choice(candidates)
@@ -708,7 +912,7 @@ def _generate_retail_scenario(rng: random.Random) -> MultiStepScenario:
         order = rng.choice(unused)
         matching = [
             (t, fn, w) for t, fn, st, w in _RETAIL_OP_GENERATORS
-            if st == order["status"]
+            if st == order["status"] or st == "any"
         ]
         if not matching:
             used_order_ids.add(order["order_id"])
@@ -731,38 +935,14 @@ def _generate_retail_scenario(rng: random.Random) -> MultiStepScenario:
                     operations.append(op)
                     break
 
-    # Build user message
-    task_lines = []
-    for i, op in enumerate(operations, 1):
-        task_lines.append(f"Task {i}: {op.description}")
-
-    task_list = "\n".join(task_lines)
-    zipcode = user["address"]["zip"]
-    initial_msg = (
-        f"Hi, my name is {name['first_name']} {name['last_name']}. "
-        f"My zip code is {zipcode}. I need help with the following:\n\n"
-        f"{task_list}\n\n"
-        f"Please complete all of these tasks."
-    )
-
-    user_sys = build_user_system_prompt(
-        customer_context=(
-            f"Your name is {name['first_name']} {name['last_name']}. "
-            f"Your zip code is {zipcode}. You have {len(orders)} orders. "
-            f"You need help with {len(operations)} tasks."
-        ),
-        goal=f"Get all {len(operations)} tasks completed: {', '.join(op.description for op in operations)}.",
-        approach="cooperative",
-        required_communication="Confirm when each task is done. Say thank you when all tasks are complete.",
-    )
-
     db = build_retail_db(user, orders, products_db)
+
+    messages = _build_prefilled_conversation("retail", user, operations, db)
 
     op_types = [op.tool_name for op in operations]
     return MultiStepScenario(
         domain="retail",
-        user_system_prompt=user_sys,
-        initial_message=initial_msg,
+        messages=messages,
         operations=operations,
         description=f"Multi-step retail: {len(operations)} ops ({', '.join(op_types)})",
         db=db,
@@ -857,37 +1037,14 @@ def generate_scenario(seed: int, domain: Optional[str] = None) -> MultiStepScena
             operations.append(op)
             used_res_ids.add(res["reservation_id"])
 
-    # Build task descriptions for user message
-    task_lines = []
-    for i, op in enumerate(operations, 1):
-        task_lines.append(f"Task {i}: {op.description}")
-
-    task_list = "\n".join(task_lines)
-    initial_msg = (
-        f"Hi, my name is {name['first_name']} {name['last_name']}. "
-        f"My user ID is {uid}. I need help with the following:\n\n"
-        f"{task_list}\n\n"
-        f"Please complete all of these tasks."
-    )
-
-    user_sys = build_user_system_prompt(
-        customer_context=(
-            f"Your name is {name['first_name']} {name['last_name']}. "
-            f"Your user id is {uid}. You have {len(reservations)} reservations. "
-            f"You need help with {len(operations)} tasks."
-        ),
-        goal=f"Get all {len(operations)} tasks completed: {', '.join(op.description for op in operations)}.",
-        approach="cooperative",
-        required_communication="Confirm when each task is done. Say thank you when all tasks are complete.",
-    )
-
     db = build_airline_db(user, reservations, flights_db)
+
+    messages = _build_prefilled_conversation("airline", user, operations, db)
 
     op_types = [op.tool_name for op in operations]
     return MultiStepScenario(
         domain="airline",
-        user_system_prompt=user_sys,
-        initial_message=initial_msg,
+        messages=messages,
         operations=operations,
         description=f"Multi-step: {len(operations)} ops ({', '.join(op_types)})",
         db=db,
@@ -920,10 +1077,26 @@ def _match_operation(call_name: str, call_args: Dict, op: TaskOperation) -> bool
         elif isinstance(expected, str):
             if str(actual).strip() != str(expected).strip():
                 return False
-        # For complex args like passengers/flights lists, just check the key exists
+        # For list args: compare contents
         elif isinstance(expected, list):
             if not actual:
                 return False
+            # For simple ID lists (item_ids, new_item_ids): compare as sets
+            if all(isinstance(x, str) for x in expected):
+                if set(str(x) for x in expected) != set(str(x) for x in (actual if isinstance(actual, list) else [])):
+                    return False
+            # For dicts (flights, passengers): compare key fields
+            elif all(isinstance(x, dict) for x in expected):
+                if not isinstance(actual, list) or len(actual) != len(expected):
+                    return False
+                for exp_item, act_item in zip(expected, actual):
+                    if isinstance(act_item, dict):
+                        # For flights: check flight_number
+                        if "flight_number" in exp_item:
+                            if exp_item.get("flight_number") != act_item.get("flight_number"):
+                                return False
+                    elif str(exp_item) != str(act_item):
+                        return False
 
     return True
 
@@ -997,7 +1170,11 @@ def compute_reward(tool_calls: List[Dict], operations: List[TaskOperation]
 # =====================================================================
 
 class RealisticMultiStepGame:
-    """Multi-turn multi-step task game in tau2-bench airline/retail format.
+    """Mid-conversation multi-step task game in tau2-bench format.
+
+    Pre-fills conversation with auth + lookups (Phase 1-2).
+    Model produces tool calls freely in Phase 3 (writes + optional lookups).
+    No LLM user simulator needed.
 
     Implements the tool-calling game interface (supports_structured_messages):
     - get_system_prompt() / get_messages() / get_tool_schemas() / step()
@@ -1005,11 +1182,10 @@ class RealisticMultiStepGame:
 
     supports_structured_messages = True
 
-    def __init__(self, max_steps: int = 40,
-                 user_client: Optional[UserLLMClient] = None,
+    def __init__(self, max_steps: int = 15,
+                 user_client=None,  # Accepted but ignored (backward compat)
                  domain: Optional[str] = None):
         self._max_steps = max_steps
-        self._user_client = user_client
         self._domain = domain  # None = 50/50, "airline", or "retail"
 
         # GameEnv protocol
@@ -1021,12 +1197,10 @@ class RealisticMultiStepGame:
         # Internal state
         self._scenario: Optional[MultiStepScenario] = None
         self._tools: Optional[ToolExecutor] = None
-        self._llm_user: Optional[LLMUser] = None
-        self._conversation: List[Dict[str, str]] = []
+        self._conversation: List[Dict[str, Any]] = []
         self._tool_calls: List[Dict[str, Any]] = []
         self._step_count: int = 0
-        self._transferred: bool = False
-        self._pending_stop: bool = False
+        self._call_id_counter: int = 0
         self._last_call_key: Optional[str] = None
         self._repeat_count: int = 0
 
@@ -1037,25 +1211,13 @@ class RealisticMultiStepGame:
             self._scenario.domain,
             copy.deepcopy(self._scenario.db),
         )
-
-        if self._user_client is None:
-            raise ValueError(
-                "RealisticMultiStepGame requires a UserLLMClient. "
-                "Pass user_client= when constructing the environment."
-            )
-
-        self._llm_user = LLMUser(
-            self._scenario.user_system_prompt,
-            self._scenario.initial_message,
-            self._user_client,
-        )
-        initial_msg = self._llm_user.get_initial_message()
-
-        self._conversation = [{"role": "user", "text": initial_msg}]
+        self._conversation = copy.deepcopy(self._scenario.messages)
         self._tool_calls = []
         self._step_count = 0
-        self._transferred = False
-        self._pending_stop = False
+        # Start call_id counter after pre-filled messages
+        self._call_id_counter = sum(
+            1 for m in self._conversation if m.get("tool_calls")
+        )
         self._last_call_key = None
         self._repeat_count = 0
 
@@ -1072,15 +1234,7 @@ class RealisticMultiStepGame:
         policy = RETAIL_POLICY if self._scenario and self._scenario.domain == "retail" else AIRLINE_POLICY
         return (
             "<instructions>\n"
-            "You are a customer service agent that helps the user according to "
-            "the <policy> provided below.\n"
-            "In each turn you can either:\n"
-            "- Send a message to the user.\n"
-            "- Make a tool call.\n"
-            "You cannot do both at the same time.\n"
-            "\n"
-            "Try to be helpful and always follow the policy. "
-            "Always make sure you generate valid JSON only.\n"
+            f"{AGENT_INSTRUCTION}\n"
             "</instructions>\n"
             "<policy>\n"
             f"{policy}\n"
@@ -1093,37 +1247,7 @@ class RealisticMultiStepGame:
         return AIRLINE_TOOL_SCHEMAS
 
     def get_messages(self) -> List[Dict[str, Any]]:
-        msgs = []
-        for msg in self._conversation:
-            role = msg["role"]
-            text = msg["text"]
-            if role == "user":
-                msgs.append({"role": "user", "content": text})
-            elif role == "assistant":
-                msgs.append({"role": "assistant", "content": text})
-            elif role == "tool_call":
-                try:
-                    tc = json.loads(text)
-                    msgs.append({
-                        "role": "assistant",
-                        "tool_calls": [{
-                            "id": f"call_{len(msgs)}",
-                            "type": "function",
-                            "function": {
-                                "name": tc["name"],
-                                "arguments": json.dumps(tc["arguments"]),
-                            },
-                        }],
-                    })
-                except (json.JSONDecodeError, KeyError):
-                    msgs.append({"role": "assistant", "content": text})
-            elif role == "tool_result":
-                msgs.append({
-                    "role": "tool",
-                    "tool_call_id": f"call_{len(msgs) - 1}",
-                    "content": text,
-                })
-        return msgs
+        return list(self._conversation)
 
     # -----------------------------------------------------------------
     # GameEnv protocol
@@ -1156,78 +1280,65 @@ class RealisticMultiStepGame:
         tool_name = tool_call.get("name", "")
         tool_args = tool_call.get("arguments", {})
 
-        # --- Transfer ---
+        # --- Text response to user -> end game ---
+        if tool_name in ("respond_to_user", "send_message"):
+            reward, reason = compute_reward(self._tool_calls, self._scenario.operations)
+            self._finalize(reward, reason)
+            return
+
+        # --- Transfer -> end game ---
         if tool_name == "transfer_to_human_agents":
-            self._transferred = True
-            self._conversation.append({"role": "tool_call", "text": json.dumps(tool_call)})
-            self._conversation.append({"role": "tool_result", "text": '{"transfer": "success"}'})
             reward, reason = compute_reward(self._tool_calls, self._scenario.operations)
             self._finalize(reward, f"Transferred. {reason}")
             return
 
-        # --- Message to user ---
-        if tool_name == "respond_to_user" or tool_name == "send_message":
-            message = tool_args.get("message", tool_args.get("content", ""))
-            self._conversation.append({"role": "assistant", "text": message})
-
-            if self._pending_stop:
+        # --- Loop detection ---
+        call_key = json.dumps(tool_call, sort_keys=True)
+        if call_key == self._last_call_key:
+            self._repeat_count += 1
+            if self._repeat_count >= 3:
                 reward, reason = compute_reward(self._tool_calls, self._scenario.operations)
-                self._finalize(reward, reason)
+                self._finalize(reward, f"Loop detected. {reason}")
                 return
-
-            visible = self._get_visible_conversation()
-            user_response = self._llm_user.get_response(visible)
-
-            if user_response is None:
-                reward, reason = compute_reward(self._tool_calls, self._scenario.operations)
-                self._finalize(reward, reason)
-                return
-            elif "###STOP###" in user_response or "###TRANSFER###" in user_response:
-                clean = user_response.replace("###STOP###", "").replace("###TRANSFER###", "").strip()
-                if clean:
-                    self._conversation.append({"role": "user", "text": clean})
-                reward, reason = compute_reward(self._tool_calls, self._scenario.operations)
-                self._finalize(reward, reason)
-                return
-
-            self._conversation.append({"role": "user", "text": user_response})
-
-        # --- Tool call ---
         else:
-            self._conversation.append({"role": "tool_call", "text": json.dumps(tool_call)})
-            self._tool_calls.append(tool_call)
+            self._last_call_key = call_key
+            self._repeat_count = 0
 
-            # Loop detection
-            call_key = json.dumps(tool_call, sort_keys=True)
-            if call_key == self._last_call_key:
-                self._repeat_count += 1
-                if self._repeat_count >= 3:
-                    reward, reason = compute_reward(self._tool_calls, self._scenario.operations)
-                    self._finalize(reward, f"Loop detected. {reason}")
-                    return
-            else:
-                self._last_call_key = call_key
-                self._repeat_count = 0
+        # --- Track tool call for reward ---
+        self._tool_calls.append({"name": tool_name, "arguments": tool_args})
 
-            # Execute tool
-            try:
-                result = self._tools.execute(tool_name, tool_args)
-            except Exception as e:
-                result = json.dumps({"error": str(e)})
+        # --- Execute tool via ToolExecutor ---
+        cid = f"call_{self._call_id_counter:04d}"
+        self._call_id_counter += 1
 
-            self._conversation.append({"role": "tool_result", "text": result})
+        self._conversation.append({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": cid,
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": json.dumps(tool_args),
+                },
+            }],
+        })
 
-        # Max steps
+        try:
+            result = self._tools.execute(tool_name, tool_args)
+        except Exception as e:
+            result = json.dumps({"error": str(e)})
+
+        self._conversation.append({
+            "role": "tool",
+            "content": result,
+            "tool_call_id": cid,
+        })
+
+        # --- Max steps check ---
         if self._step_count >= self._max_steps:
             reward, reason = compute_reward(self._tool_calls, self._scenario.operations)
             self._finalize(reward, f"Max steps. {reason}")
-
-    def _get_visible_conversation(self) -> List[Dict[str, str]]:
-        """Get conversation visible to the customer (text only, no tool calls)."""
-        return [
-            msg for msg in self._conversation
-            if msg["role"] in ("user", "assistant")
-        ]
 
     def _finalize(self, reward: float, reason: str) -> None:
         self.done = True
@@ -1238,6 +1349,7 @@ class RealisticMultiStepGame:
         return {
             "n_ops": len(self._scenario.operations) if self._scenario else 0,
             "description": self._scenario.description if self._scenario else "",
+            "domain": self._scenario.domain if self._scenario else "",
             "steps": self._step_count,
             "tool_calls": self._tool_calls,
             "reward": self.rewards.get(0, 0.0),
@@ -1317,12 +1429,16 @@ if __name__ == "__main__":
             op_counts[n] = op_counts.get(n, 0) + 1
             if seed < 5:
                 print(f"\nSeed {seed}: {scenario.description}")
-                print(f"  Initial msg: {scenario.initial_message[:200]}...")
+                print(f"  Pre-filled messages: {len(scenario.messages)}")
                 print(f"  Operations:")
                 for op in scenario.operations:
                     print(f"    - {op.tool_name}: {op.description}")
                 db_keys = list(scenario.db.keys())
                 print(f"  DB keys: {db_keys}, users={list(scenario.db['users'].keys())}")
+                # Show message roles
+                roles = [m['role'] + ('(tc)' if m.get('tool_calls') else '')
+                         for m in scenario.messages]
+                print(f"  Message roles: {roles}")
 
         print(f"\nOp count distribution (100 seeds): {op_counts}")
 
