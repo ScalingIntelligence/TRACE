@@ -77,10 +77,8 @@ MERGE_JOBS = [
     #     {"method": "ties_dare"},
     # ),
     (
-        "tarsur909/merged-tc-sd-ms-pre-core-tsv",
+        "tarsur909/merged-tc-pre-core-tsv",
         [
-            ("/home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_40", 1.0),
-            ("/home/ubuntu/.cache/huggingface/multistep_task/grpo_ckpt_iter_10_20260318_110546", 1.0),
             ("/home/ubuntu/.cache/huggingface/tau_tool_calling/grpo_ckpt_iter_40", 1.0),
             ("/home/ubuntu/.cache/huggingface/precondition_check/grpo_ckpt_iter_40_20260319_035848", 1.0),
         ],
@@ -305,30 +303,41 @@ def _merge_core_matrices_tsv(M_list, weights):
     vectors from each adapter are placed into dedicated slots, preserving each
     task's most important directions without interference. Final reconstruction
     re-orthogonalizes U and V via SVD to produce a valid matrix.
+
+    Uses batched SVD for GPU efficiency — all per-adapter SVDs run in a single
+    kernel launch instead of T sequential calls.
     """
     T = len(M_list)
     dim = M_list[0].shape[0]  # T*r
-    sv_reduction = 1 / T
+    k = max(1, int(dim / T))  # singular directions per adapter
 
-    sum_u = torch.zeros(dim, dim, dtype=M_list[0].dtype, device=M_list[0].device)
-    sum_s = torch.zeros(dim, dtype=M_list[0].dtype, device=M_list[0].device)
-    sum_v = torch.zeros(dim, dim, dtype=M_list[0].dtype, device=M_list[0].device)
+    # Apply weights and batch all adapter matrices for a single batched SVD
+    w_tensor = torch.tensor(weights[:T], dtype=M_list[0].dtype, device=M_list[0].device)
+    stacked = torch.stack(M_list) * w_tensor.view(T, 1, 1)  # (T, dim, dim)
 
-    for i, (M, w) in enumerate(zip(M_list, weights)):
-        u, s, v = torch.linalg.svd((M * w).to(torch.float64), full_matrices=False)
-        k = int(dim * sv_reduction)  # singular directions per adapter
-        if k < 1:
-            k = 1
+    # Batched SVD: one kernel launch for all adapters
+    U_all, S_all, Vh_all = torch.linalg.svd(stacked, full_matrices=False)
 
-        sum_u[:, i * k: (i + 1) * k] = u[:, :k]
-        sum_s[i * k: (i + 1) * k] = s[:k]
-        sum_v[i * k: (i + 1) * k, :] = v[:k, :]
+    # Scatter top-k singular components from each adapter into assembled matrices
+    sum_u = torch.zeros(dim, dim, dtype=stacked.dtype, device=stacked.device)
+    sum_s = torch.zeros(dim, dtype=stacked.dtype, device=stacked.device)
+    sum_v = torch.zeros(dim, dim, dtype=stacked.dtype, device=stacked.device)
 
-    # Re-orthogonalize U and V
+    for i in range(T):
+        sl = slice(i * k, (i + 1) * k)
+        sum_u[:, sl] = U_all[i, :, :k]
+        sum_s[sl] = S_all[i, :k]
+        sum_v[sl, :] = Vh_all[i, :k, :]
+
+    # Re-orthogonalize U and V via SVD
     u_u, _, v_u = torch.linalg.svd(sum_u, full_matrices=False)
     u_v, _, v_v = torch.linalg.svd(sum_v, full_matrices=False)
 
-    return torch.linalg.multi_dot((u_u, v_u, torch.diag(sum_s), u_v, v_v))
+    # Efficient diagonal scaling: (A @ diag(s) @ B) = (A * s[None,:]) @ B
+    # Avoids materializing a full (dim, dim) diagonal matrix
+    left = u_u @ v_u   # (dim, dim)
+    right = u_v @ v_v   # (dim, dim)
+    return (left * sum_s.unsqueeze(0)) @ right
 
 
 def combine_core_space(adapters, core_merge="sum", isotropize=True, density=0.7,
@@ -362,6 +371,14 @@ def combine_core_space(adapters, core_merge="sum", isotropize=True, density=0.7,
         ab = load_lora_ab_pairs(path)
         all_ab.append(ab)
         print(f"      {len(ab)} LoRA layer pairs loaded")
+
+    # Pre-move all LoRA matrices to target device in float64 (avoids per-layer transfers)
+    print(f"  Moving all LoRA matrices to {device} (float64)...")
+    for ab in all_ab:
+        for key in ab:
+            A, B = ab[key]
+            ab[key] = (A.to(device=device, dtype=torch.float64),
+                       B.to(device=device, dtype=torch.float64))
 
     # Use first adapter's keys as reference (all adapters should have same layers)
     layer_keys = list(all_ab[0].keys())
@@ -397,8 +414,8 @@ def combine_core_space(adapters, core_merge="sum", isotropize=True, density=0.7,
 
         # Compute reference bases via SVD of stacked matrices
         # A_stack: (T*r, n), B_stack: (m, T*r)
-        A_stack = torch.cat(A_list, dim=0).to(device=device, dtype=torch.float64)
-        B_stack = torch.cat(B_list, dim=1).to(device=device, dtype=torch.float64)
+        A_stack = torch.cat(A_list, dim=0)  # already on device, float64
+        B_stack = torch.cat(B_list, dim=1)
 
         Vh_A_ref = torch.linalg.svd(A_stack, full_matrices=False)[2]  # (T*r, n)
         U_B_ref = torch.linalg.svd(B_stack, full_matrices=False)[0]   # (m, T*r)
@@ -406,9 +423,7 @@ def combine_core_space(adapters, core_merge="sum", isotropize=True, density=0.7,
         # Compute aligned core matrices: M_i = U_B_ref^T @ B_i @ A_i @ Vh_A_ref^T
         M_list = []
         for A, B in zip(A_list, B_list):
-            A_d = A.to(device=device, dtype=torch.float64)
-            B_d = B.to(device=device, dtype=torch.float64)
-            M = U_B_ref.T @ B_d @ A_d @ Vh_A_ref.T  # (T*r, T*r)
+            M = U_B_ref.T @ B @ A @ Vh_A_ref.T  # (T*r, T*r)
             M_list.append(M)
 
         # Merge core matrices using chosen sub-method
@@ -427,8 +442,8 @@ def combine_core_space(adapters, core_merge="sum", isotropize=True, density=0.7,
         # Optionally isotropize: equalize singular values of merged core matrix
         if isotropize:
             U_m, S_m, Vh_m = torch.linalg.svd(M_merged, full_matrices=False)
-            S_iso = S_m.mean() * torch.ones_like(S_m)
-            M_merged = U_m @ torch.diag(S_iso) @ Vh_m
+            # All singular values become their mean, so U @ diag(c*I) @ Vh = c * (U @ Vh)
+            M_merged = S_m.mean() * (U_m @ Vh_m)
 
         # Reconstruct full delta: delta_W = U_B_ref @ M_merged @ Vh_A_ref
         delta_W = U_B_ref @ M_merged @ Vh_A_ref  # (m, n) in float64
@@ -436,8 +451,9 @@ def combine_core_space(adapters, core_merge="sum", isotropize=True, density=0.7,
         model_key = _peft_key_to_model_key(layer_key)
         combined_delta[model_key] = delta_W.to(dtype=torch.bfloat16, device="cpu")
 
-        rank = torch.linalg.matrix_rank(delta_W.float()).item()
-        rank_stats.append(rank)
+        if layer_idx % 500 == 0:
+            rank = torch.linalg.matrix_rank(delta_W.float()).item()
+            rank_stats.append(rank)
 
         # Free GPU memory periodically
         del A_stack, B_stack, Vh_A_ref, U_B_ref, M_list, M_merged, delta_W
