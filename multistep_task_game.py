@@ -1105,8 +1105,17 @@ def compute_reward(tool_calls: List[Dict], operations: List[TaskOperation]
                     ) -> Tuple[float, str]:
     """Compute reward based on operation completion.
 
-    Reward = 0.4 completion bonus + 0.6 * (correct / total).
-    Perfect = 1.0. Missing one op on 4-op task = 0.45.
+    Near-binary reward to avoid the partial-credit trap:
+      - All ops correct:  1.0  (full success)
+      - All-but-one correct:  0.1  (near miss — small positive signal per AWM paper)
+      - Otherwise:  0.0  (no partial credit for distant attempts)
+
+    The 0.1 near-miss signal (following AWM: Agent World Model) is intentionally
+    small: just enough to give slight GRPO advantage over total failure, but too
+    small to become a stable attractor. A higher value (e.g. 0.5) risks creating
+    a new constant-group trap where the model settles at "almost done."
+
+    Wrong-call penalty: -0.25 per wrong call (applied to non-zero rewards).
     """
     n_ops = len(operations)
     if n_ops == 0:
@@ -1148,12 +1157,15 @@ def compute_reward(tool_calls: List[Dict], operations: List[TaskOperation]
 
     if correct_count == n_ops:
         reward = 1.0
+    elif correct_count == n_ops - 1 and correct_count > 0:
+        reward = 0.1
     else:
-        reward = 0.6 * (correct_count / n_ops)
+        reward = 0.0
 
-    # Penalty for wrong calls
-    reward -= 0.1 * wrong_calls
-    reward = max(0.0, min(1.0, round(reward, 3)))
+    # Penalty for wrong calls (only applies to non-zero rewards)
+    if reward > 0:
+        reward -= 0.25 * wrong_calls
+        reward = max(0.0, round(reward, 3))
 
     details = []
     for i, (op, done) in enumerate(zip(operations, completed)):

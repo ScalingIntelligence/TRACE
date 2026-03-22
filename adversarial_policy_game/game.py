@@ -77,10 +77,11 @@ class AdversarialPolicyGame:
     supports_structured_messages = True
 
     def __init__(self, max_steps: int = 30, user_client: Optional[UserLLMClient] = None,
-                 adversarial_ratio: float = 0.2):
+                 adversarial_ratio: float = 0.2, skillbank=None):
         self.max_steps = max_steps
         self._user_client = user_client
         self._adversarial_ratio = adversarial_ratio
+        self._skillbank = skillbank  # Optional SkillBank for SkillRL
 
         # GameEnv protocol attributes
         self.done: bool = False
@@ -197,12 +198,15 @@ class AdversarialPolicyGame:
     # -----------------------------------------------------------------
 
     def get_system_prompt(self) -> str:
-        """Return full system prompt with policy (matches tau2-bench format)."""
+        """Return full system prompt with policy (matches tau2-bench format).
+
+        If a SkillBank is attached, appends a <skills> section after the policy.
+        """
         sc = self._scenario
         if sc is None:
             return ""
         policy = AIRLINE_POLICY if sc.domain == "airline" else RETAIL_POLICY
-        return (
+        base = (
             "<instructions>\n"
             "You are a customer service agent that helps the user according to the <policy> provided below.\n"
             "In each turn you can either:\n"
@@ -216,6 +220,17 @@ class AdversarialPolicyGame:
             f"{policy}\n"
             "</policy>"
         )
+        # SkillRL: inject skills into system prompt
+        if self._skillbank is not None:
+            # Use conversation text for category detection if available
+            conv_text = " ".join(
+                m.get("content", "") for m in self._conversation if m.get("content")
+            )
+            skills_section = self._skillbank.get_skills_for_prompt(
+                conversation_text=conv_text, top_k=6,
+            )
+            base = base + "\n" + skills_section
+        return base
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         """Return OpenAI-format tool schemas for the current domain (from tau2-bench)."""

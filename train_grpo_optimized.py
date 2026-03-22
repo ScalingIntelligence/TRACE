@@ -343,8 +343,8 @@ def parse_grpo_args_optimized():
         help="Use clipped surrogate (like PPO).")
     parser.add_argument("--no-clipping", dest="use_clipping", action="store_false",
         help="Disable clipping and use pure importance sampling.")
-    parser.add_argument("--clip-eps", type=float, default=0.2,
-        help="Clipping epsilon (only used with --use-clipping)")
+    parser.add_argument("--clip-eps", type=float, default=0.28,
+        help="Clipping epsilon (only used with --use-clipping). Default 0.28 per DAPO for better exploration.")
     parser.add_argument("--kl-coef", type=float, default=0.0,
         help="KL penalty coefficient against base model (0 to disable, saves ~50%% of step 6 time)")
     parser.add_argument("--filter-constant-groups", action="store_true", default=True,
@@ -395,6 +395,16 @@ def parse_grpo_args_optimized():
     parser.add_argument("--tau-domain", type=str, default=None,
         choices=["airline", "retail"],
         help="Domain filter for tau_tool_calling game (default: both)")
+
+    # -- Dynamic sampling (DAPO-style filter) --
+    parser.add_argument("--dynamic-sampling-max-batches", type=int, default=3,
+        help="Max re-collection attempts when too many groups are constant-reward. "
+             "0 to disable. Each attempt collects a full batch of rollouts with new "
+             "seeds and keeps only informative groups. Stops when enough informative "
+             "samples are accumulated or limit is reached.")
+    parser.add_argument("--dynamic-sampling-min-groups", type=int, default=0,
+        help="Minimum number of informative groups required before stopping re-collection. "
+             "0 = auto (half of groups_per_batch). Set explicitly to override.")
 
     # -- Training sample optimizations --
     parser.add_argument("--filter-info-turns", action="store_true", default=True,
@@ -772,50 +782,122 @@ def main():
                     print(f"[SFT] Refreshed: {len(sft_buffer)} samples")
             barrier()
 
-        # ---- 3. Collect group-based rollouts (rank 0) + broadcast ----
-        if is_main_rank():
-            # Build per-group assignments for this iteration
-            if game_mix:
-                iter_group_assignments = game_mix.assign_groups(args.groups_per_batch)
-            else:
-                iter_group_assignments = None  # single-game backward compat
+        # ---- 3. Collect group-based rollouts with dynamic sampling (rank 0) ----
+        # Dynamic sampling (DAPO-style filter): if too many groups are constant-
+        # reward, re-collect with new seeds and accumulate informative samples
+        # until we have enough signal or hit the max-batch limit.
+        ds_max = args.dynamic_sampling_max_batches
+        ds_min_groups = args.dynamic_sampling_min_groups
+        if ds_min_groups <= 0:
+            ds_min_groups = max(1, args.groups_per_batch // 2)
 
+        if is_main_rank():
+            accumulated_samples: List[GRPOSample] = []
+            accumulated_metrics: Dict[str, float] = {}
             t_collect0 = time.time()
-            samples, env_metrics = collect_grpo_rollouts(
-                backend=inference_backend,
-                tokenizer=tokenizer,
-                game_spec=game_spec,
-                groups_per_batch=args.groups_per_batch,
-                group_size=args.group_size,
-                temperature=args.temperature,
-                max_new_tokens=max_gen_tokens,
-                base_seed=it,
-                logger=rollout_logger,
-                env_kwargs=env_kwargs,
-                temperature_range=temperature_range,
-                prefix_ratio=args.prefix_ratio,
-                compact_tools=args.compact_tools,
-                group_assignments=iter_group_assignments,
-            )
+            ds_attempt = 0
+            ds_total_groups_collected = 0
+            ds_informative_groups = 0
+
+            while True:
+                ds_attempt += 1
+                # Seed: first attempt uses `it` (backward-compatible with old code).
+                # Re-collection attempts use large offset to avoid collisions
+                # with other iterations (it*100 could collide: iter 0 attempt 2
+                # = seed 1 would collide with iter 1 attempt 1 = seed 1).
+                batch_seed = it if ds_attempt == 1 else it + ds_attempt * 1_000_000
+
+                if game_mix:
+                    iter_group_assignments = game_mix.assign_groups(args.groups_per_batch)
+                else:
+                    iter_group_assignments = None
+
+                batch_samples, batch_metrics = collect_grpo_rollouts(
+                    backend=inference_backend,
+                    tokenizer=tokenizer,
+                    game_spec=game_spec,
+                    groups_per_batch=args.groups_per_batch,
+                    group_size=args.group_size,
+                    temperature=args.temperature,
+                    max_new_tokens=max_gen_tokens,
+                    base_seed=batch_seed,
+                    logger=rollout_logger,
+                    env_kwargs=env_kwargs,
+                    temperature_range=temperature_range,
+                    prefix_ratio=args.prefix_ratio,
+                    compact_tools=args.compact_tools,
+                    group_assignments=iter_group_assignments,
+                )
+
+                if not batch_samples:
+                    break
+
+                # Count informative groups in this batch (groups with reward variance)
+                batch_group_rewards: Dict[Tuple[int, int], set] = defaultdict(set)
+                for s in batch_samples:
+                    batch_group_rewards[(s.group_id, s.player_id)].add(s.reward)
+                batch_total_groups = len(batch_group_rewards)
+                batch_constant = sum(1 for v in batch_group_rewards.values() if len(v) <= 1)
+                batch_informative = batch_total_groups - batch_constant
+
+                ds_total_groups_collected += batch_total_groups
+
+                if args.filter_constant_groups:
+                    # Keep only samples from informative groups
+                    constant_keys = {k for k, v in batch_group_rewards.items() if len(v) <= 1}
+                    kept_samples = [s for s in batch_samples if (s.group_id, s.player_id) not in constant_keys]
+                    ds_informative_groups += batch_informative
+
+                    # Remap group_ids to avoid collisions across attempts.
+                    # Offset by (attempt-1) * groups_per_batch so group_ids are unique.
+                    gid_offset = (ds_attempt - 1) * args.groups_per_batch
+                    for s in kept_samples:
+                        s.group_id = s.group_id + gid_offset
+                        s.game_id = s.game_id + (ds_attempt - 1) * 10_000_000
+
+                    accumulated_samples.extend(kept_samples)
+                else:
+                    # No filtering — just take the whole batch
+                    ds_informative_groups += batch_informative
+                    accumulated_samples.extend(batch_samples)
+
+                # Update metrics (keep first batch's metrics, overwrite timing)
+                if not accumulated_metrics:
+                    accumulated_metrics = batch_metrics
+
+                print(
+                    f"[iter {it}] DS attempt {ds_attempt}: "
+                    f"{batch_informative}/{batch_total_groups} informative groups, "
+                    f"accumulated {ds_informative_groups} informative, "
+                    f"{len(accumulated_samples)} total samples"
+                )
+
+                # Stop conditions
+                if ds_max <= 1:
+                    break  # dynamic sampling disabled — single collection only
+                if ds_informative_groups >= ds_min_groups:
+                    break  # enough signal
+                if ds_attempt >= ds_max:
+                    print(f"[iter {it}] DS: hit max attempts ({ds_max}), proceeding with {ds_informative_groups} informative groups")
+                    break
+
             t_collect1 = time.time()
+            samples = accumulated_samples
+            env_metrics = accumulated_metrics
         else:
             t_collect0 = t_collect1 = time.time()
             samples, env_metrics = [], {}
 
         # ---- 4. Broadcast raw samples, compute advantages on all ranks ----
-        # Broadcast only the raw samples from rank 0; each rank independently
-        # computes advantages, filters, and normalizes.  These functions are
-        # deterministic so every rank arrives at identical results while:
-        #   - reducing broadcast payload (no advantages tensor / metadata)
-        #   - eliminating idle time on non-zero ranks
         if is_main_rank():
             if not samples:
                 print(f"[iter {it}] No samples collected, skipping")
-                broadcast_data = [True, None, None, 0.0, 0.0]
+                broadcast_data = [True, None, None, 0.0, 0.0, 0, 0]
             else:
-                broadcast_data = [False, samples, env_metrics, t_collect0, t_collect1]
+                broadcast_data = [False, samples, env_metrics, t_collect0, t_collect1,
+                                  ds_informative_groups, ds_total_groups_collected]
         else:
-            broadcast_data = [None] * 5
+            broadcast_data = [None] * 7
 
         broadcast_data = broadcast_objects(broadcast_data)
         skip_flag = broadcast_data[0]
@@ -823,12 +905,15 @@ def main():
         if skip_flag:
             continue
 
-        _, samples, env_metrics, t_collect0, t_collect1 = broadcast_data
+        _, samples, env_metrics, t_collect0, t_collect1, ds_informative_groups, ds_total_groups_collected = broadcast_data
 
         # All ranks compute advantages in parallel (deterministic, identical results)
         advantages = compute_group_advantages(samples)
 
         # 4b. Filter constant-reward groups (all ranks, deterministic)
+        # Note: when dynamic sampling is active, constant groups were already
+        # filtered during collection (rank 0). This second pass catches any
+        # remaining constant groups and handles the single-attempt case (ds_max=0).
         num_filtered = 0
         if args.filter_constant_groups:
             pre_filter_count = len(samples)
@@ -854,10 +939,42 @@ def main():
                     f"({samples_before_dt_filter} -> {len(samples)} samples)"
                 )
 
-        # 4c. Normalize advantages (all ranks, deterministic)
-        adv_std = advantages.std()
-        if adv_std > 1e-8:
-            advantages = (advantages - advantages.mean()) / (adv_std + 1e-8)
+        # 4c. Normalize advantages PER GAME + reweight for equal gradient (all ranks, deterministic)
+        # Two-step normalization to prevent cross-game gradient interference:
+        #   Step 1: Standardize each game independently (mean=0, std=1).
+        #   Step 2: Scale by 1/N_game so total gradient contribution per game is equal,
+        #           regardless of how many samples survived filtering.
+        # Without step 1, games with higher raw reward variance dominate.
+        # Without step 2, games with more informative groups dominate.
+        game_names = set(s.game_name for s in samples if s.game_name)
+        if game_names:
+            # Count samples per game (for reweighting)
+            game_counts = {}
+            for gn in game_names:
+                game_counts[gn] = sum(1 for s in samples if s.game_name == gn)
+            n_games_present = len(game_counts)
+
+            for gn in game_names:
+                mask = torch.tensor([s.game_name == gn for s in samples], dtype=torch.bool)
+                if mask.any():
+                    game_adv = advantages[mask]
+                    game_std = game_adv.std()
+                    if game_std > 1e-8:
+                        # Step 1: standardize to mean=0, std=1
+                        normed = (game_adv - game_adv.mean()) / (game_std + 1e-8)
+                        # Step 2: scale by 1/N_game so total |gradient| per game is equal.
+                        # After step 1, E[|adv|] ≈ 0.8 per sample (std-normal).
+                        # Total |gradient| ∝ N_game * E[|adv|]. To equalize across games,
+                        # divide by N_game (and multiply by mean_N to keep magnitude stable).
+                        mean_n = sum(game_counts.values()) / n_games_present
+                        advantages[mask] = normed * (mean_n / game_counts[gn])
+                    else:
+                        advantages[mask] = 0.0
+        else:
+            # Fallback: single-game mode, normalize globally
+            adv_std = advantages.std()
+            if adv_std > 1e-8:
+                advantages = (advantages - advantages.mean()) / (adv_std + 1e-8)
 
         avg_abs_advantage = float(advantages.abs().mean().item())
 
@@ -1241,6 +1358,8 @@ def main():
                 "opt/padding_efficiency": pad_eff,
                 "opt/info_turns_filtered": dt_filtered,
                 "opt/tool_results_truncated": total_tool_results_truncated,
+                "ds/informative_groups": ds_informative_groups,
+                "ds/total_groups_collected": ds_total_groups_collected,
                 "dist/world_size": world_size,
                 **env_metrics,
             }

@@ -24,4 +24,7 @@ unsloth[base]
 # Triton kernels used by Unsloth GRPO notebooks
 git+https://github.com/triton-lang/triton.git@05b2c186c1b6c9a08375389d5efe9cb4c401c075#subdirectory=python/triton_kernels
 pyyaml
-
+# AWM (Agent World Model) dependencies
+sqlalchemy>=2.0
+httpx
+huggingface_hub

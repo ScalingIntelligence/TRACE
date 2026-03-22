@@ -305,6 +305,7 @@ def _swap_teacher_adapters(
     to_load: Dict[str, str],
     to_unload: List[str],
     timeout: int = 60,
+    max_retries: int = 3,
 ) -> None:
     """Hot-swap LoRA adapters on the teacher vLLM server.
 
@@ -314,13 +315,20 @@ def _swap_teacher_adapters(
     """
     for name in to_unload:
         try:
-            requests.post(
+            resp = requests.post(
                 f"{teacher_url}/v1/unload_lora_adapter",
                 json={"lora_name": name},
                 timeout=timeout,
             )
-        except Exception:
-            pass
+            if resp.status_code not in (200, 404):
+                print(f"[Teacher swap] WARNING: unload '{name}' returned "
+                      f"{resp.status_code}: {resp.text[:300]}")
+        except Exception as e:
+            print(f"[Teacher swap] WARNING: unload '{name}' exception: {e}")
+
+    # Small delay after unloading to let vLLM release resources
+    if to_unload:
+        time.sleep(1.0)
 
     for name, path in to_load.items():
         # Best-effort unload first (handles pre-loaded adapters)
@@ -332,12 +340,29 @@ def _swap_teacher_adapters(
             )
         except Exception:
             pass
-        resp = requests.post(
-            f"{teacher_url}/v1/load_lora_adapter",
-            json={"lora_name": name, "lora_path": path},
-            timeout=timeout,
-        )
-        resp.raise_for_status()
+
+        last_err = None
+        for attempt in range(max_retries):
+            if attempt > 0:
+                delay = 2.0 * attempt
+                print(f"[Teacher swap] Retrying load '{name}' in {delay:.0f}s "
+                      f"(attempt {attempt + 1}/{max_retries})...")
+                time.sleep(delay)
+            resp = requests.post(
+                f"{teacher_url}/v1/load_lora_adapter",
+                json={"lora_name": name, "lora_path": path},
+                timeout=timeout,
+            )
+            if resp.status_code == 200:
+                last_err = None
+                break
+            last_err = (f"load '{name}' from {path} returned "
+                        f"{resp.status_code}: {resp.text[:500]}")
+            print(f"[Teacher swap] WARNING: {last_err}")
+
+        if last_err is not None:
+            raise RuntimeError(f"[Teacher swap] Failed after {max_retries} "
+                               f"attempts: {last_err}")
 
 
 def _fetch_logprobs_one(
@@ -363,6 +388,11 @@ def _fetch_logprobs_one(
     )
     resp.raise_for_status()
     data = resp.json()
+
+    if "choices" not in data or not data["choices"]:
+        raise RuntimeError(
+            f"vLLM response missing 'choices' (model={model_name}): "
+            f"{str(data)[:500]}")
 
     token_logprobs = data["choices"][0]["logprobs"]["token_logprobs"]
 

@@ -77,12 +77,10 @@ MERGE_JOBS = [
     #     {"method": "ties_dare"},
     # ),
     (
-        "tarsur909/merged-tc-pre-core-tsv",
+        "tarsur909/sft-adp-v1",
         [
-            ("/home/ubuntu/.cache/huggingface/tau_tool_calling/grpo_ckpt_iter_40", 1.0),
-            ("/home/ubuntu/.cache/huggingface/precondition_check/grpo_ckpt_iter_40_20260319_035848", 1.0),
-        ],
-        {"method": "core", "core_merge": "tsv", "isotropize": True},
+            ("/home/ubuntu/.cache/huggingface/adp_baseline/sft_lora/checkpoint-120", 1.0)
+        ]
     ),
 ]
 

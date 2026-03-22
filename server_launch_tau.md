@@ -3,7 +3,7 @@
 conda activate games
 export HF_HOME=/workspace/.cache/huggingface
 export VLLM_RPC_TIMEOUT=2000
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=4
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
 vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507 \
   --host 0.0.0.0 \
@@ -81,14 +81,13 @@ vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507 \
 
 
 conda activate games
-export HF_HOME=~/.cache/huggingface
+export HF_HOME=/workspace/.cache/huggingface
 export VLLM_RPC_TIMEOUT=2000
 export CUDA_VISIBLE_DEVICES=0
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
 vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 8080   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
 
 
-export HF_HOME=~/.cache/huggingface VLLM_RPC_TIMEOUT=2000 CUDA_VISIBLE_DEVICES=0 VLLM_ALLOW_RUNTIME_LORA_UPDATING=True && /home/ubuntu/miniconda3/envs/sky_games/bin/vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507 --host 0.0.0.0 --port 8080 --dtype bfloat16 --max-model-len 32000 --enable-lora --max-loras 2 --gpu-memory-utilization 0.9 --enable-auto-tool-choice --tool-call-parser hermes
 
 conda activate games
 export HF_HOME=/workspace/.cache/huggingface
@@ -244,6 +243,7 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=False
 vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 8080   --dtype bfloat16   --max-model-len 32000    --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes   --data-parallel-size 4 
 
+vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 9000   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes
 
 
 export HF_HOME=/workspace/.cache/huggingface
