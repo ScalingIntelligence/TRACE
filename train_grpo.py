@@ -353,12 +353,21 @@ def collect_grpo_rollouts(
                 log_entry["user_difficulty"] = difficulties[i]
             logger.log(log_entry)
 
-            for msgs, act, pid, completion, tools in episode_steps[i]:
+            # Use per-step rewards for credit assignment when available,
+            # fall back to terminal reward for games that don't support it.
+            step_rewards = getattr(env, '_step_rewards', None)
+            terminal_reward = float(env.rewards.get(0, 0.0))
+
+            for step_idx, (msgs, act, pid, completion, tools) in enumerate(episode_steps[i]):
+                if step_rewards is not None and step_idx < len(step_rewards):
+                    reward = step_rewards[step_idx]
+                else:
+                    reward = terminal_reward
                 samples.append(GRPOSample(
                     prompt_msgs=msgs,
                     completion_text=completion,
                     player_id=pid,
-                    reward=float(env.rewards.get(pid, 0.0)),
+                    reward=reward,
                     group_id=g_ids[i],
                     game_id=gm_ids[i],
                     tools=tools,
@@ -432,12 +441,19 @@ def collect_grpo_rollouts(
                 invalid_games += 1 if env.invalid_player is not None else 0
                 p0_reward_sum += float(env.rewards.get(0, 0.0))
 
-                for msgs, act, pid, completion, tools in ep_steps:
+                step_rewards = getattr(env, '_step_rewards', None)
+                terminal_reward = float(env.rewards.get(0, 0.0))
+
+                for step_idx, (msgs, act, pid, completion, tools) in enumerate(ep_steps):
+                    if step_rewards is not None and step_idx < len(step_rewards):
+                        reward = step_rewards[step_idx]
+                    else:
+                        reward = terminal_reward
                     samples.append(GRPOSample(
                         prompt_msgs=msgs,
                         completion_text=completion,
                         player_id=pid,
-                        reward=float(env.rewards.get(pid, 0.0)),
+                        reward=reward,
                         group_id=g_idx,
                         game_id=game_id,
                         tools=tools,
