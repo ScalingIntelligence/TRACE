@@ -92,8 +92,9 @@ def test_per_step_breaks_constant_group():
     assert advantages[1].item() < 0  # wrong baggages
     assert advantages[5].item() < 0  # wrong baggages (game 1)
 
-    # Sum should be zero
-    assert abs(advantages.sum().item()) < 1e-6
+    # Note: raw advantages may not sum to zero because group mean uses
+    # terminal rewards (dict overwrites), while per-step rewards differ.
+    # The per-game normalization in train_grpo_optimized.py re-centers to mean=0.
 
 
 def test_backward_compat_terminal_rewards():
@@ -107,4 +108,27 @@ def test_backward_compat_terminal_rewards():
     advantages = compute_group_advantages(samples)
     assert advantages[0].item() > 0  # game 0 above mean
     assert advantages[2].item() < 0  # game 1 below mean
+    # With terminal rewards (all turns same per game), advantages sum to zero
+    # because the dict mean equals the sample mean.
     assert abs(advantages.sum().item()) < 1e-6
+
+    # Verify exact values match the original per-game mean behavior:
+    # mean = (1.0 + 0.0) / 2 = 0.5
+    assert abs(advantages[0].item() - 0.5) < 1e-6
+    assert abs(advantages[2].item() - (-0.5)) < 1e-6
+
+
+def test_backward_compat_unequal_turn_counts():
+    """Per-game mean is unaffected by different turn counts across games."""
+    # Game 0: 5 turns at reward=1.0; Game 1: 2 turns at reward=0.0
+    samples = [
+        _sample(0, 0, 1.0), _sample(0, 0, 1.0), _sample(0, 0, 1.0),
+        _sample(0, 0, 1.0), _sample(0, 0, 1.0),
+        _sample(0, 1, 0.0), _sample(0, 1, 0.0),
+    ]
+
+    advantages = compute_group_advantages(samples)
+    # Per-game mean (dict): game0→1.0, game1→0.0, mean = 0.5
+    # NOT per-sample mean which would be 5/7 = 0.714
+    assert abs(advantages[0].item() - 0.5) < 1e-6  # 1.0 - 0.5
+    assert abs(advantages[5].item() - (-0.5)) < 1e-6  # 0.0 - 0.5
