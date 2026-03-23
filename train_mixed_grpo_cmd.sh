@@ -27,5 +27,5 @@ torchrun --nproc_per_node=6 --master-port 29501 train_grpo_optimized.py \
     --dynamic-sampling-max-batches 3 \
     --user-llm-url http://localhost:9000/v1 \
     --user-llm-model "Qwen/Qwen3-30B-A3B-Instruct-2507" \
-    --sft-coef 0.5 \
+    --sft-coef 0 \
     --step-rewards
