@@ -729,12 +729,17 @@ def main():
     global_step = start_iter * 25 if args.resume else 0
     # ---- SFT buffer initialization ----
     sft_buffer = None
-    if args.sft_data:
-        sft_paths = [p.strip() for p in args.sft_data.split(",") if p.strip()]
+    if args.sft_coef > 0:
+        sft_paths = []
+        if args.sft_data:
+            sft_paths = [p.strip() for p in args.sft_data.split(",") if p.strip()]
+        sft_buffer = SFTBuffer(sft_paths, tokenizer, compact_tools=args.compact_tools,
+                               max_seq_len=Config.MAX_SEQ_LENGTH)
         if sft_paths:
-            sft_buffer = SFTBuffer(sft_paths, tokenizer, compact_tools=args.compact_tools)
             print(f"[SFT] Initialized buffer: {len(sft_buffer)} samples from {len(sft_paths)} files")
-            print(f"[SFT] coef={args.sft_coef}, per_step={args.sft_per_step}")
+        else:
+            print(f"[SFT] Initialized empty buffer (will fill from successful rollouts)")
+        print(f"[SFT] coef={args.sft_coef}, per_step={args.sft_per_step}")
 
     # ======================================================================
     # Main GRPO loop (optimized)
@@ -884,6 +889,12 @@ def main():
             t_collect1 = time.time()
             samples = accumulated_samples
             env_metrics = accumulated_metrics
+
+            # ---- Pipe successful rollouts into SFT buffer ----
+            if sft_buffer is not None and samples:
+                n_added = sft_buffer.add_from_rollouts(samples, min_reward=1.0)
+                if n_added > 0:
+                    print(f"[SFT] Added {n_added} successful rollouts (buffer: {len(sft_buffer)})")
         else:
             t_collect0 = t_collect1 = time.time()
             samples, env_metrics = [], {}
