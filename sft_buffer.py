@@ -435,6 +435,60 @@ class SFTBuffer:
         if new_count > 0:
             print(f"[SFT] Added {new_count} new samples (total: {len(self)})")
 
+    def add_from_rollouts(self, samples, min_reward: float = 1.0,
+                          max_buffer_size: int = 5000) -> int:
+        """Add successful GRPO rollout samples to the buffer.
+
+        Args:
+            samples: List of GRPOSample (or any object with prompt_msgs,
+                     completion_text, tools, game_id, reward attributes).
+            min_reward: Minimum reward to include.
+            max_buffer_size: Cap buffer at this size (drop oldest when exceeded).
+
+        Returns:
+            Number of new samples added.
+        """
+        new_count = 0
+        for s in samples:
+            if s.reward < min_reward:
+                continue
+            # Dedup by game_id (stored as "rollout::{game_id}" in _seen_tasks)
+            key = f"rollout::{s.game_id}"
+            if key in self._seen_tasks:
+                continue
+            try:
+                seq, pl, al = build_prompt_plus_action(
+                    self._tokenizer, s.prompt_msgs, s.completion_text,
+                    tools=s.tools,
+                )
+                total_len = seq.shape[0]
+                if self._max_seq_len and total_len > self._max_seq_len:
+                    excess = total_len - self._max_seq_len
+                    new_pl = pl - excess
+                    if new_pl < self._min_prompt_len:
+                        continue
+                    seq = seq[excess:]
+                    pl = new_pl
+                self._seqs_cpu.append(seq)
+                self._prompt_lens.append(pl)
+                self._action_lens.append(al)
+                self._seen_tasks.add(key)
+                new_count += 1
+            except Exception:
+                continue
+
+        # Cap buffer size: drop oldest entries.
+        # Note: _seen_tasks keys for evicted entries are NOT removed, preventing
+        # re-addition of the same game_id. This is acceptable because game_ids
+        # include iteration-based offsets and are never reused across iterations.
+        if len(self._seqs_cpu) > max_buffer_size:
+            excess = len(self._seqs_cpu) - max_buffer_size
+            self._seqs_cpu = self._seqs_cpu[excess:]
+            self._prompt_lens = self._prompt_lens[excess:]
+            self._action_lens = self._action_lens[excess:]
+
+        return new_count
+
     def sample_batch(
         self,
         batch_size: int,
