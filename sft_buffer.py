@@ -452,8 +452,10 @@ class SFTBuffer:
         for s in samples:
             if s.reward < min_reward:
                 continue
-            # Dedup by game_id (stored as "rollout::{game_id}" in _seen_tasks)
-            key = f"rollout::{s.game_id}"
+            # Dedup by (game_id, prompt_length) to keep all turns from the same game
+            # while preventing re-addition across iterations. Each turn has a
+            # different prompt length because the conversation grows.
+            key = f"rollout::{s.game_id}::{len(s.prompt_msgs)}"
             if key in self._seen_tasks:
                 continue
             try:
