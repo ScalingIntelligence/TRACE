@@ -490,24 +490,27 @@ def compute_group_advantages(samples: List[GRPOSample]) -> torch.Tensor:
     worse than the average attempt at the same problem?"  It works identically
     regardless of whether rewards are {-1, +1} or continuous.
 
-    All turns from the same game get the same advantage (since they all
-    contribute to the same terminal reward).
+    With per-step rewards, different turns within the same game can have
+    different rewards and thus different advantages. This enables per-turn
+    credit assignment: correct tool calls get positive advantage, wrong
+    calls get negative advantage, even within the same failed game.
 
     For 2-player games, advantages are computed separately per player within
     each group, so player 0 and player 1 have independent baselines.
     """
     advantages = torch.zeros(len(samples), dtype=torch.float32)
 
-    # Collect per-game rewards, grouped by (group_id, player_id)
-    group_game_rewards: Dict[Tuple[int, int], Dict[int, float]] = defaultdict(dict)
+    # Collect ALL sample rewards, grouped by (group_id, player_id).
+    # Uses a list (not dict) so per-step rewards from the same game
+    # are all included — not overwritten.
+    group_all_rewards: Dict[Tuple[int, int], List[float]] = defaultdict(list)
     for s in samples:
         key = (s.group_id, s.player_id)
-        group_game_rewards[key][s.game_id] = s.reward
+        group_all_rewards[key].append(s.reward)
 
-    # Compute mean reward per group
+    # Compute mean reward per group (over all samples, not per-game)
     group_means: Dict[Tuple[int, int], float] = {}
-    for key, game_rewards in group_game_rewards.items():
-        rewards = list(game_rewards.values())
+    for key, rewards in group_all_rewards.items():
         group_means[key] = sum(rewards) / len(rewards)
 
     # Assign centered advantages
