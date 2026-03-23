@@ -42,3 +42,39 @@ def test_max_ops_changes_user_message():
     # The truncated message should NOT mention the 3rd operation
     assert "MS30465" not in trunc_user
     assert "MS45397" in trunc_user  # First op still present
+
+
+def test_max_ops_truncates_retail():
+    """max_ops=1 on a retail scenario truncates correctly."""
+    # Find a retail seed with 2+ ops
+    for seed in range(100):
+        s = generate_scenario(seed)
+        if s.domain == "retail" and len(s.operations) >= 2:
+            break
+    trunc = generate_scenario(seed, max_ops=1)
+    assert len(trunc.operations) == 1
+    assert trunc.domain == "retail"
+
+
+def test_reset_with_max_ops():
+    """RealisticMultiStepGame.reset accepts max_ops."""
+    from multistep_task_game import RealisticMultiStepGame
+    game = RealisticMultiStepGame()
+    game.reset(2087043557, max_ops=1)
+    summary = game.get_summary()
+    assert summary["n_ops"] == 1
+
+
+def test_reward_with_truncated_ops():
+    """Reward evaluation uses truncated operation list."""
+    from multistep_task_game import compute_reward
+    seed = 2087043557
+    full = generate_scenario(seed)
+    # Model does just the first cancel
+    calls = [{"name": "cancel_reservation", "arguments": {"reservation_id": "MS45397"}}]
+    # Against 1-op: should be 1.0 (all ops completed)
+    r1, _ = compute_reward(calls, full.operations[:1])
+    assert r1 == 1.0
+    # Against full 3-op: should be 0.0 (only 1/3)
+    r3, _ = compute_reward(calls, full.operations)
+    assert r3 == 0.0

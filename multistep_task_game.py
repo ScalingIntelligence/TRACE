@@ -935,6 +935,12 @@ def _generate_retail_scenario(rng: random.Random, max_ops: Optional[int] = None)
                     operations.append(op)
                     break
 
+    # Truncate operations if max_ops is set (minimum 1 to avoid empty scenarios)
+    if max_ops is not None:
+        max_ops = max(1, max_ops)
+        if len(operations) > max_ops:
+            operations = operations[:max_ops]
+
     db = build_retail_db(user, orders, products_db)
 
     messages = _build_prefilled_conversation("retail", user, operations, db)
@@ -1223,9 +1229,9 @@ class RealisticMultiStepGame:
         self._last_call_key: Optional[str] = None
         self._repeat_count: int = 0
 
-    def reset(self, seed: int) -> None:
+    def reset(self, seed: int, max_ops: Optional[int] = None) -> None:
         """Reset with new seed."""
-        self._scenario = generate_scenario(seed, domain=self._domain)
+        self._scenario = generate_scenario(seed, domain=self._domain, max_ops=max_ops)
         self._tools = ToolExecutor(
             self._scenario.domain,
             copy.deepcopy(self._scenario.db),
