@@ -845,7 +845,7 @@ def _build_prefilled_conversation(
     return msgs
 
 
-def _generate_retail_scenario(rng: random.Random) -> MultiStepScenario:
+def _generate_retail_scenario(rng: random.Random, max_ops: Optional[int] = None) -> MultiStepScenario:
     """Generate a multi-step retail scenario with 2-5 operations."""
     # Eval failure distribution (verified from qwen-3-30b base results):
     # 48% 2-op, 39% 3-op, 10% 4-op, 3% 5-op
@@ -949,12 +949,13 @@ def _generate_retail_scenario(rng: random.Random) -> MultiStepScenario:
     )
 
 
-def generate_scenario(seed: int, domain: Optional[str] = None) -> MultiStepScenario:
-    """Generate a multi-step scenario with 3-5 operations.
+def generate_scenario(seed: int, domain: Optional[str] = None, max_ops: Optional[int] = None) -> MultiStepScenario:
+    """Generate a multi-step scenario with 2-5 operations.
 
     Args:
         seed: Random seed for reproducibility.
         domain: "airline", "retail", or None (50/50 random).
+        max_ops: If set, truncate operations to at most this many (minimum 1).
     """
     rng = random.Random(seed)
 
@@ -965,7 +966,7 @@ def generate_scenario(seed: int, domain: Optional[str] = None) -> MultiStepScena
         chosen_domain = domain
 
     if chosen_domain == "retail":
-        return _generate_retail_scenario(rng)
+        return _generate_retail_scenario(rng, max_ops=max_ops)
 
     # --- Airline path ---
     # Eval failure distribution: 50% 2-op, 29% 3-op, 14% 4-op, 7% 5-op
@@ -1036,6 +1037,12 @@ def generate_scenario(seed: int, domain: Optional[str] = None) -> MultiStepScena
         if op is not None:
             operations.append(op)
             used_res_ids.add(res["reservation_id"])
+
+    # Truncate operations if max_ops is set (minimum 1 to avoid empty scenarios)
+    if max_ops is not None:
+        max_ops = max(1, max_ops)
+        if len(operations) > max_ops:
+            operations = operations[:max_ops]
 
     db = build_airline_db(user, reservations, flights_db)
 
