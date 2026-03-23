@@ -97,3 +97,36 @@ def test_difficulty_schedule():
     assert len(schedule4) == 4
     assert schedule4[0] == 1  # at least one easy slot
     assert schedule4[3] is None  # at least one full slot
+
+
+def test_difficulty_variation_creates_informative_group():
+    """A previously constant-zero group becomes informative with max_ops variation."""
+    from multistep_task_game import compute_reward
+    from train_grpo import multistep_difficulty_schedule
+
+    seed = 2087043557  # Known all-zero group in original training
+    schedule = multistep_difficulty_schedule(8)
+
+    rewards = []
+    for max_ops in schedule:
+        scenario = generate_scenario(seed, max_ops=max_ops)
+        # Simulate the model's known behavior: cancel(A) + baggages(B, wrong) + cancel(C)
+        all_model_calls = [
+            {"name": "cancel_reservation", "arguments": {"reservation_id": "MS45397"}},
+            {"name": "update_reservation_baggages", "arguments": {
+                "reservation_id": "MS24190", "total_baggages": 2,
+                "nonfree_baggages": 2, "payment_id": "credit_card_4112902"}},
+            {"name": "cancel_reservation", "arguments": {"reservation_id": "MS30465"}},
+        ]
+        # Model follows the prompt: only calls up to max_ops writes
+        if max_ops is not None:
+            model_calls = all_model_calls[:max_ops]
+        else:
+            model_calls = all_model_calls
+        reward, _ = compute_reward(model_calls, scenario.operations)
+        rewards.append(reward)
+
+    # The group MUST be informative (non-constant rewards)
+    assert len(set(rewards)) > 1, f"Group still constant: {rewards}"
+    # The easy slots should succeed
+    assert rewards[0] == 1.0, f"1-op easy slot failed: {rewards[0]}"
