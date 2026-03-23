@@ -542,11 +542,11 @@ In `train_grpo_optimized.py`, after rollout collection completes (after line 885
 
 - [ ] **Step 3: Update training command**
 
-In `train_mixed_grpo_cmd.sh`, add `--sft-coef 0.1` to the command:
+In `train_mixed_grpo_cmd.sh`, add `--sft-coef 0.5` to the command. Note: the SFT buffer is only populated on rank 0 (pre-existing limitation), so after gradient allreduce across 6 ranks, the effective coefficient is `0.5 / 6 ≈ 0.08`.
 
 ```bash
     --user-llm-model "Qwen/Qwen3-30B-A3B-Instruct-2507" \
-    --sft-coef 0.1
+    --sft-coef 0.5
 ```
 
 - [ ] **Step 4: Verify the training script parses correctly**
