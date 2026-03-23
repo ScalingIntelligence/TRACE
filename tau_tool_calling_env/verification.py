@@ -1,13 +1,24 @@
 """Verification for the tau bench tool-calling microenvironment.
 
-Uses the EXACT same verification mechanism as tau2-bench:
+Uses DB hash comparison + communicate check (based on tau2-bench):
   1. DB hash comparison: replay expected actions on a gold environment,
      compare DB hash with the agent's environment DB hash.
   2. Communicate check: substring matching on agent messages.
 
-Reward: DB_check × COMMUNICATE_check (same as tau bench).
-  1.0 = both pass
-  0.0 = either fails
+Reward tiers for action tasks:
+  1.0  = DB hash match + communication complete (full success)
+  0.3  = DB hash match but missing communication
+  0.1  = DB mismatch but called correct expected tool names (right approach, wrong args)
+  0.0  = didn't attempt expected tools, or transferred, or info-only failure
+
+Refusal tasks:
+  1.0  = correctly refused + communicated
+  0.0  = refused but missing communication
+ -1.0  = made write action on refusal task (penalty)
+
+The 0.1 partial credit for "right tools, wrong DB state" gives GRPO signal
+to improve argument precision, preventing the dead zone where "almost correct"
+and "didn't try" both get 0.0 (identical reward → zero gradient).
 """
 
 import sys
@@ -137,6 +148,34 @@ def compute_reward(
     return _compute_action_reward(scenario, tool_executor, conversation, transferred)
 
 
+def _check_expected_tool_names_called(
+    expected_actions: List[ExpectedAction],
+    tool_executor,
+) -> Tuple[bool, int, int]:
+    """Check if the agent called the expected tool names (ignoring arguments).
+
+    Returns (all_found, n_matched, n_expected).
+    """
+    tool_calls = tool_executor.tool_calls if tool_executor else []
+    agent_tool_names = [tc.get("name") for tc in tool_calls]
+
+    n_expected = len(expected_actions)
+    # For each expected action, check if the tool name appears in agent's calls
+    # Use greedy matching: each agent call can match at most one expected action
+    matched = [False] * n_expected
+    used_agent = [False] * len(agent_tool_names)
+
+    for i, expected in enumerate(expected_actions):
+        for j, agent_name in enumerate(agent_tool_names):
+            if not used_agent[j] and agent_name == expected.name:
+                matched[i] = True
+                used_agent[j] = True
+                break
+
+    n_matched = sum(matched)
+    return all(matched), n_matched, n_expected
+
+
 def _compute_action_reward(
     scenario: GeneratedScenario,
     tool_executor,
@@ -157,11 +196,19 @@ def _compute_action_reward(
     if db_pass and comm_pass:
         return 1.0, "Success: DB correct + communication complete"
     elif db_pass and not comm_pass:
-        return 0.0, "Failure: DB correct but missing communication"
-    elif not db_pass and comm_pass:
-        return 0.0, "Failure: DB mismatch (communicated correctly)"
-    else:
-        return 0.0, "Failure: DB mismatch + missing communication"
+        return 0.3, "Partial: DB correct but missing communication"
+
+    # DB mismatch — check if the agent at least called the right tool names
+    all_names_found, n_matched, n_expected = _check_expected_tool_names_called(
+        scenario.expected_actions, tool_executor,
+    )
+    if all_names_found:
+        return 0.1, f"Partial: called correct tools ({n_matched}/{n_expected}) but DB mismatch"
+
+    if n_matched > 0:
+        return 0.0, f"Failure: DB mismatch, only {n_matched}/{n_expected} expected tools called"
+
+    return 0.0, "Failure: DB mismatch, no expected tools called"
 
 
 def _compute_refusal_reward(

@@ -193,26 +193,39 @@ def allreduce_coalesced_grads(params: List[torch.nn.Parameter]) -> None:
 
     Combines small gradient tensors into larger buffers for better
     communication efficiency. No-op if not distributed.
+
+    IMPORTANT: Every rank MUST participate in the all-reduce even if it
+    has no gradients (e.g. received 0 mini-batches from shard_batches).
+    Skipping the collective causes an NCCL operation mismatch → hang.
     """
     if not dist.is_initialized() or dist.get_world_size() <= 1:
         return
 
-    grads = [p.grad for p in params if p.grad is not None]
-    if not grads:
-        return
-
     world_size = dist.get_world_size()
+
+    # Collect existing gradients; zero-initialize missing ones so every
+    # rank contributes the same number of elements to the all-reduce.
+    grads = []
+    for p in params:
+        if p.grad is not None:
+            grads.append(p.grad)
+        else:
+            grads.append(torch.zeros_like(p))
 
     # Coalesce into a single flat buffer for fewer all-reduce calls
     flat = torch.cat([g.reshape(-1) for g in grads])
     dist.all_reduce(flat, op=dist.ReduceOp.SUM)
     flat.div_(world_size)
 
-    # Scatter back
+    # Scatter back into the actual .grad tensors
     offset = 0
-    for g in grads:
+    for p, g in zip(params, grads):
         numel = g.numel()
-        g.copy_(flat[offset:offset + numel].reshape(g.shape))
+        reduced = flat[offset:offset + numel].reshape(g.shape)
+        if p.grad is not None:
+            p.grad.copy_(reduced)
+        else:
+            p.grad = reduced.clone()
         offset += numel
 
 
