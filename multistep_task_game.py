@@ -1246,6 +1246,13 @@ class RealisticMultiStepGame:
         self._last_call_key = None
         self._repeat_count = 0
 
+        # Per-step reward tracking for credit assignment.
+        # Each step gets immediate feedback: +1.0 for matching an expected
+        # operation, -0.5 for an unmatched write, 0.0 for lookups.
+        # The final respond_to_user step gets the terminal reward.
+        self._step_rewards: List[float] = []
+        self._completed_ops: List[bool] = [False] * len(self._scenario.operations)
+
         self.done = False
         self.current_player = 0
         self.rewards = {0: 0.0}
@@ -1293,11 +1300,13 @@ class RealisticMultiStepGame:
         self._step_count += 1
 
         if action is None:
+            self._step_rewards.append(0.0)
             self._finalize(0.0, "No action provided")
             return
 
         tool_call = _parse_tool_call(action)
         if tool_call is None:
+            self._step_rewards.append(0.0)
             self._finalize(0.0, "Invalid JSON format")
             self.invalid_player = 0
             return
@@ -1308,12 +1317,14 @@ class RealisticMultiStepGame:
         # --- Text response to user -> end game ---
         if tool_name in ("respond_to_user", "send_message"):
             reward, reason = compute_reward(self._tool_calls, self._scenario.operations)
+            self._step_rewards.append(reward)  # terminal step gets terminal reward
             self._finalize(reward, reason)
             return
 
         # --- Transfer -> end game ---
         if tool_name == "transfer_to_human_agents":
             reward, reason = compute_reward(self._tool_calls, self._scenario.operations)
+            self._step_rewards.append(reward)
             self._finalize(reward, f"Transferred. {reason}")
             return
 
@@ -1323,6 +1334,7 @@ class RealisticMultiStepGame:
             self._repeat_count += 1
             if self._repeat_count >= 3:
                 reward, reason = compute_reward(self._tool_calls, self._scenario.operations)
+                self._step_rewards.append(reward)
                 self._finalize(reward, f"Loop detected. {reason}")
                 return
         else:
@@ -1331,6 +1343,26 @@ class RealisticMultiStepGame:
 
         # --- Track tool call for reward ---
         self._tool_calls.append({"name": tool_name, "arguments": tool_args})
+
+        # --- Per-step reward: immediate credit assignment ---
+        _LOOKUP_TOOLS = {
+            "get_user_details", "get_reservation_details", "search_direct_flight",
+            "search_onestop_flight", "get_flight_status", "list_all_airports",
+            "find_user_id_by_name_zip", "find_user_id_by_email",
+            "get_order_details", "get_product_details", "list_all_product_types",
+            "calculate",
+        }
+        if tool_name in _LOOKUP_TOOLS:
+            self._step_rewards.append(0.0)  # neutral for lookups
+        else:
+            # Check if this write matches an expected operation
+            matched = False
+            for i, op in enumerate(self._scenario.operations):
+                if not self._completed_ops[i] and _match_operation(tool_name, tool_args, op):
+                    self._completed_ops[i] = True
+                    matched = True
+                    break
+            self._step_rewards.append(1.0 if matched else -0.5)
 
         # --- Execute tool via ToolExecutor ---
         cid = f"call_{self._call_id_counter:04d}"
@@ -1363,6 +1395,10 @@ class RealisticMultiStepGame:
         # --- Max steps check ---
         if self._step_count >= self._max_steps:
             reward, reason = compute_reward(self._tool_calls, self._scenario.operations)
+            # Last step already has a step_reward from the tool call above;
+            # override it with terminal reward to preserve game-level signal
+            if self._step_rewards:
+                self._step_rewards[-1] = reward
             self._finalize(reward, f"Max steps. {reason}")
 
     def _finalize(self, reward: float, reason: str) -> None:
