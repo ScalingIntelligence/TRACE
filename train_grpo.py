@@ -107,6 +107,35 @@ class GRPOSample:
 
 
 # ============================================================================
+# Within-group difficulty variation for multistep_task
+# ============================================================================
+
+def multistep_difficulty_schedule(group_size: int) -> List[Optional[int]]:
+    """Assign max_ops values for each game in a multistep_task group.
+
+    Creates within-group difficulty variation:
+      - 25% of games: max_ops=1 (easiest)
+      - 25% of games: max_ops=2 (medium)
+      - 50% of games: max_ops=None (full difficulty)
+
+    This ensures non-constant rewards even when the model produces
+    deterministic actions, because easier variants are more likely
+    to succeed than harder ones.
+    """
+    schedule: List[Optional[int]] = []
+    n_easy = max(1, group_size // 4)
+    n_medium = max(1, group_size // 4)
+    for i in range(group_size):
+        if i < n_easy:
+            schedule.append(1)
+        elif i < n_easy + n_medium:
+            schedule.append(2)
+        else:
+            schedule.append(None)
+    return schedule
+
+
+# ============================================================================
 # Group-based rollout collection
 # ============================================================================
 
@@ -189,6 +218,11 @@ def collect_grpo_rollouts(
             if g_spec.name == "adversarial_policy" and prefix_ratio > 0:
                 use_prefix = rng.random() < prefix_ratio
 
+            # Compute multistep difficulty schedule once per group
+            ms_schedule = None
+            if g_spec.name == "multistep_task":
+                ms_schedule = multistep_difficulty_schedule(group_size)
+
             for s_idx in range(group_size):
                 env = g_spec.make_env(**g_kwargs)
                 # Assign random difficulty for adversarial_policy game
@@ -196,6 +230,8 @@ def collect_grpo_rollouts(
                 if g_spec.name == "adversarial_policy":
                     difficulty = rng.choice(["easy", "medium", "hard"])
                     env.reset(g_seed, user_difficulty=difficulty)
+                elif ms_schedule is not None:
+                    env.reset(g_seed, max_ops=ms_schedule[s_idx])
                 else:
                     env.reset(g_seed)  # Same seed within group!
 
@@ -339,6 +375,11 @@ def collect_grpo_rollouts(
             if g_spec.name == "adversarial_policy" and prefix_ratio > 0:
                 use_prefix = rng.random() < prefix_ratio
 
+            # Compute multistep difficulty schedule once per group
+            ms_schedule = None
+            if g_spec.name == "multistep_task":
+                ms_schedule = multistep_difficulty_schedule(group_size)
+
             for s_idx in range(group_size):
                 game_id = base_seed * 1_000_000 + g_idx * 1000 + s_idx
                 env = g_spec.make_env(**g_kwargs)
@@ -346,6 +387,8 @@ def collect_grpo_rollouts(
                 if g_spec.name == "adversarial_policy":
                     difficulty = rng.choice(["easy", "medium", "hard"])
                     env.reset(g_seed, user_difficulty=difficulty)
+                elif ms_schedule is not None:
+                    env.reset(g_seed, max_ops=ms_schedule[s_idx])
                 else:
                     env.reset(g_seed)
 

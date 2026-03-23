@@ -78,3 +78,22 @@ def test_reward_with_truncated_ops():
     # Against full 3-op: should be 0.0 (only 1/3)
     r3, _ = compute_reward(calls, full.operations)
     assert r3 == 0.0
+
+
+def test_difficulty_schedule():
+    """The difficulty schedule assigns varying max_ops within a group."""
+    from train_grpo import multistep_difficulty_schedule
+
+    # group_size=8: should return [1, 1, 2, 2, None, None, None, None]
+    schedule = multistep_difficulty_schedule(8)
+    assert len(schedule) == 8
+    assert schedule[0] == 1 and schedule[1] == 1  # easy slots
+    assert schedule[2] == 2 and schedule[3] == 2  # medium slots
+    assert schedule[4] is None  # full difficulty
+    assert schedule[7] is None
+
+    # group_size=4
+    schedule4 = multistep_difficulty_schedule(4)
+    assert len(schedule4) == 4
+    assert schedule4[0] == 1  # at least one easy slot
+    assert schedule4[3] is None  # at least one full slot
