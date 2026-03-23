@@ -155,6 +155,7 @@ def collect_grpo_rollouts(
     prefix_ratio: float = 0.0,
     compact_tools: bool = False,
     group_assignments: Optional[List[Tuple[GameSpec, Dict[str, Any]]]] = None,
+    use_step_rewards: bool = True,
 ) -> Tuple[List[GRPOSample], Dict[str, float]]:
     """
     Collect rollouts with the GRPO inner/outer loop structure.
@@ -353,9 +354,9 @@ def collect_grpo_rollouts(
                 log_entry["user_difficulty"] = difficulties[i]
             logger.log(log_entry)
 
-            # Use per-step rewards for credit assignment when available,
+            # Use per-step rewards for credit assignment when available and enabled,
             # fall back to terminal reward for games that don't support it.
-            step_rewards = getattr(env, '_step_rewards', None)
+            step_rewards = getattr(env, '_step_rewards', None) if use_step_rewards else None
             terminal_reward = float(env.rewards.get(0, 0.0))
 
             for step_idx, (msgs, act, pid, completion, tools) in enumerate(episode_steps[i]):
@@ -441,7 +442,7 @@ def collect_grpo_rollouts(
                 invalid_games += 1 if env.invalid_player is not None else 0
                 p0_reward_sum += float(env.rewards.get(0, 0.0))
 
-                step_rewards = getattr(env, '_step_rewards', None)
+                step_rewards = getattr(env, '_step_rewards', None) if use_step_rewards else None
                 terminal_reward = float(env.rewards.get(0, 0.0))
 
                 for step_idx, (msgs, act, pid, completion, tools) in enumerate(ep_steps):

@@ -411,6 +411,11 @@ def parse_grpo_args_optimized():
         help="Filter out info-gathering tool calls from training samples")
     parser.add_argument("--no-filter-info-turns", dest="filter_info_turns",
         action="store_false", help="Disable info-gathering turn filtering")
+    parser.add_argument("--step-rewards", action="store_true", default=True,
+        help="Use per-step rewards for credit assignment in multistep_task "
+             "(correct tool calls get +1.0, wrong writes get -0.5, lookups get 0.0)")
+    parser.add_argument("--no-step-rewards", dest="step_rewards",
+        action="store_false", help="Disable per-step rewards (all turns get terminal reward)")
     parser.add_argument("--tool-result-max-chars", type=int, default=200,
         help="Max chars for truncated old tool results (0 to disable)")
 
@@ -596,6 +601,7 @@ def main():
     if args.kl_coef == 0:
         print(f"  [OPT] base_logp:      SKIPPED (kl_coef=0)")
     print(f"  [OPT] filter info turns: {args.filter_info_turns}")
+    print(f"  [OPT] step rewards:      {args.step_rewards}")
     print(f"  [OPT] tool result trunc: {args.tool_result_max_chars} chars (0=off)")
     if world_size > 1:
         print(f"  [DIST] world_size:    {world_size}")
@@ -832,6 +838,7 @@ def main():
                     prefix_ratio=args.prefix_ratio,
                     compact_tools=args.compact_tools,
                     group_assignments=iter_group_assignments,
+                    use_step_rewards=args.step_rewards,
                 )
 
                 if not batch_samples:
