@@ -914,8 +914,9 @@ def main():
                 if args.kl_coef > 0 and mb_base_logp is not None:
                     kl_loss = args.kl_coef * torch.mean(new_logp - mb_base_logp)
 
-                # Scale loss for gradient accumulation
-                loss = (policy_loss + args.vf_coef * value_loss + kl_loss) / n_total_batches
+                # Scale loss for gradient accumulation: use LOCAL batch count.
+                # allreduce_coalesced_grads averages across ranks (SUM / W).
+                loss = (policy_loss + args.vf_coef * value_loss + kl_loss) / len(my_batch_order)
                 loss.backward()
 
                 # Tracking (no grad, unscaled losses)

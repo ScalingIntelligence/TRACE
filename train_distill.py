@@ -1160,7 +1160,7 @@ def main():
                         per_game_gap[gn].append((teacher_lp - new_lp.detach()).mean().item())
 
                 n_mb = len(mb_idx)
-                loss = total_loss / n_mb / n_total_batches
+                loss = total_loss / n_mb / len(my_batch_order)
                 loss.backward()
 
                 # ---- SFT forward + backward (separate graph) ----
@@ -1178,7 +1178,7 @@ def main():
                             sft_logits, sft_ids, sft_pl, sft_al, normalize_by_len=True
                         )
                     sft_loss_val = -sft_logp.mean()
-                    sft_scaled = (args.sft_coef * sft_loss_val) / n_total_batches
+                    sft_scaled = (args.sft_coef * sft_loss_val) / len(my_batch_order)
                     sft_scaled.backward()
                     del sft_ids, sft_attn, sft_logits, sft_out, sft_logp, sft_scaled
 

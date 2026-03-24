@@ -1197,6 +1197,8 @@ def main():
         ratio_mean_acc = 0.0
         local_updates = 0
 
+        t_minibatch_start = time.time()
+
         for _epoch in range(args.epochs):
             # Shuffle the ORDER of mini-batches — same seed on all ranks for
             # deterministic sharding (each rank gets a disjoint subset).
@@ -1253,9 +1255,12 @@ def main():
                 if args.kl_coef > 0 and mb_base_logp is not None:
                     kl_loss = args.kl_coef * torch.mean(new_logp - mb_base_logp)
 
-                # Scale loss for gradient accumulation: divide by total batches so
-                # accumulated gradient = (1/N) * sum(g_i), the full-batch gradient.
-                loss = (policy_loss + kl_loss) / n_total_batches
+                # Scale loss for gradient accumulation: divide by LOCAL batch count
+                # so accumulated gradient = local mean.  allreduce_coalesced_grads
+                # then averages across ranks (SUM / world_size) → correct global mean.
+                # Using n_total_batches here would under-scale by 1/world_size because
+                # the allreduce already divides by world_size.
+                loss = (policy_loss + kl_loss) / len(my_batch_order)
                 loss.backward()  # Gradients accumulate (no zero_grad per mini-batch)
 
                 # ---- SFT forward + backward (separate graph to avoid OOM) ----
@@ -1275,7 +1280,7 @@ def main():
                             sft_logits, sft_ids, sft_pl, sft_al, normalize_by_len=True
                         )
                     sft_loss_val = -sft_logp.mean()
-                    sft_scaled = (args.sft_coef * sft_loss_val) / n_total_batches
+                    sft_scaled = (args.sft_coef * sft_loss_val) / len(my_batch_order)
                     sft_scaled.backward()
                     del sft_ids, sft_attn, sft_logits, sft_out, sft_logp, sft_scaled
 
@@ -1302,8 +1307,27 @@ def main():
 
                 del mb_ids, mb_attn, mb_ids_cpu, mb_attn_cpu, logits, outputs, new_logp, ratio, loss
 
+            # Per-rank timing for diagnosing NCCL timeout issues
+            t_minibatch_end = time.time()
+            t_local_compute = t_minibatch_end - t_minibatch_start
+            if t_local_compute > 1800:  # log if compute > 30 min (anomaly)
+                print(
+                    f"[SLOW rank {rank}] iter {it} mini-batch compute took "
+                    f"{t_local_compute:.1f}s ({len(my_batch_order)} batches, "
+                    f"{t_local_compute/max(1,len(my_batch_order)):.1f}s/batch)",
+                    flush=True,
+                )
+
             # All-reduce accumulated LoRA gradients across ranks
+            t_ar_start = time.time()
             allreduce_coalesced_grads(trainable_params)
+            t_ar_end = time.time()
+            if t_ar_end - t_ar_start > 600:  # log if allreduce wait > 10 min
+                print(
+                    f"[SLOW allreduce rank {rank}] iter {it} allreduce_grads waited "
+                    f"{t_ar_end - t_ar_start:.1f}s (local compute was {t_local_compute:.1f}s)",
+                    flush=True,
+                )
 
             # Single gradient clip + optimizer step (identical on all ranks)
             torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)
