@@ -448,6 +448,7 @@ def build_env_kwargs(game_spec: GameSpec, args) -> Dict[str, Any]:
     _GAMES_WITH_USER_LLM = {
         "adversarial_policy", "tau_tool_calling", "precondition_check",
         "structured_data_reasoning", "multistep_task",
+        "tau2_bench", "tau2_bench_airline", "tau2_bench_retail",
     }
     if args.user_llm_url and game_spec.name in _GAMES_WITH_USER_LLM:
         from adversarial_policy_game import UserLLMClient
