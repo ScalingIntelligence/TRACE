@@ -8,6 +8,7 @@ set -euo pipefail
 
 CUDA_VISIBLE_DEVICES=2,3,4,5,6,7 \
 NCCL_P2P_DISABLE=1 \
+NCCL_TIMEOUT_MINS=360 \
 WANDB_API_KEY=f4ef099e7073d103963e5c986e4f818f5a526ee8 \
 VLLM_BASE_URLS=http://localhost:8080 \
 VLLM_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507 \
@@ -28,4 +29,4 @@ torchrun --nproc_per_node=6 --master-port 29501 train_grpo_optimized.py \
     --user-llm-url http://localhost:9000/v1 \
     --user-llm-model "Qwen/Qwen3-30B-A3B-Instruct-2507" \
     --sft-coef 0 \
-    --step-rewards
+    --no-step-rewards
