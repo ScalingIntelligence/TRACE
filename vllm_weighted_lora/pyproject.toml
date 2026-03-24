@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm"
+version = "0.15.0"
+description = "vLLM 0.15.0 + weighted LoRA chunked exact accumulation"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "regex",
+    "cachetools",
+    "psutil",
+    "sentencepiece",
+    "numpy",
+    "requests>=2.26.0",
+    "tqdm",
+    "blake3",
+    "py-cpuinfo",
+    "transformers>=4.56.0,<5",
+    "tokenizers>=0.21.1",
+    "protobuf",
+    "fastapi[standard]>=0.115.0",
+    "aiohttp",
+    "openai>=1.99.1",
+    "pydantic>=2.12.0",
+    "prometheus_client>=0.18.0",
+    "pillow",
+    "prometheus-fastapi-instrumentator>=7.0.0",
+    "tiktoken>=0.6.0",
+    "lm-format-enforcer==0.11.3",
+    "outlines_core==0.2.11",
+    "diskcache==5.6.3",
+    "lark==1.2.2",
+    "typing_extensions>=4.10",
+    "filelock>=3.16.1",
+    "partial-json-parser",
+    "pyzmq>=25.0.0",
+    "msgspec",
+    "gguf>=0.17.0",
+    "mistral_common[image]>=1.8.8",
+    "opencv-python-headless>=4.13.0",
+    "pyyaml",
+    "einops",
+    "compressed-tensors==0.13.0",
+    "depyf==0.20.0",
+    "cloudpickle",
+    "watchfiles",
+    "python-json-logger",
+    "ninja",
+    "pybase64",
+    "cbor2",
+    "ijson",
+    "setproctitle",
+    "openai-harmony>=0.0.3",
+    "anthropic>=0.71.0",
+    "model-hosting-container-standards>=0.1.13,<1.0.0",
+    "mcp",
+    "grpcio",
+    "grpcio-reflection",
+    "numba==0.61.2",
+    "ray[cgraph]>=2.48.0",
+    "torch==2.9.1",
+    "torchaudio==2.9.1",
+    "torchvision==0.24.1",
+    "flashinfer-python==0.6.1",
+]
+
+[project.scripts]
+vllm = "vllm.entrypoints.cli.main:main"
+
+[project.entry-points."vllm.general_plugins"]
+lora_filesystem_resolver = "vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver"
+
+[tool.setuptools.packages.find]
+include = ["vllm*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.so", "*.pyd", "*.json", "*.jinja", "*.js", "*.css", "*.html"]
