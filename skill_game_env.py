@@ -7,7 +7,7 @@ interface, enabling GRPO/PPO training via SkyRL for all registered games:
   - tau_tool_calling (multi-turn, tool-calling)
   - multistep_task (multi-turn, tool-calling)
   - structured_data_reasoning (single-turn, answer extraction)
-  - structured_data_v2 (single-turn, tool-calling)
+  - structured_data_single_turn (single-turn, tool-calling)
 """
 
 import json
@@ -30,7 +30,7 @@ if _GAMES_DIR not in sys.path:
 from game_registry import GAMES, GameSpec, get_game_spec
 
 # Games that need an LLM-based user simulator
-_USER_LLM_GAMES = {"adversarial_policy", "tau_tool_calling"}
+_USER_LLM_GAMES = {"adversarial_policy", "tau_tool_calling", "tau2_bench", "tau2_bench_airline", "tau2_bench_retail"}
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ def build_initial_prompt(
 def _extract_prompt_from_game(game, spec: GameSpec) -> ConversationType:
     """Extract (system_msg, user_msg) from an already-reset game instance."""
 
-    # --- structured-message games: adversarial_policy, tau_tool_calling, structured_data_v2
+    # --- structured-message games: adversarial_policy, tau_tool_calling, structured_data_single_turn
     if getattr(game, "supports_structured_messages", False):
         system_content = game.get_system_prompt()
         tools = game.get_tool_schemas()

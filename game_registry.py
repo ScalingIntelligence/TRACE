@@ -25,10 +25,25 @@ try:
 except ImportError:
     TauToolCallingEnv = None
 
+try:
+    from tau_tool_calling_env_revised import (
+        TauToolCallingEnv as TauToolCallingEnvRevised,
+        extract_action as extract_action_tau_tool_revised,
+        SYSTEM_PROMPT as SYSTEM_PROMPT_TAU_TOOL_REVISED,
+    )
+except ImportError:
+    TauToolCallingEnvRevised = None
+
 from structured_data_game import (
     StructuredDataGame,
     extract_action as extract_action_structured_data,
     SYSTEM_PROMPT as SYSTEM_PROMPT_STRUCTURED_DATA,
+)
+
+from structured_data_game_revised import (
+    StructuredDataGame as StructuredDataGameRevised,
+    extract_action as extract_action_structured_data_revised,
+    SYSTEM_PROMPT as SYSTEM_PROMPT_STRUCTURED_DATA_REVISED,
 )
 
 from structured_data_game_deprecated import (
@@ -37,16 +52,16 @@ from structured_data_game_deprecated import (
     SYSTEM_PROMPT as SYSTEM_PROMPT_STRUCTURED_DATA_DEPRECATED,
 )
 
-from structured_data_new_game import (
-    StructuredDataGame as StructuredDataGameV2,
-    extract_action as extract_action_structured_data_v2,
-    SYSTEM_PROMPT as SYSTEM_PROMPT_STRUCTURED_DATA_V2,
-)
-
 from multistep_task_game import (
     RealisticMultiStepGame,
     extract_action as extract_action_multistep,
     SYSTEM_PROMPT as SYSTEM_PROMPT_MULTISTEP,
+)
+
+from multistep_task_game_revised import (
+    RealisticMultiStepGame as RealisticMultiStepGameRevised,
+    extract_action as extract_action_multistep_revised,
+    SYSTEM_PROMPT as SYSTEM_PROMPT_MULTISTEP_REVISED,
 )
 
 from multistep_task_game_deprecated import (
@@ -65,6 +80,16 @@ except ImportError:
     PreconditionGame = None
 
 try:
+    from precondition_game_revised import (
+        PreconditionGame as PreconditionGameRevised,
+        extract_action as extract_action_precondition_revised,
+        SYSTEM_PROMPT as SYSTEM_PROMPT_PRECONDITION_REVISED,
+    )
+except ImportError:
+    PreconditionGameRevised = None
+
+
+try:
     from awm_game import (
         AWMGame,
         extract_action as extract_action_awm,
@@ -72,6 +97,15 @@ try:
     )
 except ImportError:
     AWMGame = None
+
+try:
+    from tau2_bench_game import (
+        Tau2BenchGame,
+        extract_action as extract_action_tau2_bench,
+        SYSTEM_PROMPT as SYSTEM_PROMPT_TAU2_BENCH,
+    )
+except ImportError:
+    Tau2BenchGame = None
 
 
 class GameEnv(Protocol):
@@ -235,25 +269,6 @@ def _register_builtin_games() -> None:
         )
     )
 
-    # Structured Data Reasoning v2 — tau2-bench aligned single-turn
-    # Model is placed mid-conversation after auth+lookups, produces one action tool call
-    # Uses exact tau2-bench system prompt, tools, and message format
-    # Tool-calling game: uses generate_with_tools, not generate_text
-    def make_structured_data_v2(domain=None) -> StructuredDataGameV2:
-        return StructuredDataGameV2(domain=domain)
-
-    register_game(
-        GameSpec(
-            name="structured_data_v2",
-            make_env=make_structured_data_v2,
-            extract_action=extract_action_structured_data_v2,
-            action_space=[],
-            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
-            system_prompt=SYSTEM_PROMPT_STRUCTURED_DATA_V2,
-            max_gen_tokens=1024,
-        )
-    )
-
     # Multi-Step Task — tau2-bench aligned (airline)
     # Multi-turn with LLM user, uses exact tau2-bench airline tools/policy/system prompt.
     # Trains sequential multi-op completion: cancel, change flights, update bags, etc.
@@ -310,6 +325,84 @@ def _register_builtin_games() -> None:
             )
         )
 
+    # ======================================================================
+    # REVISED games — address tau2-bench transferability gaps
+    # ======================================================================
+
+    # Tau Tool-Calling (Revised) — adds adversarial users, conditional fallback,
+    # cross-entity reasoning, progressive disclosure
+    if TauToolCallingEnvRevised is not None:
+        def make_tau_tool_calling_revised(user_client=None, domain=None) -> TauToolCallingEnvRevised:
+            return TauToolCallingEnvRevised(
+                max_steps=30, user_client=user_client, domain=domain,
+            )
+
+        register_game(
+            GameSpec(
+                name="tau_tool_calling_revised",
+                make_env=make_tau_tool_calling_revised,
+                extract_action=extract_action_tau_tool_revised,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_TAU_TOOL_REVISED,
+                max_gen_tokens=1024,
+            )
+        )
+
+    # Structured Data Reasoning (Revised) — adds adversarial users, conditional
+    # fallback, DB hash verification, cross-entity, progressive disclosure
+    def make_structured_data_revised(user_client=None, domain=None) -> StructuredDataGameRevised:
+        return StructuredDataGameRevised(user_client=user_client, domain=domain)
+
+    register_game(
+        GameSpec(
+            name="structured_data_reasoning_revised",
+            make_env=make_structured_data_revised,
+            extract_action=extract_action_structured_data_revised,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_STRUCTURED_DATA_REVISED,
+            max_gen_tokens=1024,
+        )
+    )
+
+    # Multi-Step Task (Revised) — adds DB hash verification, communicate check,
+    # removes wrong-call penalty
+    def make_multistep_revised(user_client=None, domain=None) -> RealisticMultiStepGameRevised:
+        return RealisticMultiStepGameRevised(max_steps=15, user_client=user_client, domain=domain)
+
+    register_game(
+        GameSpec(
+            name="multistep_task_revised",
+            make_env=make_multistep_revised,
+            extract_action=extract_action_multistep_revised,
+            action_space=[],
+            stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+            system_prompt=SYSTEM_PROMPT_MULTISTEP_REVISED,
+            max_gen_tokens=1024,
+        )
+    )
+
+    # Precondition Check (Revised) — adds retail domain, adversarial users,
+    # DB hash verification, dynamic generation, progressive disclosure
+    if PreconditionGameRevised is not None:
+        def make_precondition_revised(user_client=None) -> PreconditionGameRevised:
+            return PreconditionGameRevised(
+                max_steps=20, user_client=user_client,
+            )
+
+        register_game(
+            GameSpec(
+                name="precondition_check_revised",
+                make_env=make_precondition_revised,
+                extract_action=extract_action_precondition_revised,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_PRECONDITION_REVISED,
+                max_gen_tokens=1024,
+            )
+        )
+
     # AWM Tool Calling — Agent World Model environments
     # 1K pre-generated SQLite-backed tool-use environments from AWM paper.
     # Model interacts with application tools to complete user tasks.
@@ -328,6 +421,55 @@ def _register_builtin_games() -> None:
                 action_space=[],
                 stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
                 system_prompt=SYSTEM_PROMPT_AWM,
+                max_gen_tokens=1024,
+            )
+        )
+
+    # Tau2-Bench — full tau2-bench airline + retail evaluation as a training game
+    # 50 airline + 114 retail tasks with real tools, DB, policy, and LLM user sim.
+    # Reward from DB hash comparison + communicate_info substring matching.
+    if Tau2BenchGame is not None:
+        def make_tau2_bench(user_client=None, domain=None) -> Tau2BenchGame:
+            return Tau2BenchGame(max_steps=30, user_client=user_client, domain=domain)
+
+        register_game(
+            GameSpec(
+                name="tau2_bench",
+                make_env=make_tau2_bench,
+                extract_action=extract_action_tau2_bench,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_TAU2_BENCH,
+                max_gen_tokens=1024,
+            )
+        )
+
+        def make_tau2_bench_airline(user_client=None) -> Tau2BenchGame:
+            return Tau2BenchGame(max_steps=30, user_client=user_client, domain="airline")
+
+        register_game(
+            GameSpec(
+                name="tau2_bench_airline",
+                make_env=make_tau2_bench_airline,
+                extract_action=extract_action_tau2_bench,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_TAU2_BENCH,
+                max_gen_tokens=1024,
+            )
+        )
+
+        def make_tau2_bench_retail(user_client=None) -> Tau2BenchGame:
+            return Tau2BenchGame(max_steps=30, user_client=user_client, domain="retail")
+
+        register_game(
+            GameSpec(
+                name="tau2_bench_retail",
+                make_env=make_tau2_bench_retail,
+                extract_action=extract_action_tau2_bench,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_TAU2_BENCH,
                 max_gen_tokens=1024,
             )
         )

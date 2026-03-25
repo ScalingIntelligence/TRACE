@@ -449,6 +449,9 @@ def build_env_kwargs(game_spec: GameSpec, args) -> Dict[str, Any]:
         "adversarial_policy", "tau_tool_calling", "precondition_check",
         "structured_data_reasoning", "multistep_task",
         "tau2_bench", "tau2_bench_airline", "tau2_bench_retail",
+        # Revised versions
+        "tau_tool_calling_revised", "precondition_check_revised",
+        "structured_data_reasoning_revised", "multistep_task_revised",
     }
     if args.user_llm_url and game_spec.name in _GAMES_WITH_USER_LLM:
         from adversarial_policy_game import UserLLMClient
@@ -460,7 +463,7 @@ def build_env_kwargs(game_spec: GameSpec, args) -> Dict[str, Any]:
         )
     if game_spec.name == "adversarial_policy":
         kwargs["adversarial_ratio"] = args.adversarial_ratio
-    if game_spec.name == "tau_tool_calling" and hasattr(args, "tau_domain") and args.tau_domain:
+    if game_spec.name in ("tau_tool_calling", "tau_tool_calling_revised") and hasattr(args, "tau_domain") and args.tau_domain:
         kwargs["domain"] = args.tau_domain
     return kwargs
 
@@ -589,7 +592,7 @@ def main():
     if game_spec.name == "adversarial_policy":
         print(f"  Adversarial ratio:   {args.adversarial_ratio}")
         print(f"  Prefix ratio:        {args.prefix_ratio}")
-    if game_spec.name == "tau_tool_calling":
+    if game_spec.name in ("tau_tool_calling", "tau_tool_calling_revised"):
         print(f"  Domain filter:       {args.tau_domain or 'both'}")
     print(f"  Compact tools:       {args.compact_tools}")
     print(f"  Max gen tokens:      {max_gen_tokens}")

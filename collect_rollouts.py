@@ -75,11 +75,117 @@ from game_registry import get_game_spec, list_game_names
 
 
 # Tool-calling games use LLM user for multi-turn conversation
-TOOL_CALLING_GAMES = {"adversarial_policy", "tau_tool_calling", "structured_data_v2", "precondition_check"}
+TOOL_CALLING_GAMES = {
+    "adversarial_policy", "tau_tool_calling",
+    "precondition_check", "structured_data_reasoning", "multistep_task",
+    # Revised versions
+    "tau_tool_calling_revised", "precondition_check_revised",
+    "structured_data_reasoning_revised", "multistep_task_revised",
+}
 # Tool-calling games that need an LLM user client
-TOOL_CALLING_WITH_USER = {"adversarial_policy", "tau_tool_calling", "precondition_check"}
+TOOL_CALLING_WITH_USER = {
+    "adversarial_policy", "tau_tool_calling", "precondition_check",
+    "structured_data_reasoning",
+    # Revised versions
+    "tau_tool_calling_revised", "precondition_check_revised",
+    "structured_data_reasoning_revised",
+}
 # Observation-based games use observe()/step() interface
-OBSERVE_GAMES = {"multistep_task", "structured_data_reasoning"}
+OBSERVE_GAMES = set()  # All games now use tool-calling interface
+# Games that support --self-expert mode (ground truth injection)
+SELF_EXPERT_GAMES = {
+    "structured_data_reasoning", "multistep_task", "precondition_check", "tau_tool_calling",
+    # Revised versions
+    "structured_data_reasoning_revised", "multistep_task_revised",
+    "precondition_check_revised", "tau_tool_calling_revised",
+}
+
+
+# ---------------------------------------------------------------------------
+# Self-expert: ground truth extraction and system prompt injection
+# ---------------------------------------------------------------------------
+
+def get_expert_guidance(game, env_type: str) -> str:
+    """Extract ground truth from game scenario and format as expert guidance block.
+
+    Returns an <expert_guidance> block to append to the system prompt, or ""
+    if no ground truth is available.
+    """
+    scenario = getattr(game, "_scenario", None)
+    if scenario is None:
+        return ""
+
+    # Map revised game names to their base type for guidance extraction
+    _EXPERT_BASE_TYPE = {
+        "structured_data_reasoning_revised": "structured_data_reasoning",
+        "multistep_task_revised": "multistep_task",
+        "precondition_check_revised": "precondition_check",
+        "tau_tool_calling_revised": "tau_tool_calling",
+    }
+    env_type = _EXPERT_BASE_TYPE.get(env_type, env_type)
+
+    preamble = (
+        "CRITICAL OVERRIDE — follow these instructions EXACTLY. "
+        "Do NOT deviate. Do NOT add extra arguments. Do NOT do additional lookups. "
+        "Do NOT improvise. Execute ONLY what is specified below, with the EXACT arguments given. "
+        "This overrides all other instructions."
+    )
+    parts = [preamble]
+
+    if env_type in ("structured_data_reasoning", "structured_data_reasoning_revised"):
+        if scenario.expected_tool_call:
+            tc = scenario.expected_tool_call
+            args_json = json.dumps(tc['key_args'])
+            parts.append(f"ACTION: Call '{tc['name']}' with EXACTLY these arguments and NO others: {args_json}")
+            parts.append("Do NOT add any arguments not listed above (no 'flights', no 'date', no extra fields).")
+        if scenario.communicate_info:
+            parts.append(f"COMMUNICATE: Tell the user these exact values: {', '.join(scenario.communicate_info)}")
+        if scenario.expected_answer is not None and not scenario.expected_tool_call:
+            parts.append(f"ANSWER: The correct answer is: {scenario.expected_answer}")
+
+    elif env_type in ("multistep_task", "multistep_task_revised"):
+        parts.append("Execute these operations ONE AT A TIME in order. Call each tool EXACTLY as shown — copy the arguments verbatim. Do NOT search, lookup, or verify first.")
+        for i, op in enumerate(scenario.operations, 1):
+            parts.append(f"  STEP {i}: Call '{op.tool_name}' with EXACTLY: {json.dumps(op.tool_args)}")
+        parts.append("After ALL operations complete, respond to the user confirming completion.")
+
+    elif env_type in ("precondition_check", "precondition_check_revised"):
+        if scenario.is_refusal:
+            parts.append("DECISION: REFUSE. This request violates policy.")
+            parts.append("You must NOT call ANY write tool for the ENTIRE conversation. This includes: cancel_reservation, update_reservation_flights, update_reservation_passengers, update_reservation_baggages, book_reservation, send_certificate.")
+            parts.append("Even if the user changes their request, pivots to cancellation, or asks for something else — you must STILL refuse and make ZERO write calls. Only explain the policy.")
+            if scenario.key_facts:
+                rule = scenario.key_facts.get("rule", "")
+                if rule:
+                    parts.append(f"Policy rule: {rule}")
+        else:
+            parts.append("DECISION: ALLOW.")
+            for ea in scenario.expected_actions:
+                parts.append(f"ACTION: Call '{ea.name}' with EXACTLY: {json.dumps(ea.arguments)}")
+        if scenario.communicate_info:
+            parts.append(f"COMMUNICATE: {', '.join(scenario.communicate_info)}")
+
+    elif env_type in ("tau_tool_calling", "tau_tool_calling_revised"):
+        if scenario.is_refusal:
+            parts.append("DECISION: REFUSE. Do NOT call ANY write tool for the entire conversation, even if the user insists or changes their request.")
+        elif scenario.expected_actions:
+            parts.append("Execute these actions with the EXACT arguments shown. Do NOT modify arguments or add extra fields.")
+            for ea in scenario.expected_actions:
+                parts.append(f"  ACTION: Call '{ea.name}' with EXACTLY: {json.dumps(ea.arguments)}")
+        if scenario.communicate_info:
+            parts.append(f"COMMUNICATE these values to the user: {', '.join(scenario.communicate_info)}")
+
+    if len(parts) <= 1:  # only preamble
+        return ""
+
+    guidance = "\n".join(parts)
+    return f"\n\n<expert_guidance>\n{guidance}\n</expert_guidance>"
+
+
+def strip_expert_guidance(text: str) -> str:
+    """Remove <expert_guidance> block from a string."""
+    import re
+    return re.sub(r'\n\n<expert_guidance>\n.*?\n</expert_guidance>', '', text, flags=re.DOTALL)
 
 
 # ---------------------------------------------------------------------------
@@ -173,8 +279,15 @@ def conversation_to_tau2_messages(
     Internal format uses: {"role": "user"|"assistant"|"tool_call"|"tool_result", "text": "..."}
     Tau2-bench format uses: {"role": "user"|"assistant"|"tool", "content": "...", ...}
 
+    If the conversation is already in OpenAI/tau2 format (has "content" keys),
+    it is returned as-is.
+
     The output is directly compatible with SFTBuffer.load_sft_samples().
     """
+    # Detect OpenAI format: messages have "content" key, not "text"
+    if conversation and "content" in conversation[0] and "text" not in conversation[0]:
+        return list(conversation)
+
     messages = []
     tool_call_counter = 0
 
@@ -223,7 +336,8 @@ def conversation_to_tau2_messages(
 # Episode runner: tool-calling games (adversarial_policy, tau_tool_calling)
 # ---------------------------------------------------------------------------
 def run_episode_toolcall(game, client: VLLMClient, seed: int, env_type: str,
-                         user_difficulty: str = None) -> Dict[str, Any]:
+                         user_difficulty: str = None,
+                         self_expert: bool = False) -> Dict[str, Any]:
     """Run one episode using OpenAI function calling API.
 
     Works with both TauToolCallingEnv and AdversarialPolicyGame since they
@@ -238,10 +352,13 @@ def run_episode_toolcall(game, client: VLLMClient, seed: int, env_type: str,
         return {"seed": seed, "error": str(e)}
 
     system_prompt = game.get_system_prompt()
+    if self_expert:
+        system_prompt += get_expert_guidance(game, env_type)
     tools = game.get_tool_schemas()
 
+    max_steps = getattr(game, 'max_steps', getattr(game, '_max_steps', 30))
     step = 0
-    while not game.done and step < game.max_steps:
+    while not game.done and step < max_steps:
         messages = game.get_messages()
 
         try:
@@ -286,7 +403,8 @@ def run_episode_toolcall(game, client: VLLMClient, seed: int, env_type: str,
 
     summary = game.get_summary()
 
-    # Build result with all trajectory data
+    # Build result with all trajectory data (strip expert guidance from saved prompt)
+    saved_prompt = strip_expert_guidance(system_prompt) if self_expert else system_prompt
     result = {
         "seed": seed,
         "reward": summary["reward"],
@@ -294,14 +412,14 @@ def run_episode_toolcall(game, client: VLLMClient, seed: int, env_type: str,
         "steps": summary["steps"],
         "transferred": summary.get("transferred", False),
         "conversation": list(game._conversation),
-        "system_prompt": system_prompt,
+        "system_prompt": saved_prompt,
         "user_system_prompt": getattr(getattr(game, '_scenario', None), 'user_system_prompt', ''),
         "tool_schemas": tools,
         "tool_calls": summary.get("tool_calls", []),
         "domain": summary.get("domain", ""),
     }
 
-    if env_type == "tau_tool_calling":
+    if env_type in ("tau_tool_calling", "tau_tool_calling_revised"):
         result.update({
             "scenario_type": summary.get("scenario_type", ""),
             "description": summary.get("description", ""),
@@ -310,11 +428,6 @@ def run_episode_toolcall(game, client: VLLMClient, seed: int, env_type: str,
             "communicate_info": summary.get("communicate_info", []),
             "key_facts": summary.get("key_facts", {}),
             "conversation_length": summary.get("conversation_length", 0),
-        })
-    elif env_type == "structured_data_v2":
-        result.update({
-            "scenario_type": summary.get("scenario_type", ""),
-            "domain": summary.get("domain", "retail"),
         })
     elif env_type == "adversarial_policy":
         sc = game._scenario
@@ -337,7 +450,8 @@ def run_episode_toolcall(game, client: VLLMClient, seed: int, env_type: str,
 # Episode runner: observation-based games (multistep_task, structured_data)
 # ---------------------------------------------------------------------------
 def run_episode_observe(game, client: VLLMClient, seed: int,
-                        game_spec, env_type: str) -> Dict[str, Any]:
+                        game_spec, env_type: str,
+                        self_expert: bool = False) -> Dict[str, Any]:
     """Run one episode for observation-based games.
 
     These games use observe()/step()/legal_actions() and produce a full
@@ -349,6 +463,8 @@ def run_episode_observe(game, client: VLLMClient, seed: int,
         return {"seed": seed, "error": str(e)}
 
     system_prompt = game_spec.system_prompt
+    if self_expert:
+        system_prompt += get_expert_guidance(game, env_type)
     turns = []
     step = 0
     max_steps = getattr(game, '_max_steps', 30)
@@ -376,13 +492,14 @@ def run_episode_observe(game, client: VLLMClient, seed: int,
     reward = game.rewards.get(0, 0.0)
     summary = game.get_summary() if hasattr(game, 'get_summary') else {}
 
+    saved_prompt = strip_expert_guidance(system_prompt) if self_expert else system_prompt
     result = {
         "seed": seed,
         "reward": reward,
         "reason": summary.get("reason", ""),
         "steps": step,
         "turns": turns,
-        "system_prompt": system_prompt,
+        "system_prompt": saved_prompt,
         "domain": env_type,
     }
 
@@ -393,7 +510,7 @@ def run_episode_observe(game, client: VLLMClient, seed: int,
             "one_shot_violations": summary.get("one_shot_violations", 0),
             "wrong_tool_type": summary.get("wrong_tool_type", 0),
         })
-    elif env_type in ("structured_data_reasoning", "structured_data_v2"):
+    elif env_type == "structured_data_reasoning":
         result.update({
             "data_type": summary.get("data_type", ""),
             "difficulty": summary.get("difficulty", 0),
@@ -463,7 +580,8 @@ def _print_toolcall_progress(args, result, seed, sample_idx, num_samples,
     r = result.get("reward", 0)
     err = " ERROR" if "error" in result else ""
 
-    if args.env in ("tau_tool_calling", "structured_data_v2", "precondition_check"):
+    if args.env in ("tau_tool_calling", "precondition_check",
+                     "tau_tool_calling_revised", "precondition_check_revised"):
         domain = result.get("domain", "?")
         stype = result.get("scenario_type", result.get("error", "err"))[:14]
         print(f"  [{passed_seeds:3d}/{completed_seeds}/{total_seeds}] "
@@ -480,6 +598,15 @@ def _print_toolcall_progress(args, result, seed, sample_idx, num_samples,
         print(f"  [{passed_seeds:3d}/{completed_seeds}/{total_seeds}] "
               f"seed={seed:4d} {sample_tag}"
               f"{tid_str}:{tname:22s} {is_adv} "
+              f"reward={r:+5.2f} "
+              f"steps={result.get('steps', 0):2d} "
+              f"({elapsed:.0f}s){err}{tag_pass}")
+    else:
+        domain = result.get("domain", "?")
+        stype = result.get("scenario_type", "")[:14]
+        print(f"  [{passed_seeds:3d}/{completed_seeds}/{total_seeds}] "
+              f"seed={seed:4d} {sample_tag}"
+              f"{domain:8s} {stype:14s} "
               f"reward={r:+5.2f} "
               f"steps={result.get('steps', 0):2d} "
               f"({elapsed:.0f}s){err}{tag_pass}")
@@ -665,8 +792,16 @@ def main():
                         help="Save to disk every N successful trajectories (default: 10)")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Print per-episode details")
+    parser.add_argument("--self-expert", action="store_true",
+                        help="Inject ground truth into system prompt to guarantee task completion. "
+                             f"Supported: {', '.join(sorted(SELF_EXPERT_GAMES))}")
 
     args = parser.parse_args()
+
+    if args.self_expert and args.env not in SELF_EXPERT_GAMES:
+        print(f"ERROR: --self-expert not supported for '{args.env}'. "
+              f"Supported: {', '.join(sorted(SELF_EXPERT_GAMES))}")
+        sys.exit(1)
 
     # Get game spec from registry for max_gen_tokens
     game_spec = get_game_spec(args.env)
@@ -723,6 +858,8 @@ def main():
 
         # Build a descriptive filename that includes key params to avoid overwrites
         parts = [args.env]
+        if args.self_expert:
+            parts.append("self_expert")
         if effective_model != args.model:
             parts.append(effective_model)  # LoRA adapter name
         elif is_toolcall:
@@ -732,7 +869,7 @@ def main():
         else:
             parts.append(agent_short)
 
-        if args.env == "structured_data_reasoning":
+        if args.env in ("structured_data_reasoning", "structured_data_reasoning_revised"):
             parts.append(f"d{args.difficulty}")
 
         parts.append(f"n{args.num_seeds}")
@@ -775,12 +912,14 @@ def main():
         print(f"Samples/seed: {num_samples}  select top-{select_topk}")
     print(f"Threshold:    {reward_threshold}")
     print(f"Output:       {output_path}")
-    if args.env == "tau_tool_calling":
+    if args.self_expert:
+        print(f"Self-expert:  ON (ground truth injected, stripped from output)")
+    if args.env in ("tau_tool_calling", "tau_tool_calling_revised"):
         print(f"Domain:       {args.domain or 'both'}")
     elif args.env == "adversarial_policy":
         print(f"Adv. ratio:   {args.adversarial_ratio}")
         print(f"User diff.:   {args.user_difficulty}")
-    elif args.env == "structured_data_reasoning":
+    elif args.env in ("structured_data_reasoning", "structured_data_reasoning_revised"):
         print(f"Difficulty:   {args.difficulty}")
 
     # Connectivity test
@@ -810,15 +949,26 @@ def main():
             )
         elif args.env == "multistep_task":
             from multistep_task_game import RealisticMultiStepGame
-            return RealisticMultiStepGame(max_steps=30)
+            return RealisticMultiStepGame(max_steps=30, user_client=user_client)
         elif args.env == "structured_data_reasoning":
             from structured_data_game import StructuredDataGame
-            return StructuredDataGame(difficulty=args.difficulty)
-        elif args.env == "structured_data_v2":
-            from structured_data_new_game import StructuredDataGame as SDGameV2
-            return SDGameV2(domain=args.domain)
+            return StructuredDataGame(user_client=user_client, domain=args.domain)
         elif args.env == "precondition_check":
             from precondition_game.game import PreconditionGame
+            return PreconditionGame(max_steps=20, user_client=user_client)
+        elif args.env == "tau_tool_calling_revised":
+            from tau_tool_calling_env_revised.game import TauToolCallingEnv
+            return TauToolCallingEnv(
+                max_steps=30, user_client=user_client, domain=args.domain,
+            )
+        elif args.env == "structured_data_reasoning_revised":
+            from structured_data_game_revised import StructuredDataGame
+            return StructuredDataGame(user_client=user_client, domain=args.domain)
+        elif args.env == "multistep_task_revised":
+            from multistep_task_game_revised import RealisticMultiStepGame
+            return RealisticMultiStepGame(max_steps=15, user_client=user_client, domain=args.domain)
+        elif args.env == "precondition_check_revised":
+            from precondition_game_revised.game import PreconditionGame
             return PreconditionGame(max_steps=20, user_client=user_client)
         else:
             raise ValueError(f"Unknown env: {args.env}")
@@ -835,9 +985,11 @@ def main():
         game = make_game()
         if is_toolcall:
             return run_episode_toolcall(game, client, seed, args.env,
-                                        user_difficulty=difficulty)
+                                        user_difficulty=difficulty,
+                                        self_expert=args.self_expert)
         else:
-            return run_episode_observe(game, client, seed, game_spec, args.env)
+            return run_episode_observe(game, client, seed, game_spec, args.env,
+                                       self_expert=args.self_expert)
 
     # -------------------------------------------------------------------
     # Run all seeds in parallel (single pass, no retry waves)

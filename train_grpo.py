@@ -221,7 +221,7 @@ def collect_grpo_rollouts(
 
             # Compute multistep difficulty schedule once per group
             ms_schedule = None
-            if g_spec.name == "multistep_task":
+            if g_spec.name in ("multistep_task", "multistep_task_revised"):
                 ms_schedule = multistep_difficulty_schedule(group_size)
 
             for s_idx in range(group_size):
@@ -387,7 +387,7 @@ def collect_grpo_rollouts(
 
             # Compute multistep difficulty schedule once per group
             ms_schedule = None
-            if g_spec.name == "multistep_task":
+            if g_spec.name in ("multistep_task", "multistep_task_revised"):
                 ms_schedule = multistep_difficulty_schedule(group_size)
 
             for s_idx in range(group_size):
