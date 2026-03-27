@@ -1,0 +1,51 @@
+{
+  "attempt": 3,
+  "top5": [
+    {
+      "skill_id": 3,
+      "skill_name": "Multi-step completion",
+      "coverage": 39,
+      "covered_tasks": [
+        "A-17", "A-18", "A-21", "A-22", "A-24", "A-27", "A-37", "A-39", "A-7", "A-9",
+        "R-100", "R-104", "R-107", "R-109", "R-20", "R-21", "R-23", "R-27", "R-28", "R-29",
+        "R-3", "R-31", "R-33", "R-4", "R-41", "R-5", "R-56", "R-6", "R-60", "R-62",
+        "R-7", "R-76", "R-79", "R-8", "R-9", "R-91", "R-92", "R-93", "R-99"
+      ]
+    },
+    {
+      "skill_id": 4,
+      "skill_name": "Precondition verification",
+      "coverage": 22,
+      "covered_tasks": [
+        "A-10", "A-13", "A-19", "A-2", "A-26", "A-30", "A-31", "A-35", "A-36", "A-38",
+        "A-41", "A-43", "A-47", "A-49", "R-10", "R-12", "R-30", "R-37", "R-47", "R-54",
+        "R-57", "R-90"
+      ]
+    },
+    {
+      "skill_id": 6,
+      "skill_name": "Record discovery",
+      "coverage": 14,
+      "covered_tasks": [
+        "R-101", "R-102", "R-110", "R-111", "R-112", "R-22", "R-25", "R-34", "R-39",
+        "R-42", "R-51", "R-71", "R-72", "R-97"
+      ]
+    },
+    {
+      "skill_id": 1,
+      "skill_name": "Structured data reasoning",
+      "coverage": 11,
+      "covered_tasks": [
+        "A-14", "A-15", "A-16", "A-29", "A-32", "A-8", "R-1", "R-49", "R-52", "R-64", "R-65"
+      ]
+    },
+    {
+      "skill_id": 5,
+      "skill_name": "Numerical reasoning",
+      "coverage": 9,
+      "covered_tasks": [
+        "A-12", "A-20", "A-23", "A-25", "A-33", "R-16", "R-44", "R-46", "R-59"
+      ]
+    }
+  ]
+}

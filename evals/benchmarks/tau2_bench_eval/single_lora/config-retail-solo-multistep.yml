@@ -1,0 +1,59 @@
+# Retail — Solo multistep_task LoRA (iter10)
+#
+# Runs multistep_task adapter alone on all 114 tasks.
+#
+# Usage:
+#   python main.py --config single_lora/config-retail-solo-multistep.yml
+
+domain: retail
+agent: orchestrator_agent
+agent_llm: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
+
+agent_llm_args:
+  temperature: 0.0
+  max_context_length: 32000
+
+orchestrator:
+  orchestrator_model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
+  orchestrator_llm_args:
+    temperature: 0.0
+    api_base: http://localhost:5051/v1
+    api_key: EMPTY
+
+  routing_strategy: per_conversation
+  routing_mode: classifier
+  routing_topk: 1
+  routing_context_window: 10
+
+  skills:
+    - name: multistep_task
+      description: >
+        Handle all retail customer service requests.
+      adapter_name: multistep-grpo-iter10
+      adapter_path: /home/ubuntu/.cache/huggingface/multistep_task/grpo_ckpt_iter_10_20260318_110546
+      llm_args:
+        api_base: http://localhost:5051/v1
+        api_key: EMPTY
+        temperature: 0.0
+        max_context_length: 32000
+        tokenizer_model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
+
+# User simulator
+user_llm: vllm://Qwen/Qwen3-30B-A3B-Instruct-2507
+user_llm_args:
+  temperature: 0.0
+  max_context_length: 32000
+  tokenizer_model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
+
+user: null
+
+max_steps: 50
+max_concurrency: 1
+num_trials: 1
+seed: 42
+verbose: true
+
+save_to: single_lora/results/retail-solo-multistep
+
+vllm:
+  base_url: http://localhost:5051/v1

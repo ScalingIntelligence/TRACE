@@ -1,0 +1,50 @@
+{
+  "attempt": 9,
+  "top5": [
+    {
+      "skill_id": 1,
+      "skill_name": "Structured data reasoning",
+      "coverage": 45,
+      "covered_tasks": [
+        "A10", "A12", "A15", "A16", "A2", "A21", "A22", "A24", "A29", "A32", "A33", "A35", "A42", "A44",
+        "R1", "R4", "R5", "R6", "R7", "R8", "R9", "R20", "R21", "R23", "R27", "R28", "R29", "R44", "R49",
+        "R52", "R60", "R64", "R65", "R66", "R71", "R72", "R79", "R92", "R93", "R99", "R100", "R102", "R104", "R109", "R110"
+      ]
+    },
+    {
+      "skill_id": 2,
+      "skill_name": "Tool calling precision",
+      "coverage": 16,
+      "covered_tasks": [
+        "A8", "A14", "A17",
+        "R10", "R12", "R21", "R25", "R41", "R42", "R82", "R83", "R91", "R97", "R100", "R111", "R112"
+      ]
+    },
+    {
+      "skill_id": 3,
+      "skill_name": "Multi-step task completion",
+      "coverage": 13,
+      "covered_tasks": [
+        "A18", "A33",
+        "R3", "R16", "R31", "R33", "R34", "R39", "R46", "R59", "R104", "R109", "R110"
+      ]
+    },
+    {
+      "skill_id": 4,
+      "skill_name": "Precondition verification",
+      "coverage": 10,
+      "covered_tasks": [
+        "A7", "A13", "A19", "A30", "A31", "A37", "A39", "A41", "A43", "A47"
+      ]
+    },
+    {
+      "skill_id": 8,
+      "skill_name": "Early termination",
+      "coverage": 10,
+      "covered_tasks": [
+        "A9", "A42",
+        "R22", "R47", "R54", "R62", "R80", "R101", "R106", "R107"
+      ]
+    }
+  ]
+}

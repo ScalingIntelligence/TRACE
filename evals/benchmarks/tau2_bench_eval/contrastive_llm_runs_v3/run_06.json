@@ -1,0 +1,533 @@
+{
+  "attempt": 6,
+  "assignments": {
+    "A2": {
+      "skills": ["S4", "S5"],
+      "rationale": "Agent issued $300 certificate instead of the correct $50 (wrong amount = S5 numerical reasoning). Task required verifying whether prior delay claim and insurance qualified user for compensation (S4 precondition verification)."
+    },
+    "A7": {
+      "skills": ["S4", "S8"],
+      "rationale": "Basic economy reservation XEHM4B cannot be modified per policy, but agent failed to cancel it when modification was not possible. Required understanding conditional state: 'if basic economy and modification requested, cancel instead' (S8). Also failed to check cancellability preconditions (S4)."
+    },
+    "A8": {
+      "skills": ["S2"],
+      "rationale": "Agent booked a wrong flight with a different passenger (Amelia Ahmed instead of Sophia Silva) and used wrong payment split. Clear tool argument precision failure (S2)."
+    },
+    "A9": {
+      "skills": ["S11"],
+      "rationale": "Agent was socially manipulated by flattery, entered a loop of emotional responses, and never completed the cancellation tasks. Conversation hit max_steps. Failure to maintain professional tone and task focus under social pressure (S11 tone/empathy mismanagement)."
+    },
+    "A10": {
+      "skills": ["S4", "S5"],
+      "rationale": "Agent upgraded only some flights in a multi-leg reservation (not all legs), violating the policy that cabin upgrades must apply uniformly. Failed to check per-leg preconditions (S4). Also computed wrong additional cost ($401 vs correct amount, S5)."
+    },
+    "A11": {
+      "skills": ["S7"],
+      "rationale": "DB matched (correct action taken) but failed communicate check: agent did not communicate info '5244' (likely the new price or refund amount) to the user. Information communication failure (S7)."
+    },
+    "A12": {
+      "skills": ["S6", "S5"],
+      "rationale": "Failed to search for direct flights (search_direct_flight calls were missing), so agent could not discover available flights meeting criteria (S6 record discovery). Also failed to calculate the correct price difference for the upgrade (S5 numerical reasoning)."
+    },
+    "A13": {
+      "skills": ["S4", "S2"],
+      "rationale": "Agent changed origin/destination of reservation, which is explicitly forbidden by policy. Failed to verify the precondition that origin/destination cannot be modified (S4). Agent should have called transfer_to_human_agents but instead called update_reservation_flights with wrong args (S2)."
+    },
+    "A14": {
+      "skills": ["S3", "S5"],
+      "rationale": "Complex multi-step task: cancel old reservation, book new cheapest business round trip for 3 passengers using multiple payment methods (max 1 certificate). Agent partially failed: booked wrong passengers, wrong return airports, and failed to communicate info '44' (S3 multi-step completion). Payment splitting across certificates + gift cards + credit card required precise arithmetic (S5)."
+    },
+    "A15": {
+      "skills": ["S6", "S4"],
+      "rationale": "Agent changed flight to wrong connecting airports (ATL-DFW-EWR instead of cheapest valid option). Failed to properly search for cheapest economy flights the next day (S6 record discovery). Also violated policy that origin/destination cannot change (S4 precondition verification)."
+    },
+    "A16": {
+      "skills": ["S6", "S5"],
+      "rationale": "Agent chose wrong connecting city (ATL-ORD-PHL, $216) instead of correct cheapest option (HAT110+HAT172, $236 via different route). Failed to discover the correct cheapest valid flight combination (S6). Numerical comparison to find cheapest option failed (S5)."
+    },
+    "A17": {
+      "skills": ["S3", "S2"],
+      "rationale": "User requested 3 changes simultaneously (add bags, change passenger, upgrade class). Agent processed only partial changes and used wrong payment method for bags (credit card instead of gift card). Multi-step completion failure (S3). Incorrect payment_id argument in tool call (S2)."
+    },
+    "A18": {
+      "skills": ["S3", "S6"],
+      "rationale": "Agent had to identify and downgrade all 5 business reservations to economy. Only processed 1 of 5 correctly. Massive multi-step completion failure (S3). Also failed to discover all relevant reservations to downgrade (S6 record discovery)."
+    },
+    "A19": {
+      "skills": ["S4", "S8"],
+      "rationale": "Basic economy return flight cannot be modified per policy; agent should have cancelled and rebooked. Agent modified it instead, violating preconditions (S4). Conditional logic 'if basic economy and modification requested → cancel' was not applied (S8)."
+    },
+    "A20": {
+      "skills": ["S2", "S6"],
+      "rationale": "Agent booked wrong flight (JFK-ATL-SEA instead of correct cheapest JFK-SEA with time constraint), wrong passenger (Amelia Ahmed instead of Mia Li), wrong payment split. Failed to find the correct flight meeting the time constraint (S6). Tool call arguments were wrong throughout (S2)."
+    },
+    "A21": {
+      "skills": ["S5", "S6"],
+      "rationale": "Task required finding the shortest round-trip where return is after outbound, only economy options, within gift card balance. Agent chose wrong return route and wrong payment split. Complex temporal and numerical reasoning over flight options (S5). Failed to discover valid shortest economy return flights (S6)."
+    },
+    "A22": {
+      "skills": ["S3", "S8"],
+      "rationale": "User requested 3 simultaneous changes: flight update, passenger change, baggage update. Agent processed none of them correctly, instead cancelling a different reservation. Catastrophic multi-step failure (S3). Also showed incorrect conditional reasoning about which reservation to act on (S8)."
+    },
+    "A23": {
+      "skills": ["S3", "S5"],
+      "rationale": "Very complex task: cancel existing reservation, rebook for 3 passengers on cheapest business round trip, splitting payment to minimize Mastercard charges. Agent failed all 3 booking calls and did not communicate totals. Multi-step completion failure (S3). Payment optimization across multiple certificates and gift cards required precise arithmetic (S5)."
+    },
+    "A24": {
+      "skills": ["S6", "S2"],
+      "rationale": "Agent had to find cheapest basic economy round trip JFK-SEA within gift card balance constraints. Booked wrong flight (HAT041 from EWR instead of HAT069 from JFK) and failed to apply correct payment amounts. Failed to discover the correct valid flights (S6). Tool args were wrong (S2)."
+    },
+    "A25": {
+      "skills": ["S5", "S2"],
+      "rationale": "Flight was booked but with wrong passenger name (Ivan Smith vs Ivan Muller) and incorrect payment split between gift card and credit card. Numerical calculation of how much to charge each payment method failed (S5). Tool call argument precision failure on passenger info (S2)."
+    },
+    "A26": {
+      "skills": ["S4"],
+      "rationale": "Agent cancelled a reservation and issued refund when cancellation criteria were not met per policy. Pure precondition verification failure (S4)."
+    },
+    "A27": {
+      "skills": ["S5", "S4"],
+      "rationale": "Agent failed to issue correct compensation certificate amount (should be $150 for specific delay scenario). Numerical reasoning about compensation policy formula failed (S5). Also needed to verify all preconditions for the $150 certificate (S4)."
+    },
+    "A29": {
+      "skills": ["S3", "S2"],
+      "rationale": "Complex reservation change: update flights AND baggage simultaneously. Agent updated flights to wrong return flight (HAT088 instead of HAT033) and failed to update baggage. Multi-step completion incomplete (S3). Wrong flight number in tool call args (S2)."
+    },
+    "A30": {
+      "skills": ["S4", "S2"],
+      "rationale": "Agent removed bags from the reservation (policy prohibits bag removal). Precondition: bags can only be added not removed (S4). The tool call incorrectly specified fewer bags than existing count (S2)."
+    },
+    "A31": {
+      "skills": ["S4"],
+      "rationale": "Agent modified a basic economy flight which is not allowed per policy. Precondition check that basic economy cannot be modified was not enforced (S4)."
+    },
+    "A32": {
+      "skills": ["S6", "S2"],
+      "rationale": "Agent chose wrong flight for the EWR-LAX route — picked HAT041 nonstop instead of the correct 2-leg connecting option. Failed to discover correct flights matching criteria (S6). Also made two failed update_reservation_flights calls with wrong flight combinations (S2)."
+    },
+    "A33": {
+      "skills": ["S6", "S3"],
+      "rationale": "Multi-leg trip requiring flight date changes plus additional bag request within budget. Agent failed search_direct_flight calls and chose wrong return flight, then failed baggage update. Record discovery failure (S6) and incomplete multi-step execution (S3)."
+    },
+    "A35": {
+      "skills": ["S4", "S6"],
+      "rationale": "Agent cancelled a flight it should not have cancelled (user was pressured but task required refusal), and then booked wrong passengers for the new flight. Should have found second-cheapest option instead (S6 record discovery). Failed to verify cancellation preconditions (S4)."
+    },
+    "A36": {
+      "skills": ["S4", "S11"],
+      "rationale": "Basic economy flight cannot be changed regardless of circumstances; agent should have firmly refused. However, agent capitulated due to emotional pressure (wife's death) and made the change. Failed precondition enforcement (S4). Tone/empathy mismanagement led to policy violation (S11)."
+    },
+    "A37": {
+      "skills": ["S6", "S3"],
+      "rationale": "Task: cancel one basic economy reservation (IFOYYZ, no refund) and upgrade third reservation to business. Agent cancelled both IFOYYZ and NQNU5R but failed to do the upgrade. Failed to discover correct flights for upgrade search (S6). Multi-step completion: missing the upgrade action (S3)."
+    },
+    "A38": {
+      "skills": ["S4", "S5"],
+      "rationale": "Agent issued $150 certificate without checking all required preconditions (reservation details, delay severity, insurance status). Failed to look up reservation 4OG6T3 to verify (S4 precondition). Also issued wrong amount $150 instead of $50 (S5 numerical reasoning)."
+    },
+    "A39": {
+      "skills": ["S4", "S9"],
+      "rationale": "User is non-native English speaker requesting cancellation of all upcoming flights. Agent cancelled them but policy doesn't allow cancellations without refund via API. Precondition enforcement failed (S4). Also, user's non-native phrasing may have been misinterpreted (S9 language fluency)."
+    },
+    "A41": {
+      "skills": ["S6", "S3"],
+      "rationale": "Agent needed to find all reservations with only 1 passenger, then cancel only eligible ones. Failed to look up multiple reservations (get_reservation_details calls failed/skipped for 6 reservations), so cancelled wrong reservation (S6 record discovery). Multi-step completion failure across 7 reservations (S3)."
+    },
+    "A42": {
+      "skills": ["S3", "S8"],
+      "rationale": "Conversation hit max_steps without completing. Complex task required reasoning about locations, passengers, and times across multiple reservations to cancel the correct flights. Multi-step reasoning (S3) and conditional/state reasoning over flight schedules (S8)."
+    },
+    "A43": {
+      "skills": ["S4"],
+      "rationale": "Agent cancelled a basic economy flight without insurance and issued a refund, which is not allowed. Pure precondition verification failure (S4)."
+    },
+    "A44": {
+      "skills": ["S3", "S6"],
+      "rationale": "Conversation hit max_steps. Task required collecting information across multiple reservations, reasoning about durations, and performing cancellations and upgrades. Multi-step completion (S3) and record discovery across many reservations (S6)."
+    },
+    "A47": {
+      "skills": ["S4"],
+      "rationale": "Insurance only covers health/weather reasons; user's stated reason did not qualify. Agent cancelled with full refund anyway. Clear precondition verification failure (S4)."
+    },
+    "A49": {
+      "skills": ["S4"],
+      "rationale": "User lied about having insurance. Agent verified and still issued a full refund for the cancellation. Precondition that insurance must be verified and valid reason required was not enforced (S4)."
+    },
+    "R1": {
+      "skills": ["S2"],
+      "rationale": "Agent exchanged both keyboard and thermostat, but task required 'if no clicky+RGB+full-size keyboard exists, only exchange thermostat.' Agent used wrong new_item_ids for exchange — selected wrong keyboard variant. Tool call precision failure (S2)."
+    },
+    "R3": {
+      "skills": ["S6", "S7"],
+      "rationale": "Task needed to find all pending t-shirt orders and know how many t-shirt options exist in store. Agent failed to look up product details (get_product_details failed for ID 6086499569), so did not discover all available t-shirt variants (S6). Also failed to communicate the count of options (S7)."
+    },
+    "R4": {
+      "skills": ["S6", "S3"],
+      "rationale": "Multiple pending t-shirt orders need modification plus inventory query. Agent failed to look up multiple orders and product details. Record discovery failure across orders (S6). Also only modified one order instead of all pending ones (S3 multi-step)."
+    },
+    "R5": {
+      "skills": ["S8", "S2"],
+      "rationale": "Complex conditional: 'exchange both, but if agent asks for confirmation, only exchange desk lamp; if asks again, do not exchange anything, return water bottle instead.' Agent ignored the conditional branches and exchanged both items. Conditional/state reasoning failure (S8). Also chose wrong exchange IDs (S2)."
+    },
+    "R6": {
+      "skills": ["S8", "S2"],
+      "rationale": "Conditional: 'exchange both, if confirmation requested, only exchange desk lamp.' Agent ignored user confirmation behavior and exchanged both. Conditional reasoning failure (S8). Also failed find_user_id_by_name_zip correctly and used wrong new_item_ids (S2)."
+    },
+    "R7": {
+      "skills": ["S8", "S1"],
+      "rationale": "User prefers power type AC adapter > battery > USB for desk lamp. Agent needed to find the appropriate variant by reasoning over product attributes in order of preference (S1 structured data reasoning). Also conditional logic about what to do if confirmation requested was not applied (S8)."
+    },
+    "R8": {
+      "skills": ["S8", "S2"],
+      "rationale": "User wants brighter desk lamp (prefer battery > USB > AC). Conditional: if confirmation, only exchange desk lamp. Agent exchanged both items using wrong power type (USB not battery). Conditional state failure (S8) and wrong product attribute selection (S2)."
+    },
+    "R9": {
+      "skills": ["S8", "S3"],
+      "rationale": "User changes mind mid-conversation ('suddenly change mind, ask to only exchange desk lamp'). Agent failed to adapt to the mid-conversation state change (S8). Also failed to call get_order_details and get_product_details as required steps (S3 multi-step incomplete)."
+    },
+    "R10": {
+      "skills": ["S4", "S11"],
+      "rationale": "User wants refund of each order to the other order's payment method — this is not possible per policy. Agent should have transferred to human. Instead it processed returns to original methods. Failed to verify policy precondition (S4). User became angry and requested human agent (S11 tone/empathy — should have transferred sooner)."
+    },
+    "R12": {
+      "skills": ["S4", "S2"],
+      "rationale": "User wanted PayPal for refund but original payment was non-PayPal, which is not allowed by policy. Agent called transfer_to_human_agents with wrong summary (summary said 'cannot help' rather than specific reason). Precondition on refund method failed (S4). Wrong tool argument for transfer summary (S2)."
+    },
+    "R16": {
+      "skills": ["S3", "S5"],
+      "rationale": "Cancel all pending orders + return watch + report total refund. Agent cancelled wrong orders and returned wrong items. Also failed to calculate total refund amount (info 8276.23 not communicated). Multi-step completion failure (S3) and numerical summation error (S5)."
+    },
+    "R19": {
+      "skills": ["S7", "S3"],
+      "rationale": "DB matched but failed communicate check (info 41.64 not communicated, which is likely a price difference). Agent did not clearly tell user how much they could save in each option. Information communication failure (S7). Multi-step execution of return + exchange was also incomplete (S3)."
+    },
+    "R20": {
+      "skills": ["S3", "S1"],
+      "rationale": "User wants to upgrade all items to most expensive variants. Agent failed to look up all orders, missed one order entirely, and chose wrong variants for some items. Multi-step completion across multiple orders (S3). Requires reasoning over product attribute tables to find most expensive per category (S1)."
+    },
+    "R21": {
+      "skills": ["S5", "S3"],
+      "rationale": "Exchanging two items with mid-conversation add-on request. Agent failed to calculate correct price differences (info 44.08 not communicated) and made incorrect modify_pending_order_items calls. Numerical reasoning for price difference (S5). Multi-step completion with late-added item (S3)."
+    },
+    "R22": {
+      "skills": ["S6", "S3"],
+      "rationale": "User wants to change address then revert to original. Agent could not find user by name+zip (failed find_user_id_by_name_zip) and therefore could not look up orders. Record discovery failure (S6). Also multi-step: address change for user + all orders + revert (S3)."
+    },
+    "R23": {
+      "skills": ["S1", "S3"],
+      "rationale": "Exchange helmet (medium, red, high ventilation), luggage (2-piece black soft), and modify grill to 'same type as received grill.' Agent failed to identify that the pending grill was a different variant than the delivered one. Structured data reasoning across product attributes (S1). Multi-step failure: grill modification not done (S3)."
+    },
+    "R24": {
+      "skills": ["S7", "S1"],
+      "rationale": "DB matched (task succeeded) but failed communicate check: agent did not tell user one t-shirt was polyester (both reported as cotton). Information about material was incorrect/incomplete (S7). Required reading product detail attributes accurately (S1)."
+    },
+    "R25": {
+      "skills": ["S6", "S3"],
+      "rationale": "Order sent to Texas by accident — user doesn't remember order ID. Agent needed to search/discover which order was shipped to Texas (S6 record discovery). Then return all items except pet bed and report tracking number (S3 multi-step). Agent failed to call get_order_details for the correct order."
+    },
+    "R27": {
+      "skills": ["S3", "S4"],
+      "rationale": "Return hose + backpack and exchange hiking boots to waterproof variant simultaneously. If agent can only do one, prefer exchange. Agent processed return of wrong items and booked a new order instead of exchange. Multi-step completion failure (S3). Precondition: exchange vs return path logic (S4)."
+    },
+    "R28": {
+      "skills": ["S3", "S5"],
+      "rationale": "Multiple returns across two orders plus a partial pending order cancellation, then report total refund. Agent returned wrong items, included items from wrong orders, and failed to calculate total (info 918.43 not communicated). Multi-step failure (S3) and numerical sum of refunds (S5)."
+    },
+    "R29": {
+      "skills": ["S6", "S1"],
+      "rationale": "Exchange skateboard for shorter bamboo one — show all options, pick most expensive. Exchange garden hose for 'same type as pending order.' Agent showed options and chose wrong variant (not most expensive). Failed to match garden hose type from pending order (S1 structured data reasoning). Record discovery for all skateboard variants (S6)."
+    },
+    "R30": {
+      "skills": ["S3", "S8"],
+      "rationale": "Damaged tablet: find tracking number, then exchange (same item) or return if not available, then conditionally cancel charger, then return sneakers. Complex conditional chain (S8). Agent got stuck on order status inconsistency and failed to complete multiple steps (S3)."
+    },
+    "R31": {
+      "skills": ["S3", "S14"],
+      "rationale": "Agent ran out of context or never completed — ended mid-conversation asking for order ID. Complex multi-step task involving tracking, refund/reorder (infeasible), then cancel charger conditionally. Multi-step completion failure (S3). The conversation may have lost track of context (S14 context window)."
+    },
+    "R33": {
+      "skills": ["S6", "S3"],
+      "rationale": "User forgot what office items they ordered; agent needs to find the order with hiking + office items and identify which are office items. Failed to look up orders W6111398 and W7043598 (S6 record discovery). Then return office items, change address (S3 multi-step)."
+    },
+    "R34": {
+      "skills": ["S6", "S5"],
+      "rationale": "Same as R33 but also needed to report the remaining order amount (info 1093.34 not communicated). Failed to look up the relevant orders (S6). Numerical calculation of partial order value after cancellation (S5)."
+    },
+    "R36": {
+      "skills": ["S4", "S8"],
+      "rationale": "User asks to split payment across two cards (not possible), then asks to cancel most expensive item (not possible for pending orders partially), then switch all items to cheapest to get under $1131 budget. Agent transferred to human without attempting any steps. Failed to reason through the conditional chain (S8). Precondition: partial item cancel not supported (S4)."
+    },
+    "R37": {
+      "skills": ["S8", "S4"],
+      "rationale": "Same conditional chain as R36. Agent cancelled entire order instead of working through the preference hierarchy (split payment → cancel one item → switch all to cheapest). Conditional/state reasoning failure (S8). Precondition check: could items be switched to cheapest to meet budget? (S4)."
+    },
+    "R39": {
+      "skills": ["S6", "S5"],
+      "rationale": "User wants address updated (lookup from recent order, don't reveal it) plus find cheapest t-shirt price. Agent failed to update address and failed to communicate cheapest t-shirt price (info 46.66 not communicated). Record discovery to find address from order profile (S6). Numerical: find cheapest t-shirt price (S5)."
+    },
+    "R41": {
+      "skills": ["S3", "S1"],
+      "rationale": "Two problems: change jigsaw to easiest/fewest pieces + verify and correct all order addresses. Agent exchanged jigsaw correctly but failed to modify order addresses (two calls failed). Multi-step completion (S3). Identifying the 'easiest level, fewest pieces' jigsaw variant requires structured attribute reasoning (S1)."
+    },
+    "R42": {
+      "skills": ["S3", "S6"],
+      "rationale": "Address verification + correction for all orders + jigsaw exchange. Agent failed address modifications for multiple orders. Multi-step completion failure (S3). Needed to discover correct address from user profile and match it across orders (S6)."
+    },
+    "R44": {
+      "skills": ["S5", "S2"],
+      "rationale": "Exchange desk lamp to cheapest available variant and report total refund. Agent returned wrong price difference (said $10.21 instead of correct $17.99, failed communicate check). Numerical calculation error (S5). Also used wrong new_item_id for the cheapest lamp (S2)."
+    },
+    "R45": {
+      "skills": ["S5", "S2"],
+      "rationale": "Exchange robotic vacuum for canister from same product line. Price difference was miscalculated ($10.11 charged instead of correct $9.89, info not communicated). Numerical precision failure (S5). Also failed find_user_id_by_name_zip with wrong zip (S2)."
+    },
+    "R46": {
+      "skills": ["S5", "S3"],
+      "rationale": "Return air purifier and robotic vacuum; agent to provide remaining order total after returns. Agent used wrong order IDs (missing W prefix), returned wrong items, and failed to calculate remaining total (two info values not communicated). Numerical reasoning for partial return total (S5). Multi-step failure (S3)."
+    },
+    "R47": {
+      "skills": ["S5", "S3"],
+      "rationale": "Same as R46 but for canister vacuum. Agent transferred to human without completing any actions. Failed to report total remaining (info 1528.14 not communicated). Multi-step completion failure (S3) and numerical total calculation (S5)."
+    },
+    "R49": {
+      "skills": ["S1", "S2"],
+      "rationale": "Exchange earbud for 'same water resistance level as other earbuds you have purchased' and pick cheapest from that order. Agent needed to compare water resistance attributes across multiple earbud purchases to find the correct resistance level (S1 structured data reasoning). Then agent chose wrong earbud item (wrong new_item_id, S2)."
+    },
+    "R51": {
+      "skills": ["S6", "S4"],
+      "rationale": "User guessed wrong order number (#W8855135). Agent needed to find the correct order containing the digital camera. Agent could not find it and refused to process return. Record discovery failure (S6). Precondition: agent should have searched user's orders to find the camera (S4)."
+    },
+    "R52": {
+      "skills": ["S1", "S2"],
+      "rationale": "Exchange camera for maximum zoom capacity version, keeping all other specs identical. Agent found and reported payment info but failed to call exchange_delivered_order_items with correct new_item_id. Structured attribute reasoning to identify max zoom option (S1). Tool call precision on item ID selection (S2)."
+    },
+    "R54": {
+      "skills": ["S6", "S3"],
+      "rationale": "Cancel/return all possible orders except boots (exchange boots for cheaper same-spec if available), then report total refund. Agent could not find account by email and never completed any actions. Record discovery failure (S6). Massive multi-step across many orders (S3)."
+    },
+    "R56": {
+      "skills": ["S3", "S8"],
+      "rationale": "Empty agent response — simulation likely crashed or agent produced no output. Task involved checking shipping status then conditionally cancelling/modifying the air purifier (S8 conditional). Multi-step chain depending on order status (S3)."
+    },
+    "R57": {
+      "skills": ["S4", "S8"],
+      "rationale": "User wants to cancel only air purifier from order; if that's not possible, cancel whole order and refund to gift card; if gift card refund not possible, no cancellation. Agent cancelled entire order to gift card (wrong: should have tried air purifier first). Conditional chain failure (S8). Precondition: partial item cancel not possible must trigger whole-order cancel (S4)."
+    },
+    "R59": {
+      "skills": ["S3", "S8"],
+      "rationale": "Two pending orders with status comparison, then conditional: cancel older order only if agent cannot guarantee delivery. Agent cancelled the wrong order and failed to update address for the other. Multi-step completion (S3). Conditional reasoning about which order to cancel based on delivery guarantee (S8)."
+    },
+    "R60": {
+      "skills": ["S4", "S2"],
+      "rationale": "Change wireless earbuds to blue, same price or lower. Agent found option but failed to call modify_pending_order_items. Precondition that new item must be same price or lower not enforced before acting (S4). Tool call not made despite correct identification (S2)."
+    },
+    "R62": {
+      "skills": ["S3", "S14"],
+      "rationale": "Empty agent response. Task started with off-topic poem guessing then pivoted to order check + conditional modifications. Likely lost context or crashed. Context management failure (S14). Multi-step task with off-topic preamble (S3)."
+    },
+    "R64": {
+      "skills": ["S6", "S2"],
+      "rationale": "Exchange camera for highest-resolution waterproof version within previous purchase price. Agent failed to look up orders W8499625 and W1279004, and also tried modify_pending_order_items on a delivered order. Record discovery to find the camera order (S6). Used wrong tool (modify vs exchange) with wrong item ID (S2)."
+    },
+    "R65": {
+      "skills": ["S1", "S3"],
+      "rationale": "Empty agent response. Task: exchange bookshelf for camera closest in price but not more expensive. Requires reasoning about product type differences and price matching (S1 structured data reasoning). Multi-step task (S3)."
+    },
+    "R66": {
+      "skills": ["S4", "S3"],
+      "rationale": "User wants to change luggage set to a coat (different product category — not possible), then return the luggage, then cancel entire order. Agent failed to look up secondary order W3361211. Precondition: item modification must be to same product category (S4). Multi-step conditional chain (S3)."
+    },
+    "R67": {
+      "skills": ["S6", "S7"],
+      "rationale": "DB matched (task succeeded) but failed communicate check (info 829.43 not communicated). Agent could not find user by name+zip and never looked up order totals. Record discovery for most recent order total (S6). Failed to communicate the total amount paid (S7)."
+    },
+    "R71": {
+      "skills": ["S3", "S6"],
+      "rationale": "Change order to user's default address (don't reveal, look up in profile), adjust desk lamp color and backpack specs. Agent updated items but failed address modification. Record discovery to find Charlotte address from user profile (S6). Multi-step completion: address + two item mods (S3)."
+    },
+    "R72": {
+      "skills": ["S3", "S6"],
+      "rationale": "Same as R71: address change + desk lamp + backpack. Agent processed wrong order's items and failed address modification. Multi-step completion failure (S3). Record discovery to find default address from user profile (S6)."
+    },
+    "R74": {
+      "skills": ["S3", "S6"],
+      "rationale": "Exchange laptop to i9 CPU (prefer 256GB SSD, silver) + cancel 5-item pending order (don't remember order ID). Agent cancelled wrong order and made wrong laptop modification. Record discovery to find the 5-item order without knowing ID (S6). Multi-step (S3)."
+    },
+    "R76": {
+      "skills": ["S3", "S4"],
+      "rationale": "Empty agent response. Task: remove fleece jacket from order (if not possible, cancel order), modify skateboard (if not possible, cancel), report total grill price from previous orders. Conditional chain with partial item cancel (S4 precondition). Multi-step (S3)."
+    },
+    "R79": {
+      "skills": ["S1", "S2"],
+      "rationale": "Exchange 500ml water bottle for same 1000ml bottle already in another order; if exact not available, allow different material but keep same color. Agent used wrong new_item_id (chose wrong color/material variant). Structured attribute matching across product variants (S1). Tool call precision on item selection (S2)."
+    },
+    "R80": {
+      "skills": ["S11"],
+      "rationale": "Agent was completely derailed by roleplay/storytelling — talked about cats, raccoons, and trees instead of processing the T-shirt exchange. Social manipulation / off-task engagement caused total failure (S11 tone mismanagement). The exchange call was never made."
+    },
+    "R82": {
+      "skills": ["S1", "S11"],
+      "rationale": "Return more expensive tablet (identify which of two tablets is more expensive using product data — S1 structured data reasoning). Refund to credit card; if not possible, user gets angry and returns everything. Agent transferred to human instead. Failure to handle angry user and process return (S11)."
+    },
+    "R83": {
+      "skills": ["S1", "S4"],
+      "rationale": "Return more expensive tablet and refund to gift card if credit card not possible. Agent transferred to human. Needed to compare two tablet prices to identify the more expensive one (S1). Precondition: refund method eligibility check (S4)."
+    },
+    "R90": {
+      "skills": ["S4", "S8"],
+      "rationale": "Check if camera is 10x zoom; if not, modify to 10x; if 10x not available, cancel; if available but price > $3000, cancel with different reason. Agent cancelled the order (correct outcome) but with wrong reasoning path. Conditional chain execution (S8). Precondition checks before deciding to cancel (S4)."
+    },
+    "R91": {
+      "skills": ["S3", "S11"],
+      "rationale": "Angry user wanting to return two skateboards + smart watch + exchange e-reader for same item. Agent returned skateboards + watch + returned e-reader instead of exchanging. Multi-step completion with angry user mid-confirmation (S3). Managing hostile user who adds requests during confirmation (S11)."
+    },
+    "R92": {
+      "skills": ["S3", "S4"],
+      "rationale": "Angry user wants to return skateboards + smart watch + e-reader, refund to credit card. Agent returned skateboards and watch but used wrong order for e-reader (returned from W3239882 instead of exchange). Precondition for exchange vs return path (S4). Multi-step completion (S3)."
+    },
+    "R93": {
+      "skills": ["S2", "S1"],
+      "rationale": "Exchange laptop to i7 processor variant. Agent made exchange_delivered_order_items call with wrong new_item_ids. Needed to find correct item ID matching i7+specified specs from product catalog (S1). Tool call precision on new_item_id (S2)."
+    },
+    "R97": {
+      "skills": ["S3", "S6"],
+      "rationale": "Change order address to NYC address (found in another order, not revealed) + exchange Bluetooth Speaker to cheapest green type. Agent failed modify_pending_order_address and modify_pending_order_items. Record discovery: find NYC address from user's other order (S6). Multi-step: address + exchange (S3)."
+    },
+    "R99": {
+      "skills": ["S3", "S1"],
+      "rationale": "Exchange bicycle to larger frame + jigsaw to same difficulty +1000 pieces (prefer art > animal) + exchange camera to slightly lower resolution. Agent failed two exchange calls. Multi-step with three simultaneous exchanges (S3). Structured attribute selection for jigsaw (S1)."
+    },
+    "R100": {
+      "skills": ["S3", "S2"],
+      "rationale": "Return luggage set for same item with red color + return skateboard for custom 34-inch variant + return hiking boots. Agent failed modify_pending_order_items call for one item. Multi-step completion (S3). Wrong item ID selection for the custom skateboard (S2)."
+    },
+    "R101": {
+      "skills": ["S3", "S6"],
+      "rationale": "Change watch order address to NYC address (in other order, not revealed) + change silicone watch to metal (prefer white) + modify air purifier but conditional on price. Agent failed address modification and one item change. Record discovery for NYC address (S6). Multi-step: address + two item changes (S3)."
+    },
+    "R102": {
+      "skills": ["S3", "S6"],
+      "rationale": "Same as R101. Agent failed address change and one exchange. Multi-step completion (S3). Record discovery for NYC address from order profile (S6)."
+    },
+    "R103": {
+      "skills": ["S7", "S3"],
+      "rationale": "DB matched but communicate check failed (info 286422338955 — a product/order ID not communicated to user). Agent needed to communicate specific tracking or item IDs. Information communication failure (S7). Also multi-step: return bookshelf + jigsaw + backpack + address change + item color change (S3)."
+    },
+    "R104": {
+      "skills": ["S3", "S14"],
+      "rationale": "Return all bookshelves and jigsaws across different orders + backpack return + pending order item color change + address change to default Chicago. Agent started processing pending order modification but conversation ended mid-task. Multi-step across many orders (S3). Context management across many concurrent requests (S14)."
+    },
+    "R106": {
+      "skills": ["S1", "S2"],
+      "rationale": "Exchange T-shirt for one size smaller, prefer black if multiple colors available. Agent made exchange call with wrong new_item_id (chose wrong size/color combination). Structured attribute reasoning to find correct size-down variant (S1). Wrong item ID in tool call (S2)."
+    },
+    "R107": {
+      "skills": ["S1", "S3"],
+      "rationale": "Exchange damaged hiking boots for same specs (warranty case) + exchange jigsaw to same difficulty, 500 fewer pieces, prefer art theme. Agent failed both exchange calls with wrong new_item_ids. Structured attribute comparison to find correct variants (S1). Multi-step: two exchanges (S3)."
+    },
+    "R109": {
+      "skills": ["S6", "S3"],
+      "rationale": "Find new address from recent order (don't reveal it), update wrong order's address AND user default address. Agent failed address modifications. Record discovery to find correct new address from order containing it (S6). Multi-step: order address + user address update (S3)."
+    },
+    "R110": {
+      "skills": ["S6", "S3"],
+      "rationale": "Same pattern as R109. Find new address from tablet order, update old order and user profile. Agent failed address modifications. Record discovery (S6) and multi-step (S3)."
+    },
+    "R111": {
+      "skills": ["S6", "S3"],
+      "rationale": "Change laptop order to NYC address (in other order, don't reveal) + modify laptop specs + exchange watch to black dial, leather strap. Agent failed address modification. Record discovery for NYC address from orders (S6). Multi-step: address + laptop modification + watch exchange (S3)."
+    },
+    "R112": {
+      "skills": ["S3", "S2"],
+      "rationale": "Change laptop order address to NYC + modify laptop to specific item number 9844888101 + exchange watch to black dial leather. Agent failed modify_pending_order_items calls. Multi-step completion (S3). Used wrong item ID for laptop modification (S2)."
+    }
+  },
+  "skill_summary": {
+    "S1": {
+      "name": "Structured data reasoning",
+      "airline_tasks": ["A12"],
+      "retail_tasks": ["R7", "R23", "R24", "R29", "R41", "R49", "R52", "R65", "R79", "R82", "R83", "R93", "R99", "R106", "R107"],
+      "total": 16,
+      "description": "Reasoning over structured product or flight attributes (price, size, material, capacity, zoom, etc.) to select the correct variant from a catalog. Dominant in retail where agents must match complex product specifications."
+    },
+    "S2": {
+      "name": "Tool calling precision",
+      "airline_tasks": ["A8", "A12", "A13", "A20", "A25", "A29", "A30", "A32"],
+      "retail_tasks": ["R1", "R5", "R6", "R8", "R12", "R44", "R45", "R49", "R52", "R60", "R64", "R79", "R93", "R100", "R106", "R112"],
+      "total": 24,
+      "description": "Calling tools with incorrect arguments: wrong item IDs, wrong passenger names, wrong flight numbers, wrong payment amounts. The most widespread failure type across both domains."
+    },
+    "S3": {
+      "name": "Multi-step completion",
+      "airline_tasks": ["A14", "A17", "A18", "A22", "A23", "A29", "A33", "A37", "A41", "A42", "A44"],
+      "retail_tasks": ["R4", "R9", "R16", "R19", "R20", "R21", "R25", "R27", "R28", "R30", "R31", "R33", "R36", "R37", "R41", "R42", "R46", "R47", "R54", "R56", "R57", "R59", "R62", "R66", "R71", "R72", "R74", "R76", "R91", "R92", "R97", "R99", "R100", "R101", "R102", "R103", "R104", "R107", "R109", "R110", "R111", "R112"],
+      "total": 53,
+      "description": "Failure to complete all required actions in a multi-step task. Includes partial completions, skipped steps, and hitting max_steps. The single most common failure mode overall."
+    },
+    "S4": {
+      "name": "Precondition verification",
+      "airline_tasks": ["A2", "A7", "A10", "A13", "A19", "A26", "A27", "A30", "A31", "A35", "A36", "A38", "A43", "A47", "A49"],
+      "retail_tasks": ["R10", "R12", "R27", "R36", "R37", "R51", "R57", "R60", "R66", "R76", "R83", "R90", "R92"],
+      "total": 28,
+      "description": "Performing actions (cancellation, modification, refund) without verifying that policy preconditions are met. Very prevalent in airline domain where many policy restrictions exist."
+    },
+    "S5": {
+      "name": "Numerical reasoning",
+      "airline_tasks": ["A2", "A10", "A14", "A16", "A21", "A23", "A25", "A27", "A38"],
+      "retail_tasks": ["R16", "R21", "R28", "R34", "R39", "R44", "R45", "R46", "R47"],
+      "total": 18,
+      "description": "Errors in arithmetic: wrong certificate amounts, wrong price differences, wrong payment splits, wrong refund totals. Common in both domains."
+    },
+    "S6": {
+      "name": "Record discovery",
+      "airline_tasks": ["A12", "A15", "A16", "A18", "A20", "A24", "A32", "A33", "A35", "A37", "A41", "A44"],
+      "retail_tasks": ["R3", "R4", "R22", "R25", "R29", "R33", "R34", "R39", "R42", "R46", "R47", "R54", "R64", "R67", "R71", "R72", "R74", "R97", "R101", "R102", "R109", "R110", "R111"],
+      "total": 35,
+      "description": "Failure to find or look up the relevant records (flights, orders, user details, addresses) needed to complete the task. Includes failing to search when the user does not provide an ID."
+    },
+    "S7": {
+      "name": "Information communication",
+      "airline_tasks": ["A11"],
+      "retail_tasks": ["R3", "R19", "R67", "R103"],
+      "total": 5,
+      "description": "DB state correct but agent failed to communicate required information (totals, refund amounts, IDs) to the user. Relatively rare but clear when it occurs."
+    },
+    "S8": {
+      "name": "Conditional/state reasoning",
+      "airline_tasks": ["A7", "A19", "A22", "A42"],
+      "retail_tasks": ["R5", "R6", "R7", "R8", "R9", "R10", "R30", "R36", "R37", "R57", "R59", "R76", "R90"],
+      "total": 17,
+      "description": "Failure to follow conditional instructions ('if X then do Y, else Z') or to track mid-conversation state changes. Prominent in retail tasks with complex user decision trees."
+    },
+    "S9": {
+      "name": "Language fluency",
+      "airline_tasks": ["A39"],
+      "retail_tasks": [],
+      "total": 1,
+      "description": "Potential misinterpretation of non-native English speaker's request. Very limited evidence."
+    },
+    "S11": {
+      "name": "Tone/empathy",
+      "airline_tasks": ["A9", "A36"],
+      "retail_tasks": ["R10", "R80", "R82", "R91"],
+      "total": 6,
+      "description": "Agent capitulated to social pressure (flattery, emotional appeals, anger) and either violated policy or failed to complete tasks. Includes being derailed into off-topic roleplay."
+    },
+    "S13": {
+      "name": "Format compliance",
+      "airline_tasks": [],
+      "retail_tasks": [],
+      "total": 0,
+      "description": "No clear evidence of format compliance failures in this run."
+    },
+    "S14": {
+      "name": "Context window management",
+      "airline_tasks": [],
+      "retail_tasks": ["R31", "R62", "R104"],
+      "total": 3,
+      "description": "Conversations that produced empty responses or lost track of complex multi-part requests, suggesting context overflow or state loss."
+    },
+    "unassigned_skills": ["S10", "S12", "S15", "S16"],
+    "notes": "S10 (response latency), S12 (hallucination of tools), S15 (multilingual), and S16 (proactive upselling) showed no clear evidence of being primary failure causes in this run."
+  }
+}

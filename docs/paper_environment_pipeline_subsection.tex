@@ -1,0 +1,87 @@
+\subsection{Automated Synthetic Environment Generation Pipeline}
+
+We propose an automated pipeline that converts trajectory-level failures in the
+target environment into capability-specific training environments. The pipeline
+consists of two stages: \emph{contrastive skill identification} and
+\emph{environment synthesis}.
+
+\paragraph{Contrastive Skill Identification.}
+Given a dataset $\mathcal{D} = \{(\tau_i, r_i)\}_{i=1}^{N}$ of agent
+trajectories $\tau_i$ and their binary outcomes $r_i \in \{0, 1\}$ from the
+target environment, we analyze \emph{both} successful trajectories
+$\mathcal{D}^{+} = \{(\tau_i, r_i) \mid r_i = 1\}$ and failed trajectories
+$\mathcal{D}^{-} = \{(\tau_i, r_i) \mid r_i = 0\}$ to identify capability
+gaps. For each trajectory, we extract the sequence of tool calls, tool results,
+and the agent's final response, then annotate which capabilities were exercised
+and whether each was executed successfully. We operationalize this annotation
+using a combination of programmatic checks against ground-truth action
+sequences and LLM-assisted classification for ambiguous cases.
+
+This produces a set of candidate capabilities $\mathcal{C}$. For each
+$c \in \mathcal{C}$, we estimate two complementary statistics:
+\begin{align}
+    \text{SR}^{+}(c) &= P(\text{$c$ executed correctly} \mid
+        \text{$c$ required}, \, \tau \in \mathcal{D}^{+}), \\
+    \text{SR}^{-}(c) &= P(\text{$c$ executed correctly} \mid
+        \text{$c$ required}, \, \tau \in \mathcal{D}^{-}).
+\end{align}
+$\text{SR}^{+}(c)$ measures how reliably capability $c$ is executed in
+successful trajectories, while $\text{SR}^{-}(c)$ measures the same in failed
+trajectories. We select capabilities with a large gap between these rates:
+\begin{equation}
+    \mathcal{C}^{*} = \bigl\{c \in \mathcal{C} \;\big|\;
+        \text{SR}^{+}(c) - \text{SR}^{-}(c) \geq \delta \bigr\},
+\end{equation}
+retaining capabilities that are consistently executed in successful trajectories
+but frequently fail in unsuccessful ones. This contrastive criterion is more
+robust than analyzing failures alone: it filters out capabilities that have
+universally low success rates (indicating inherent task ambiguity or annotation
+noise rather than a trainable deficit) and capabilities that fail in isolation
+but do not actually discriminate between successful and unsuccessful
+trajectories. To further improve robustness, we perform the annotation process
+across multiple independent passes and retain only capabilities that are
+consistently identified.
+
+\paragraph{Environment Synthesis.}
+For each retained capability $c \in \mathcal{C}^{*}$, we construct a synthetic
+micro-environment $\mathcal{E}_c = (\mathcal{T}_c, \mathcal{A}, R_c)$
+consisting of a procedural task distribution $\mathcal{T}_c$, a shared action
+space $\mathcal{A}$, and a programmatic reward function $R_c$.
+
+\textbf{Shared action space.}
+Each micro-environment preserves the target environment's tool schemas,
+multi-turn conversational protocol, and response format. That is, the agent
+interacts with the same set of API tools (e.g., \texttt{get\_user\_details},
+\texttt{cancel\_reservation}) using identical function signatures and system
+instructions. This shared action space is the primary mechanism through which
+training gains transfer to the target environment: capabilities acquired during
+training compose directly with the target task distribution without additional
+adaptation.
+
+\textbf{Procedural task generation.}
+The task distribution $\mathcal{T}_c$ is implemented as a seeded procedural
+generator that produces diverse scenario instances. Given a random seed $s$,
+the generator deterministically constructs a complete episode specification:
+synthetic user profiles, database records, and task-specific parameters such as
+constraint configurations and difficulty levels. Procedural generation serves
+two purposes: (i)~it prevents the agent from memorizing solutions, since each
+seed yields a unique scenario, and (ii)~it controls difficulty and diversity
+through configurable parameters (e.g., number of database records, number of
+constraints, number of sequential operations).
+
+\textbf{Capability-isolating reward.}
+The reward function $R_c$ is designed so that success depends primarily on
+correct execution of capability $c$, while minimizing dependence on unrelated
+capabilities. We implement $R_c$ as a programmatic verifier that checks the
+agent's actions against the ground-truth solution---for example, comparing the
+resulting database state hash against the expected state, or verifying that
+specific tool calls were made with correct arguments. This yields a dense,
+automatically computed reward signal without requiring human annotation or
+LLM-based evaluation.
+
+The resulting set of micro-environments
+$\{\mathcal{E}_c\}_{c \in \mathcal{C}^{*}}$ provides targeted, dense
+supervision for each identified capability gap. Because the environments are
+modular, we compose them into a training curriculum by sampling environments
+with tunable mixing weights $\{w_c\}_{c \in \mathcal{C}^{*}}$, concentrating
+training compute on the capabilities with the largest performance gaps.

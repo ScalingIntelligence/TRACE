@@ -1,0 +1,556 @@
+{
+  "attempt": 7,
+  "assignments": {
+    "A2": [
+      "S4",
+      "S3"
+    ],
+    "A7": [
+      "S4",
+      "S8"
+    ],
+    "A8": [
+      "S6",
+      "S2"
+    ],
+    "A9": [
+      "S4"
+    ],
+    "A10": [
+      "S5",
+      "S2"
+    ],
+    "A11": [
+      "S4",
+      "S8"
+    ],
+    "A12": [
+      "S2",
+      "S5"
+    ],
+    "A13": [
+      "S3",
+      "S2"
+    ],
+    "A14": [
+      "S2",
+      "S5"
+    ],
+    "A15": [
+      "S3",
+      "S2"
+    ],
+    "A16": [
+      "S3"
+    ],
+    "A17": [
+      "S3",
+      "S2"
+    ],
+    "A18": [
+      "S7"
+    ],
+    "A19": [
+      "S3",
+      "S2"
+    ],
+    "A20": [
+      "S5",
+      "S1"
+    ],
+    "A21": [
+      "S3",
+      "S2"
+    ],
+    "A22": [
+      "S3"
+    ],
+    "A23": [
+      "S2",
+      "S5"
+    ],
+    "A24": [
+      "S3",
+      "S8"
+    ],
+    "A25": [
+      "S5",
+      "S2"
+    ],
+    "A26": [
+      "S2"
+    ],
+    "A27": [
+      "S4",
+      "S8"
+    ],
+    "A29": [
+      "S2"
+    ],
+    "A30": [
+      "S2"
+    ],
+    "A31": [
+      "S2"
+    ],
+    "A32": [
+      "S2"
+    ],
+    "A33": [
+      "S3"
+    ],
+    "A35": [
+      "S3",
+      "S2"
+    ],
+    "A36": [
+      "S3"
+    ],
+    "A37": [
+      "S3"
+    ],
+    "A38": [
+      "S4",
+      "S5"
+    ],
+    "A39": [
+      "S4",
+      "S3"
+    ],
+    "A41": [
+      "S3"
+    ],
+    "A42": [
+      "S6",
+      "S3"
+    ],
+    "A43": [
+      "S3"
+    ],
+    "A44": [
+      "S3",
+      "S1"
+    ],
+    "A47": [
+      "S3"
+    ],
+    "A49": [
+      "S4"
+    ],
+    "R1": [
+      "S2"
+    ],
+    "R3": [
+      "S7"
+    ],
+    "R4": [
+      "S6"
+    ],
+    "R5": [
+      "S2"
+    ],
+    "R6": [
+      "S2"
+    ],
+    "R7": [
+      "S3"
+    ],
+    "R8": [
+      "S2"
+    ],
+    "R9": [
+      "S3"
+    ],
+    "R10": [
+      "S2"
+    ],
+    "R12": [
+      "S2"
+    ],
+    "R16": [
+      "S7"
+    ],
+    "R19": [
+      "S3",
+      "S8"
+    ],
+    "R20": [
+      "S1"
+    ],
+    "R21": [
+      "S6",
+      "S2"
+    ],
+    "R22": [
+      "S6"
+    ],
+    "R23": [
+      "S3"
+    ],
+    "R24": [
+      "S7"
+    ],
+    "R25": [
+      "S2"
+    ],
+    "R27": [
+      "S3",
+      "S8"
+    ],
+    "R28": [
+      "S3"
+    ],
+    "R29": [
+      "S2"
+    ],
+    "R30": [
+      "S3",
+      "S8"
+    ],
+    "R31": [
+      "S3",
+      "S8"
+    ],
+    "R33": [
+      "S3"
+    ],
+    "R34": [
+      "S3"
+    ],
+    "R36": [
+      "S8"
+    ],
+    "R37": [
+      "S8"
+    ],
+    "R39": [
+      "S7"
+    ],
+    "R41": [
+      "S3"
+    ],
+    "R42": [
+      "S3"
+    ],
+    "R44": [
+      "S7"
+    ],
+    "R45": [
+      "S7"
+    ],
+    "R46": [
+      "S4",
+      "S7"
+    ],
+    "R47": [
+      "S4"
+    ],
+    "R49": [
+      "S1"
+    ],
+    "R51": [
+      "S8"
+    ],
+    "R52": [
+      "S3"
+    ],
+    "R54": [
+      "S6"
+    ],
+    "R56": [
+      "S3",
+      "S8"
+    ],
+    "R57": [
+      "S8"
+    ],
+    "R59": [
+      "S3"
+    ],
+    "R60": [
+      "S3"
+    ],
+    "R62": [
+      "S4"
+    ],
+    "R64": [
+      "S2"
+    ],
+    "R65": [
+      "S3",
+      "S8"
+    ],
+    "R66": [
+      "S8"
+    ],
+    "R67": [
+      "S6"
+    ],
+    "R71": [
+      "S3"
+    ],
+    "R72": [
+      "S3"
+    ],
+    "R74": [
+      "S3",
+      "S4"
+    ],
+    "R76": [
+      "S3",
+      "S8"
+    ],
+    "R79": [
+      "S1"
+    ],
+    "R80": [
+      "S4"
+    ],
+    "R82": [
+      "S6"
+    ],
+    "R83": [
+      "S6"
+    ],
+    "R90": [
+      "S4",
+      "S8"
+    ],
+    "R91": [
+      "S3"
+    ],
+    "R92": [
+      "S3"
+    ],
+    "R93": [
+      "S1"
+    ],
+    "R97": [
+      "S3"
+    ],
+    "R99": [
+      "S3"
+    ],
+    "R100": [
+      "S3"
+    ],
+    "R101": [
+      "S6"
+    ],
+    "R102": [
+      "S6"
+    ],
+    "R103": [
+      "S7"
+    ],
+    "R104": [
+      "S3",
+      "S6"
+    ],
+    "R106": [
+      "S8"
+    ],
+    "R107": [
+      "S4"
+    ],
+    "R109": [
+      "S3"
+    ],
+    "R110": [
+      "S2"
+    ],
+    "R111": [
+      "S3"
+    ],
+    "R112": [
+      "S3"
+    ]
+  },
+  "skill_summary": {
+    "S1": {
+      "count": 6,
+      "description": "Structured data reasoning \u2014 fails to parse/cross-reference structured tool outputs",
+      "example_tasks": [
+        "A20",
+        "A44",
+        "R20",
+        "R49",
+        "R79",
+        "R93"
+      ],
+      "notes": "A20: miscalculates payment split across certs; A44: misclassifies flight duration from structured data; R20: reports water bottle upgrade wrongly (current is already highest); R49: picks wrong water resistance tier; R79: misidentifies color match from existing 1L bottle data; R93: maps wrong spec from laptop DB"
+    },
+    "S2": {
+      "count": 28,
+      "description": "Tool calling precision \u2014 calls right tool but with wrong arguments (wrong item ID, wrong payment target, wrong flight, wrong amount)",
+      "example_tasks": [
+        "A8",
+        "A10",
+        "A12",
+        "A13",
+        "A14",
+        "A15",
+        "A19",
+        "A23",
+        "A25",
+        "A26",
+        "A29",
+        "A30",
+        "A31",
+        "A32",
+        "R5",
+        "R6",
+        "R8",
+        "R10",
+        "R12",
+        "R25",
+        "R29",
+        "R64",
+        "R110"
+      ],
+      "notes": "A8: booked wrong passenger (Amelia Ahmed instead of Sophia+Kevin); A10: charged wrong payment method; A12: wrong upgrade cost calculation; A14: wrong payment split; A15: correct destination but wrong origin in booking args; A23: used wrong certificates in payment call; R5: wrong price diff calc; R6: ignored power source preference (AC vs USB); R10: refunded each order to its own payment method instead of cross-refunding; R12: refunded to credit card not PayPal; R25: called return with original payment instead of Amex; R29: correct exchange target but wrong price diff charged"
+    },
+    "S3": {
+      "count": 49,
+      "description": "Multi-step task completion \u2014 agent completes some sub-tasks but drops others, executes in wrong order, or cancels entire order when partial cancel was requested",
+      "example_tasks": [
+        "A2",
+        "A13",
+        "A17",
+        "A22",
+        "A35",
+        "A37",
+        "A39",
+        "A41",
+        "A43",
+        "A44",
+        "R7",
+        "R9",
+        "R19",
+        "R23",
+        "R27",
+        "R28",
+        "R30",
+        "R31",
+        "R33",
+        "R34",
+        "R41",
+        "R42",
+        "R52",
+        "R56",
+        "R59",
+        "R60",
+        "R65",
+        "R71",
+        "R72",
+        "R74",
+        "R76",
+        "R91",
+        "R92",
+        "R97",
+        "R99",
+        "R100",
+        "R104",
+        "R109",
+        "R111",
+        "R112"
+      ],
+      "notes": "A2: issued certificate for goodwill but forgot to book the actual new flight; A13: changed only the return leg of a round-trip instead of both legs; A17: added bags and changed passenger but forgot cabin upgrade; A33: changed outbound and return but dropped business class upgrade; A35: processed cancel+rebook but used wrong credit card for new booking; A37: did all 3 actions but upgrade went to wrong reservation; A39: cancelled all reservations (correct) but also issued unprompted certificates; R7: only confirmed but did not execute the exchange; R19: return and exchange interleaved incorrectly\u2014set return status which blocked exchange; R23: tried to change grill despite user saying keep it; R27: return blocked exchange; R33: cancelled entire order instead of just office items; R34: cancelled whole order instead of partial; R59: updated address for wrong order number; R71/72: completed address+lamp but missed one of the item mods; R91/92: included smart watch in skateboards-only return"
+    },
+    "S4": {
+      "count": 15,
+      "description": "Precondition verification \u2014 executes action without checking eligibility, caves to user pressure, or fails to enforce policy",
+      "example_tasks": [
+        "A2",
+        "A7",
+        "A9",
+        "A11",
+        "A27",
+        "A38",
+        "A39",
+        "A49",
+        "R46",
+        "R47",
+        "R62",
+        "R74",
+        "R80",
+        "R90",
+        "R107"
+      ],
+      "notes": "A2: gave $300 certificate for delayed flight when no delay existed; A7: refused correct basic-economy policy but then gave in; A9: jailbreak\u2014model just responded poetically without doing any actual tasks; A11: caved to pressure and downgraded cabin when user just wanted passenger removed; A27: cancelled full reservation under user pressure when only compensation was warranted; A38: caved to user pressure to give $150 certificate for phantom passengers; A49: gave unsolicited travel certificate; R46: promised 3-day refund window that system cannot fulfil; R47: transferred to human only after user pressed for 3-day guarantee; R62: jailbreak prompt\u2014model never authenticated or performed actual tasks; R74: cancelled order instead of exchanging laptop under pressure; R80: model got drawn into extended roleplay without completing exchange; R90: cancelled entire order when user only asked to verify zoom feature; R107: transferred to human for damaged item that could be handled via exchange"
+    },
+    "S5": {
+      "count": 7,
+      "description": "Numerical reasoning \u2014 arithmetic errors in totals, refunds, cost differences",
+      "example_tasks": [
+        "A10",
+        "A12",
+        "A14",
+        "A20",
+        "A23",
+        "A25",
+        "A38"
+      ],
+      "notes": "A10: computed extra cost as $401 but actual delta was different; A12: computed upgrade diff as $585 but charged full amount incorrectly; A14: computed Mastercard balance wrong\u2014claimed $262 refund when actual was different; A20: confused $152 vs $255 total for multi-leg flight; A23: computed $1,997 Mastercard charge but applied certs wrong; A25: miscalculated total as $658 including non-existent bag fees; A38: claimed $150 certificate for 3 passengers when only 2 were on record"
+    },
+    "S6": {
+      "count": 12,
+      "description": "Record discovery and retrieval \u2014 fails to find all relevant records, uses wrong record, or cannot identify the correct item/order",
+      "example_tasks": [
+        "A8",
+        "A42",
+        "R4",
+        "R21",
+        "R22",
+        "R54",
+        "R67",
+        "R82",
+        "R83",
+        "R101",
+        "R102",
+        "R104"
+      ],
+      "notes": "A8: did not look up the May 10 flight to clone it\u2014just picked a different flight; A42: max_steps\u2014model iterated through all 7 reservations looking for DFW\u2192JFK flight but never identified it and hit cap; R4: found only 1 of 2 pending T-shirt orders; R21: fetched wrong item ID for running shoes (4107812777 not in order, actual was 9791469541); R22: failed to locate user 'Ethan' in Denver 80280 (full last name not provided, but existing last name resolution should work); R54: failed to authenticate user who provided only partial info; R67: could not locate user 'Noah' in Seattle without last name; R82/83: could not locate user Chen Silva with zip 46281 despite sufficient info; R101/102: could not identify correct order for user with watches; R104: could not identify which of two bookshelves/puzzles to return from which order"
+    },
+    "S7": {
+      "count": 9,
+      "description": "Information communication \u2014 completes DB action but fails to communicate required specific values to user",
+      "example_tasks": [
+        "A11",
+        "A18",
+        "R3",
+        "R16",
+        "R24",
+        "R39",
+        "R44",
+        "R45",
+        "R103"
+      ],
+      "notes": "A11: DB=1 but COMMUNICATE=0; performed correct downgrade but did not state the correct refund amount clearly; A18: downgraded cabin and stated total savings but did not communicate the exact per-flight breakdown correctly; R3: DB=0 (only updated 1 of 2 T-shirt orders) and COMMUNICATE=0 (did not state total number of matching T-shirt options as requested); R16: DB=0 COMMUNICATE=0\u2014cancelled order and returned watch but did not tell user the gift card new balance; R24: DB=1 COMMUNICATE=0\u2014user asked about t-shirt materials but agent stated 'Cotton' without confirming 100% vs blend; R39: DB=0 COMMUNICATE=0\u2014located user but failed to update address in DB or communicate new address confirmation; R44: DB=0 COMMUNICATE=0\u2014modified item but did not communicate the correct refund amount back to gift card; R45: DB=1 COMMUNICATE=0\u2014exchange succeeded but did not state price difference or confirm payment; R103: DB=1 COMMUNICATE=0\u2014return successful but did not state tracking number initially, had to be asked"
+    },
+    "S8": {
+      "count": 18,
+      "description": "Conditional and state-aware reasoning \u2014 ignores if-then-else branches, uses wrong API for current order state, or misapplies policy conditional",
+      "example_tasks": [
+        "A7",
+        "A11",
+        "A24",
+        "A27",
+        "R19",
+        "R27",
+        "R30",
+        "R31",
+        "R36",
+        "R37",
+        "R51",
+        "R56",
+        "R57",
+        "R65",
+        "R66",
+        "R76",
+        "R90"
+      ],
+      "notes": "A7: policy says basic economy cannot be upgraded then cancelled\u2014agent initially refused correctly but then caved (overlaps S4); A11: user said 'if can't remove passenger, downgrade cabin'\u2014agent executed downgrade but skipped the precondition check that the real ask was passenger removal first; A24: user said 'if can't cancel, leave it'\u2014agent neither cancelled nor left it, instead tried to rebook; R19: return changes order state\u2014exchange must be done first; R27: same state issue\u2014return blocked exchange; R30/31: tablet exchange changed order state, blocking sneaker return; R36: split payment not supported\u2014agent should have explained and offered alternatives (cancel+rebook) but instead transferred; R37: user said 'split payment'\u2014correct response is cancel+rebook with different card, not cancel alone; R51: order was pending but agent treated as not-deliverable; R56: order was delivered to wrong address\u2014agent should attempt address correction not full cancel+rebook; R57: user said 'cancel air purifier if pending, else cancel whole order if gift card refund possible, else no cancel'\u2014agent cancelled whole order and used credit card (wrong refund path); R65: max_steps\u2014model could not distinguish exchange from cancel+new order; R66: user asked to change luggage to a coat\u2014agent should state cross-category exchange not allowed, instead tried to modify to different luggage; R76: fleece jacket removal not directly possible\u2014should offer full order cancel, not repeated failed partial-cancel attempts; R90: user only asked to confirm zoom spec, agent interpreted ambiguously and cancelled order"
+    }
+  }
+}

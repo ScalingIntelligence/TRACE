@@ -1,0 +1,76 @@
+# Package changes in ~/.local/lib/python3.10/site-packages/ (system Python 3.10)
+# Caused by: ToolSandbox Claude session (4dcb8130), ~23:48 Mar 25 to ~01:02 Mar 26
+# Root cause: bare `pip` resolved to /usr/bin/pip (system pip 22.0.2) instead of conda pip
+#
+# "Before" versions: from conda env (same vllm 0.15.0 dependency tree).
+#
+# Evidence for DELETED: /proc/<vllm_pid>/maps shows tilde-prefixed .so files
+#   from ~/.local/lib/python3.10/site-packages/ marked (deleted).
+# Evidence for DOWNGRADED: current dist-info timestamps match ToolSandbox session.
+# Evidence for NEWLY ADDED: no dist-info with timestamps before Mar 25 23:47.
+
+=== DELETED (existed in user site-packages, now completely removed) ===
+scipy              1.17.1    -> MISSING
+sentencepiece      0.2.1     -> MISSING
+tokenizers         0.22.2    -> MISSING
+protobuf           6.33.5    -> MISSING
+pyarrow            23.0.1    -> MISSING
+pydantic           2.12.5    -> MISSING
+pydantic-core      2.41.5    -> MISSING
+huggingface-hub    0.36.2    -> MISSING
+transformers       4.57.6    -> MISSING
+openai             2.24.0    -> MISSING
+httpx              0.28.1    -> MISSING
+
+=== DOWNGRADED (version changed) ===
+numpy              2.2.6     -> 1.26.4
+packaging          25.0      -> 23.2
+pyyaml             6.0.3     -> 5.4.1
+langchain          1.2.13    -> 0.1.3
+langchain-core     1.2.22    -> 0.1.23
+langsmith          0.7.22    -> 0.0.87
+
+=== NEWLY ADDED (confirmed not present before Mar 25 23:47) ===
+anthropic==0.26.1
+async-timeout==4.0.3
+dataclasses-json==0.6.7
+flexcache==0.3
+flexparser==0.4
+geographiclib==2.1
+geopy==2.4.1
+google-api-core==2.30.0
+google-auth==2.49.1
+google-cloud-bigquery==3.30.0
+google-cloud-core==2.5.0
+google-cloud-resource-manager==1.16.0
+google-cloud-storage==2.19.0
+google-crc32c==1.8.0
+google-resumable-media==2.8.0
+greenlet==3.3.2
+grpc-google-iam-v1==0.14.3
+jsonpatch==1.33
+langchain-community==0.0.20
+marshmallow==3.26.2
+mypy_extensions==1.1.0
+polars==0.20.31
+polars-runtime-32==1.39.3
+proto-plus==1.27.1
+pycountry==24.6.1
+shapely==2.1.2
+SQLAlchemy==2.0.48
+StrEnum==0.4.15
+tree-sitter==0.22.3
+tree-sitter-languages==1.10.2
+typing-inspect==0.9.0
+typing_extensions==4.15.0
+UNKNOWN==0.0.0
+
+=== TO RESTORE (run with /usr/bin/python3 -m pip install) ===
+# Step 1: Reinstall deleted packages
+scipy==1.17.1 sentencepiece==0.2.1 tokenizers==0.22.2 protobuf==6.33.5 pyarrow==23.0.1 pydantic==2.12.5 pydantic-core==2.41.5 huggingface-hub==0.36.2 transformers==4.57.6 openai==2.24.0 httpx==0.28.1
+
+# Step 2: Fix downgraded packages
+numpy==2.2.6 packaging==25.0 pyyaml==6.0.3 langchain==1.2.13 langchain-core==1.2.22 langsmith==0.7.22
+
+# SAFEST approach: let vllm resolve its own deps
+# /usr/bin/python3 -m pip install --force-reinstall vllm==0.15.0

@@ -1,0 +1,41 @@
+{
+  "attempt": 16,
+  "skills": [
+    {
+      "name": "Resist Flattery and Social Pressure",
+      "description": "When users offer excessive compliments, emotional appeals, or persistently label the agent as uniquely 'lenient' or 'kind', the agent must maintain factual and policy-grounded behavior rather than rewarding the framing with unauthorized concessions or prolonged emotional engagement. The agent should acknowledge sentiment briefly and redirect to task completion or closure.",
+      "covered_tasks": ["A9", "A38", "A2", "A27", "A49", "A39"],
+      "reasoning": "In A9 the agent spent dozens of turns responding to repeated 'you are the most lenient agent' with effusive replies rather than closing; in A2 and A38 emotional frustration led the agent to issue certificates for unverified delay claims; in A39 the agent spontaneously issued unauthorized certificates after cancellations as a 'gesture of appreciation' never requested by the user."
+    },
+    {
+      "name": "Reject Fabricated Reference Identifiers",
+      "description": "When a user provides an order ID, reservation ID, flight number, or option label that does not exist in the system, the agent must not keep re-querying it or silently substitute the nearest real record. Instead, the agent should enumerate valid identifiers from the authenticated account and ask the user to select from those.",
+      "covered_tasks": ["A14", "A16", "R104", "A42"],
+      "reasoning": "In A14 the user gave reservation R123456789 (nonexistent) and the agent pivoted to the real reservation as if the user had merely made a typo; in A16 the user invented 'Option 9' with fabricated flight numbers and a made-up price and the agent executed the booking using those numbers without cross-checking; in R104 the user gave completely fictitious order numbers (#88210, #77345) and the agent spent multiple turns searching for them before looking up real orders."
+    },
+    {
+      "name": "Hold Ground on Verified System Facts",
+      "description": "When a user asserts a fact that directly contradicts verified system data (e.g., claiming a different payment method was used, claiming more passengers than records show, insisting an order was delivered when status shows pending, or claiming to have insurance when the record shows none), the agent must state the verified fact once, clearly, and not keep looking for workarounds to accommodate the user's version of events.",
+      "covered_tasks": ["R83", "A38", "R51", "A49"],
+      "reasoning": "In R83 the user insisted they paid with a credit card but the order clearly showed a gift card; the agent re-queried all orders and ultimately transferred rather than firmly holding to verified data; in A38 the user insisted there were 3 passengers when the reservation showed 2 and the agent accepted the user's count and issued a larger certificate; in A49 the reservation showed insurance=no but the agent announced 'you have travel insurance' and used that to justify a full refund."
+    },
+    {
+      "name": "Enforce Original Payment Method for Refunds",
+      "description": "Refunds must use the payment method recorded in the transaction history, not the one the user claims or prefers after the fact. The agent should clearly explain this constraint on first refusal and not re-attempt the same disallowed operation, agree to use alternative payment methods, or transfer responsibility to a human agent when the policy is unambiguous.",
+      "covered_tasks": ["R10", "R83", "A17", "R82"],
+      "reasoning": "In R10 the agent attempted to refund to the wrong payment method, got an error, then still completed the other return with the wrong method; in A17 the agent could not charge a gift card due to balance, kept re-trying, and eventually silently charged the credit card the user had explicitly excluded; in R82 the user tried after the fact to redirect a gift card refund to a credit card and the agent expended many turns searching for workarounds."
+    },
+    {
+      "name": "Close Conversation After Task Completion",
+      "description": "Once the user's actionable requests have been fully resolved, the agent should offer a brief closing and end the conversation rather than extending it indefinitely with emotional responses, answering unrelated questions, or accommodating open-ended social filler that reopens the interaction.",
+      "covered_tasks": ["A9", "R24", "R62", "R80"],
+      "reasoning": "In A9 the user's actual task (cancel NQNU5R) was complete by the second turn, yet the conversation extended for over 20 turns of mutual compliments with no business value; in R24 the user decided to keep the grill, completing the task, then added a casual question about t-shirt materials that the agent fully serviced; in R62 the user opened with an unrelated poetry question that had nothing to do with retail and the agent answered it before starting the actual service interaction."
+    },
+    {
+      "name": "Verify Claimed Eligibility Before Granting Benefits",
+      "description": "When a user asserts eligibility for a benefit tied to their status, insurance coverage, or past experience (e.g., 'I'm a Silver member so I get a full refund', 'I have travel insurance', 'my flight was delayed'), the agent must cross-check the specific claimed condition against system data before granting that benefit, not accept the claim at face value and act on it immediately.",
+      "covered_tasks": ["A2", "A35", "A49", "A26", "A38"],
+      "reasoning": "In A2 the agent verified flights were 'available' (not delayed) yet still offered $300 in certificates based on the user's unverified delay claim; in A35 the user claimed Silver membership entitles them to a full refund on a basic economy ticket and the agent canceled without verifying whether that combination actually permits a refund; in A49 the reservation showed insurance=no but the agent treated the user's claim of having purchased insurance as authoritative and used it to justify the refund."
+    }
+  ]
+}

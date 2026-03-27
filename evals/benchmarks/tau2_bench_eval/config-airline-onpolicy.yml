@@ -1,0 +1,42 @@
+# Airline — Tool Calling LoRA
+#
+# Loads a LoRA adapter (tau_tool_calling GRPO iter 10) onto the
+# base Qwen3-30B model running on port 8080 and evaluates it solo.
+# User simulator runs on a separate server (port 9000) for determinism.
+#
+# Usage:
+#   python main.py --config config-airline-structured-lora.yml
+
+domain: airline
+agent_llm: vllm://tarsur385/taubench-target-20
+agent: null
+
+agent_llm_args:
+  temperature: 0.0
+  max_context_length: 32000
+  tokenizer_model: openai/tarsur385/taubench-target-20
+
+# User simulator
+user_llm: vllm://Qwen/Qwen3-30B-A3B-Instruct-2507
+user_llm_args:
+  temperature: 0.0
+  max_context_length: 32000
+  tokenizer_model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
+
+user: null
+
+# Execution
+max_steps: 50
+max_concurrency: 1
+num_trials: 1
+seed: 42
+verbose: true
+
+save_to: airline-taubench-target-20
+
+# vLLM server config — separate servers for deterministic user simulator
+vllm:
+  agent_base_urls:
+    - http://localhost:8090/v1
+  user_base_urls:
+    - http://localhost:9002/v1

@@ -24,7 +24,10 @@ orchestrator:
 
   routing_strategy: per_conversation
   routing_mode: classifier
-  routing_topk: 1
+  routing_topk: null
+  classifier_temperature: 1.0
+  is_weighted: true
+  routing_topp: 0.7
   routing_context_window: 10
 
   skills:
@@ -56,11 +59,12 @@ orchestrator:
 
     - name: structured_data_reasoning
       description: >
-        Data comparison and selection. Use when the task requires
-        choosing among multiple options or computing a value:
-        cheapest flight, nonstop alternative, cabin class upgrade
-        or downgrade cost, baggage allowance, flight delay status,
-        or deciding which of several bookings to act on.
+        Data lookup, comparison, and computation. Use when the task
+        requires searching for options, comparing values, or computing
+        results: finding the cheapest or best-matching flight,
+        upgrading or downgrading cabin class, calculating baggage
+        allowances, checking flight delay status, or choosing which
+        of several bookings to act on.
       adapter_name: structured-grpo-iter40
       adapter_path: /home/ubuntu/.cache/huggingface/structured_data_reasoning/grpo_ckpt_iter_40_20260308_080312
       llm_args:
@@ -73,7 +77,7 @@ orchestrator:
     - name: multistep_task
       description: >
         Multiple write operations. Use ONLY when the customer
-        lists five or more independent tasks in one request.
+        lists multiple independent tasks in one request.
       adapter_name: multistep-grpo-iter10
       adapter_path: /home/ubuntu/.cache/huggingface/multistep_task/grpo_ckpt_iter_10_20260318_110546
       llm_args:
@@ -85,11 +89,12 @@ orchestrator:
 
     - name: precondition
       description: >
-        Policy rule enforcement. Use when the action may need
-        to be refused: fare class modification restrictions,
-        refund eligibility from insurance or booking timing,
-        prior agent commitment verification, or booking
-        replication feasibility.
+        Policy compliance and refusal decisions. Use when the action
+        may need to be refused or its eligibility verified: whether
+        a booking can be replicated from a past trip, whether ticket
+        restrictions prevent the requested change, refund eligibility
+        based on insurance or ticket type, or verifying a prior
+        agent's commitment.
       adapter_name: precondition-grpo-iter40
       adapter_path: /home/ubuntu/.cache/huggingface/precondition/grpo_ckpt_iter_40_20260319_035848
       llm_args:
@@ -114,7 +119,7 @@ num_trials: 1
 seed: 42
 verbose: true
 
-save_to: ../../single_lora/results/airline-5skill-orchestrator-rerun
+save_to: single_lora/results/debug-t26-topp
 
 vllm:
   base_url: http://localhost:9002/v1

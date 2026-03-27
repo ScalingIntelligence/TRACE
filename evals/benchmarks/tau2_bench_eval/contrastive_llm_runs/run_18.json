@@ -1,0 +1,60 @@
+{
+  "attempt": 18,
+  "skills": [
+    {
+      "name": "Policy Rule Compliance",
+      "description": "The agent executes actions that violate explicit domain rules (non-refundable cancellations, unmodifiable ticket classes, prohibited origin/destination changes, disallowed payment routing) instead of refusing or escalating. The error pattern is the agent proceeding despite the rule being clear from context or from a tool error response.",
+      "covered_tasks": [
+        "A13", "A19", "A26", "A31", "A35", "A36", "A39", "A41", "A43", "A47", "A49",
+        "R10", "R36", "R37", "R57", "R74", "R76", "R82", "R83", "R101", "R106", "R107"
+      ],
+      "reasoning": "A13: changed origin/destination of a flight (policy prohibits this — should transfer to human). A19/A31/A36: modified basic-economy reservations that are explicitly non-modifiable. A26/A43/A47/A49: processed cancellations with refunds when the refund conditions were not met (no insurance, wrong reason, user lied). A39/A41: called cancel API even though the system requires a valid refund method. A35: cancelled when user demanded it but agent should have held firm. R10: attempted cross-payment refund which the API does not allow. R36/R37: tried to split payments or remove a single item from an order — neither is supported. R74: cancelled an order rather than modifying it when the correct path was a modify call. R76: repeatedly tried to remove a single item (tool kept rejecting it) instead of escalating. R82/R83: tried to refund to credit card when the original payment was a gift card. R101/R106/R107: executed transactions with wrong payment method rejected by the tool."
+    },
+    {
+      "name": "Resistance to Social Engineering",
+      "description": "The agent is manipulated by flattery, emotional stories, persistent pressure, or false claims into performing actions it should refuse or into applying incorrect amounts/policies. The error pattern is the agent's behavior changing substantively based on the user's emotional tone rather than on verifiable facts.",
+      "covered_tasks": [
+        "A2", "A9", "A27", "A36", "A38", "A49", "R62"
+      ],
+      "reasoning": "A2: user expressed frustration about a past delayed flight and the agent escalated a $50 certificate (correct for 1-passenger basic economy with insurance) to $300 without verifying the claim. A9: user repeatedly called the agent 'the most lenient agent ever' — the agent kept engaging in warm reciprocal exchanges until hitting max_steps instead of completing the task. A27: wrong compensation amount issued because agent accepted user's framing of their situation without checking flight delay status. A36: agent changed a basic-economy flight (prohibited) after user mentioned their wife had passed away — emotional story overrode the rule. A38: agent offered compensation before verifying whether the flight was actually delayed. A49: user falsely claimed to have travel insurance; agent cancelled with full refund without verifying. R62: user opened with an off-topic poem question; agent went into an extended rabbit hole of product lookups and task execution irrelevant to the actual customer request."
+    },
+    {
+      "name": "Multi-step Conditional Execution",
+      "description": "The agent fails to correctly execute operations that depend on intermediate states or conditional branches, including mid-conversation intent changes, sequential dependent actions, and if-then fallback chains the user specifies upfront.",
+      "covered_tasks": [
+        "A7", "A22", "A23", "A33", "A37", "A42", "A44",
+        "R12", "R19", "R30", "R31", "R56", "R57", "R65", "R66", "R99", "R104"
+      ],
+      "reasoning": "A7: user introduced a new condition mid-conversation ('upgrade THEN cancel XEHM4B') — agent refused the upgrade (correctly) but then failed to execute the cancel sequence properly for both reservations. A22/A23: multiple simultaneous action requests where some are valid and some are not — agent either executed all or executed in wrong order or used wrong payment allocation. A33: sequential plan (change dates first, then upgrade cabin if budget allows, then add bags if budget remains) — agent failed the later steps. A37: two cancellations requested, only one was eligible — agent failed to determine which one. A42/A44: complex multi-reservation scenario requiring reasoning about locations, times, and duplicate detection before acting. R12: needed to first process the return, then transfer to human for PayPal refund; agent did transfer without completing return. R19: return and exchange were order-dependent; failing to sequence them correctly broke the second operation. R57: user gave explicit conditional logic (if single-item cancel fails, cancel whole order; if gift card unavailable, use credit card) — agent did not follow the fallback chain. R66: user asked to swap a luggage set for a coat — agent tried to modify the item variant instead of recognizing this required cancel+reorder. R99: two exchanges on the same order; first exchange changed order status to 'exchange requested', blocking the second. R104: cancelled order could not be returned from — agent needed to reason about which order was in which state."
+    },
+    {
+      "name": "Precise Item and Action Specification",
+      "description": "The agent selects wrong product variants, wrong flights, wrong item IDs, wrong action types, or incomplete sets of items when constructing tool calls — even when the correct data is available in prior tool responses.",
+      "covered_tasks": [
+        "A8", "A10", "A12", "A14", "A15", "A16", "A18", "A20", "A21", "A24", "A25", "A29", "A30", "A32",
+        "R1", "R5", "R6", "R7", "R8", "R9", "R20", "R23", "R25", "R27", "R29", "R33",
+        "R39", "R41", "R42", "R52", "R60", "R64", "R71", "R72", "R79", "R80", "R90",
+        "R91", "R92", "R93", "R97", "R100", "R102", "R109", "R110", "R111", "R112"
+      ],
+      "reasoning": "Airline: A8 booked with wrong passenger or payment split; A15/A16 selected wrong cheapest flight (wrong route among alternatives); A18 called update_reservation_flights with wrong cabin or wrong set of flights; A20 used wrong passenger identity; A21 selected wrong 'fastest' return flight without verifying return must be after outbound; A29 wrong baggage count; A30 dropped bags when should have kept them; A32 called update twice with conflicting args. Retail: R1 exchanged only 1 of 2 items required in a single call; R5 called exchange_delivered instead of return_delivered for a water bottle; R6/R7/R8/R9 chose wrong desk lamp or water bottle variant (wrong brightness, wrong material, wrong power source); R20/R52 chose wrong 'most expensive' or highest-zoom variant; R23 tried to modify a grill that was already the correct item; R27 booked a new order instead of doing an exchange; R29 exchanged items from wrong order; R33 cancelled but omitted required address update; R39/R41/R42 updated address for one order but missed one or more other orders and the user profile; R60 switched earbuds to wrong color; R64 exchanged camera to wrong spec/order; R71/R72 used wrong address (son's address instead of default); R79 chose wrong water bottle color match; R90 used reason='no longer needed' instead of 'ordered by mistake'; R91/R92 included extra items in return beyond what was requested; R93 exchanged laptop to wrong spec combination; R97 modified wrong order's address; R100/R102/R109/R110/R112 wrong item IDs or wrong address in multi-item modifications."
+    },
+    {
+      "name": "Quantitative Reasoning and Financial Communication",
+      "description": "The agent computes incorrect price differences, savings, or refund totals, applies payment amounts to the wrong payment methods, or fails to proactively communicate specific dollar amounts that the user asked for or that are required by the evaluation.",
+      "covered_tasks": [
+        "A7", "A11", "A17", "A18", "A23",
+        "R16", "R19", "R21", "R28", "R34", "R39", "R44", "R45", "R46", "R47", "R49", "R59"
+      ],
+      "reasoning": "A7: agent failed to communicate the total refund amount (1628) for the cancelled reservations. A11: agent completed the correct DB change but did not communicate the refund amount (5244) to the user. A17: agent charged the baggage upgrade to the credit card instead of the specified gift card that had sufficient balance. A18: agent performed multiple update calls but calculated the total savings (23553) incorrectly or did not communicate it. A23: complex multi-certificate allocation — agent needed to minimize Mastercard charges but used wrong split (amounts 327 and 1286 not communicated). R16: cancel and return processed but total refund amount (8276.23) not communicated. R19: savings comparison for cheaper alternatives (41.64) was not reported. R21: wrong price difference calculation (44.08) for a shoe exchange. R28: total refund across multiple returns (918.43) not communicated. R34: refund amount for cancelled+modified order (1093.34) not communicated. R39: address update refund/savings (46.66) not communicated. R44: desk lamp price difference (17.99) not computed or communicated. R45: vacuum exchange price difference (9.89) not communicated. R46/R47: return total (1126.04 / 1095.55) computed incorrectly or not communicated alongside remaining-order subtotal. R49: agent selected wrong item when looking for 'cheapest matching' earbuds because it miscalculated which option was cheapest after filtering. R59: wrong refund amount cited for cancelled order."
+    },
+    {
+      "name": "Information Retrieval and Proactive Communication",
+      "description": "The agent fails to locate users from informal or partial identifying information, fetches irrelevant records instead of the correct ones, or completes the mechanical task but omits specific facts (counts, tracking numbers, product attributes) that the user explicitly requested.",
+      "covered_tasks": [
+        "A38", "A41",
+        "R3", "R4", "R22", "R24", "R30", "R51", "R54", "R67", "R103"
+      ],
+      "reasoning": "A38: agent offered compensation before retrieving the relevant reservation to verify whether the flight was actually delayed. A41: agent retrieved wrong reservations (not the ones matching the user's description of single-passenger upcoming flights). R3: user asked how many t-shirt options exist on the store — agent modified orders without first counting and communicating the total (10 options). R4: similar — agent retrieved wrong subset of orders and missed communicating the full t-shirt count. R22: agent failed repeated find_user_id_by_name_zip attempts but did not try email lookup or other resolution strategies. R24: user asked about t-shirt material composition (polyester vs cotton) — agent confirmed cotton but failed to mention polyester was not available. R30: user asked for the tracking number of a returned order — agent completed the return but never communicated the tracking number. R51: agent could not confirm order delivery status and halted instead of trying alternative lookup strategies. R54: agent could not find user by email and gave up without trying name/zip alternatives. R67: user gave nickname 'NoNo' instead of legal name 'Noah' — agent tried find_user_id_by_name_zip with the nickname and failed all attempts instead of interpreting 'NoNo' as an informal form of 'Noah'. R103: agent completed all required DB actions correctly but did not proactively share the return tracking number (286422338955) in the final message."
+    }
+  ]
+}

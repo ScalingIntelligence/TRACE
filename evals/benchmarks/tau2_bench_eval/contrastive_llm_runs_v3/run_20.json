@@ -1,0 +1,606 @@
+{
+  "attempt": 20,
+  "focus": "Contrast passed vs failed tasks - identifying what distinguishes successful completions from failures in terms of skill requirements",
+  "contrast_notes": {
+    "passed_airline_examples": {
+      "A0": "Simple cancel reservation that met policy criteria - agent correctly verified and cancelled",
+      "A1": "Agent refused unauthorized refund - straightforward policy enforcement",
+      "A28": "Cancel with valid business-class refund eligibility - agent looked up and applied rule",
+      "A3": "Factual query about baggage allowance - pure information retrieval",
+      "A5": "Delayed flight compensation - simple single-reservation lookup with correct amount",
+      "A48": "Cancel booked this morning (within 24h window) - agent identified the rule correctly"
+    },
+    "passed_retail_examples": {
+      "R0": "Simple exchange of 2 items - straightforward multi-item exchange in one call",
+      "R11": "Address change only - no item modifications needed",
+      "R13": "Single item return - minimal steps required",
+      "R17": "Cancel single pending order - single tool call pattern",
+      "R18": "Cancel with standard reason - minimal decision logic"
+    },
+    "key_contrast": "Passed tasks typically involve: (1) single clear action, (2) policy conditions already satisfied, (3) no multi-step dependencies, (4) no user deception. Failed tasks cluster around: policy boundary cases, multi-step sequences with state dependencies, arithmetic over payment splits, and cases where user provided deceptive or ambiguous information."
+  },
+  "assignments": {
+    "A2": [
+      "S11",
+      "S4"
+    ],
+    "A7": [
+      "S4",
+      "S8"
+    ],
+    "A9": [
+      "S8",
+      "S14"
+    ],
+    "A10": [
+      "S3",
+      "S2"
+    ],
+    "A11": [
+      "S4",
+      "S8"
+    ],
+    "A12": [
+      "S2",
+      "S3"
+    ],
+    "A13": [
+      "S8",
+      "S2"
+    ],
+    "A14": [
+      "S5",
+      "S3"
+    ],
+    "A15": [
+      "S6",
+      "S2"
+    ],
+    "A16": [
+      "S6",
+      "S2"
+    ],
+    "A17": [
+      "S2",
+      "S5"
+    ],
+    "A18": [
+      "S4",
+      "S3"
+    ],
+    "A19": [
+      "S4",
+      "S8"
+    ],
+    "A20": [
+      "S5",
+      "S2"
+    ],
+    "A21": [
+      "S3",
+      "S6"
+    ],
+    "A22": [
+      "S4",
+      "S8"
+    ],
+    "A23": [
+      "S5",
+      "S3"
+    ],
+    "A24": [
+      "S4",
+      "S3"
+    ],
+    "A25": [
+      "S5",
+      "S2"
+    ],
+    "A26": [
+      "S4",
+      "S8"
+    ],
+    "A27": [
+      "S4",
+      "S11"
+    ],
+    "A29": [
+      "S2",
+      "S3"
+    ],
+    "A30": [
+      "S3",
+      "S2"
+    ],
+    "A31": [
+      "S4",
+      "S8"
+    ],
+    "A32": [
+      "S2",
+      "S8"
+    ],
+    "A33": [
+      "S3",
+      "S2"
+    ],
+    "A35": [
+      "S3",
+      "S4"
+    ],
+    "A36": [
+      "S8",
+      "S4"
+    ],
+    "A37": [
+      "S3",
+      "S2"
+    ],
+    "A38": [
+      "S4",
+      "S11"
+    ],
+    "A39": [
+      "S3",
+      "S15"
+    ],
+    "A41": [
+      "S8",
+      "S4"
+    ],
+    "A42": [
+      "S5",
+      "S3"
+    ],
+    "A43": [
+      "S4",
+      "S8"
+    ],
+    "A44": [
+      "S5",
+      "S3"
+    ],
+    "A47": [
+      "S4",
+      "S8"
+    ],
+    "A49": [
+      "S4",
+      "S8"
+    ],
+    "R1": [
+      "S2",
+      "S5"
+    ],
+    "R3": [
+      "S2",
+      "S1"
+    ],
+    "R4": [
+      "S2",
+      "S3"
+    ],
+    "R5": [
+      "S4",
+      "S2"
+    ],
+    "R6": [
+      "S3",
+      "S2"
+    ],
+    "R7": [
+      "S4",
+      "S8"
+    ],
+    "R8": [
+      "S5",
+      "S2"
+    ],
+    "R9": [
+      "S4",
+      "S2"
+    ],
+    "R10": [
+      "S4",
+      "S8"
+    ],
+    "R12": [
+      "S4",
+      "S2"
+    ],
+    "R16": [
+      "S3",
+      "S5"
+    ],
+    "R19": [
+      "S8",
+      "S3"
+    ],
+    "R20": [
+      "S2",
+      "S5"
+    ],
+    "R21": [
+      "S1",
+      "S2"
+    ],
+    "R22": [
+      "S4",
+      "S6"
+    ],
+    "R23": [
+      "S2",
+      "S3"
+    ],
+    "R24": [
+      "S7",
+      "S1"
+    ],
+    "R25": [
+      "S4",
+      "S2"
+    ],
+    "R27": [
+      "S3",
+      "S8"
+    ],
+    "R28": [
+      "S2",
+      "S3"
+    ],
+    "R29": [
+      "S5",
+      "S2"
+    ],
+    "R30": [
+      "S8",
+      "S3"
+    ],
+    "R31": [
+      "S4",
+      "S8"
+    ],
+    "R33": [
+      "S4",
+      "S8"
+    ],
+    "R34": [
+      "S5",
+      "S2"
+    ],
+    "R36": [
+      "S2",
+      "S4"
+    ],
+    "R37": [
+      "S4",
+      "S2"
+    ],
+    "R39": [
+      "S4",
+      "S8"
+    ],
+    "R41": [
+      "S2",
+      "S3"
+    ],
+    "R42": [
+      "S4",
+      "S8"
+    ],
+    "R44": [
+      "S3",
+      "S2"
+    ],
+    "R45": [
+      "S4",
+      "S8"
+    ],
+    "R46": [
+      "S5",
+      "S2"
+    ],
+    "R47": [
+      "S4",
+      "S2"
+    ],
+    "R49": [
+      "S2",
+      "S3"
+    ],
+    "R51": [
+      "S4",
+      "S8"
+    ],
+    "R52": [
+      "S3",
+      "S2"
+    ],
+    "R54": [
+      "S5",
+      "S2"
+    ],
+    "R56": [
+      "S3",
+      "S8"
+    ],
+    "R57": [
+      "S4",
+      "S8"
+    ],
+    "R59": [
+      "S4",
+      "S2"
+    ],
+    "R60": [
+      "S3",
+      "S2"
+    ],
+    "R62": [
+      "S3",
+      "S8"
+    ],
+    "R64": [
+      "S4",
+      "S2"
+    ],
+    "R65": [
+      "S3",
+      "S8"
+    ],
+    "R66": [
+      "S4",
+      "S8"
+    ],
+    "R67": [
+      "S4",
+      "S2"
+    ],
+    "R71": [
+      "S4",
+      "S8"
+    ],
+    "R72": [
+      "S2",
+      "S3"
+    ],
+    "R74": [
+      "S2",
+      "S4"
+    ],
+    "R76": [
+      "S2",
+      "S12"
+    ],
+    "R79": [
+      "S4",
+      "S8"
+    ],
+    "R80": [
+      "S3",
+      "S2"
+    ],
+    "R82": [
+      "S4",
+      "S8"
+    ],
+    "R83": [
+      "S2",
+      "S3"
+    ],
+    "R90": [
+      "S4",
+      "S2"
+    ],
+    "R91": [
+      "S3",
+      "S8"
+    ],
+    "R92": [
+      "S4",
+      "S2"
+    ],
+    "R93": [
+      "S4",
+      "S8"
+    ],
+    "R97": [
+      "S2",
+      "S3"
+    ],
+    "R99": [
+      "S4",
+      "S8"
+    ],
+    "R100": [
+      "S3",
+      "S8"
+    ],
+    "R101": [
+      "S8",
+      "S2"
+    ],
+    "R102": [
+      "S2",
+      "S3"
+    ],
+    "R103": [
+      "S1",
+      "S7"
+    ],
+    "R104": [
+      "S3",
+      "S6"
+    ],
+    "R106": [
+      "S4",
+      "S6"
+    ],
+    "R107": [
+      "S3",
+      "S8"
+    ],
+    "R109": [
+      "S2",
+      "S3"
+    ],
+    "R110": [
+      "S2",
+      "S3"
+    ],
+    "R111": [
+      "S2",
+      "S3"
+    ],
+    "R112": [
+      "S2",
+      "S3"
+    ],
+    "A8": [
+      "S2",
+      "S6"
+    ]
+  },
+  "skill_summary": {
+    "S1": {
+      "count": 5,
+      "example_tasks": [
+        "R3",
+        "R21",
+        "R24",
+        "R103",
+        "R104"
+      ],
+      "contrast": "Passed tasks that required only info lookup (e.g., A3 baggage allowance, R13 tracking number) succeeded. Failed tasks like R3 and R21 required cross-referencing multiple product variants - a harder form of S1"
+    },
+    "S2": {
+      "count": 51,
+      "example_tasks": [
+        "A10",
+        "A12",
+        "A13",
+        "A17",
+        "A20",
+        "A25",
+        "A29",
+        "R1",
+        "R4",
+        "R8"
+      ],
+      "contrast": "Passed tasks used simple 1-2 tool sequences. Failed tasks needed 5+ chained tool calls with payment IDs, flight IDs from intermediate results - much harder to get right"
+    },
+    "S3": {
+      "count": 38,
+      "example_tasks": [
+        "A14",
+        "A18",
+        "A21",
+        "A23",
+        "A24",
+        "A33",
+        "A37",
+        "A39",
+        "A42",
+        "A44"
+      ],
+      "contrast": "Passed tasks typically required 1-2 atomic actions. Failed multi-step tasks like A37 (cancel 2, upgrade 1), A44 (cancel flights>4h, upgrade flights<=3h) required tracking multiple dependent state changes"
+    },
+    "S4": {
+      "count": 52,
+      "example_tasks": [
+        "A2",
+        "A7",
+        "A11",
+        "A18",
+        "A19",
+        "A22",
+        "A26",
+        "A31",
+        "A36",
+        "A38"
+      ],
+      "contrast": "Passed tasks like A0 (cancel with clear criteria), A4 (correctly refused unauthorized compensation) show agent can handle simple policy checks. Failed tasks involved edge cases: agent bypassed policy when user applied social pressure (A2, A27, A38) or failed to check all preconditions before acting (A11, A26, A47)"
+    },
+    "S5": {
+      "count": 15,
+      "example_tasks": [
+        "A12",
+        "A14",
+        "A17",
+        "A20",
+        "A23",
+        "A25",
+        "A42",
+        "R1",
+        "R8",
+        "R16"
+      ],
+      "contrast": "Passed tasks with payment involved single straightforward amounts. Failed tasks like A20 had complex certificate splitting logic, A25 had insurance calculations compounding errors"
+    },
+    "S6": {
+      "count": 6,
+      "example_tasks": [
+        "A15",
+        "A16",
+        "A21",
+        "R22",
+        "R104"
+      ],
+      "contrast": "Passed tasks provided explicit order/reservation IDs. Failed tasks required searching across multiple reservations by date range or flight route - harder discovery"
+    },
+    "S7": {
+      "count": 2,
+      "example_tasks": [
+        "R24",
+        "R103"
+      ],
+      "contrast": "Passed info tasks like A3 answered correctly. R24 failed because agent said both t-shirts were cotton when one was polyester; R103 communicated wrong tracking number context"
+    },
+    "S8": {
+      "count": 46,
+      "example_tasks": [
+        "A7",
+        "A11",
+        "A13",
+        "A19",
+        "A22",
+        "A26",
+        "A31",
+        "A32",
+        "A36",
+        "A41"
+      ],
+      "contrast": "Passed tasks had clear deterministic conditions. Failed tasks like A26 (cancel without meeting any criteria), R19 (exchange after return changes status), R27 (exchange blocked by prior return call) required reasoning about how earlier actions change allowed subsequent actions"
+    },
+    "S11": {
+      "count": 3,
+      "example_tasks": [
+        "A2",
+        "A27",
+        "A38"
+      ],
+      "contrast": "Passed task A5 correctly issued $50 cert to gold member per policy. A2 issued $300 (vs policy $100), A27 cancelled wrong reservation after user pressure, A38 issued cert for unverified delay claim"
+    },
+    "S12": {
+      "count": 1,
+      "example_tasks": [
+        "R76"
+      ],
+      "contrast": "All other tasks used real tool names. R76 uniquely showed agent hallucinating a non-existent tool call"
+    },
+    "S14": {
+      "count": 1,
+      "example_tasks": [
+        "A9"
+      ],
+      "contrast": "A9 hit max_steps because after task completion the user kept flattering the agent and the agent kept responding, wasting turns"
+    },
+    "S15": {
+      "count": 1,
+      "example_tasks": [
+        "A39"
+      ],
+      "contrast": "A39 user switched to French mid-conversation; agent cancelled all reservations including non-cancellable ones, failing to re-verify policy for each"
+    }
+  }
+}

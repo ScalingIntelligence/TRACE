@@ -90,6 +90,24 @@ except ImportError:
 
 
 try:
+    from tec_game import (
+        TECGame,
+        extract_action as extract_action_tec,
+        SYSTEM_PROMPT as SYSTEM_PROMPT_TEC,
+    )
+except ImportError:
+    TECGame = None
+
+try:
+    from tec_game_v2 import (
+        TECGameV2,
+        extract_action as extract_action_tec_v2,
+        SYSTEM_PROMPT as SYSTEM_PROMPT_TEC_V2,
+    )
+except ImportError:
+    TECGameV2 = None
+
+try:
     from awm_game import (
         AWMGame,
         extract_action as extract_action_awm,
@@ -470,6 +488,42 @@ def _register_builtin_games() -> None:
                 action_space=[],
                 stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
                 system_prompt=SYSTEM_PROMPT_TAU2_BENCH,
+                max_gen_tokens=1024,
+            )
+        )
+
+
+    # Tool-Execute-Communicate v2 (TEC) — focused on two clean skills
+    # Skill A: communicate after tool call, Skill B: error recovery chain
+    if TECGameV2 is not None:
+        def make_tec_v2() -> TECGameV2:
+            return TECGameV2()
+
+        register_game(
+            GameSpec(
+                name="tec_v2",
+                make_env=make_tec_v2,
+                extract_action=extract_action_tec_v2,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_TEC_V2,
+                max_gen_tokens=1024,
+            )
+        )
+
+    # Tool-Execute-Communicate (TEC v1) — original version
+    if TECGame is not None:
+        def make_tec() -> TECGame:
+            return TECGame()
+
+        register_game(
+            GameSpec(
+                name="tec",
+                make_env=make_tec,
+                extract_action=extract_action_tec,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_TEC,
                 max_gen_tokens=1024,
             )
         )

@@ -1,0 +1,244 @@
+[
+  {
+    "attempt": 1,
+    "domain": "airline",
+    "result": {
+      "book_new_reservation": {
+        "assigned_model": "base",
+        "success_rate": 0.0,
+        "failed_cases": [
+          "T8",
+          "T20",
+          "T24",
+          "T25",
+          "T35"
+        ],
+        "passed_cases": [],
+        "fail_count": 5,
+        "pass_count": 0,
+        "pct_of_total": 10.0,
+        "total_cases": 5
+      },
+      "update_flights": {
+        "assigned_model": "base",
+        "success_rate": 0.0,
+        "failed_cases": [
+          "T11",
+          "T15",
+          "T16",
+          "T18"
+        ],
+        "passed_cases": [],
+        "fail_count": 4,
+        "pass_count": 0,
+        "pct_of_total": 8.0,
+        "total_cases": 4
+      }
+    }
+  },
+  {
+    "attempt": 2,
+    "domain": "airline",
+    "result": {
+      "send_certificate": {
+        "assigned_model": "base",
+        "success_rate": 0.0,
+        "failed_cases": [
+          "T2",
+          "T27",
+          "T38"
+        ],
+        "passed_cases": [],
+        "fail_count": 6,
+        "pass_count": 0,
+        "pct_of_total": 12.0,
+        "total_cases": 6
+      },
+      "book_new_reservation": {
+        "assigned_model": "base",
+        "success_rate": 0.0,
+        "failed_cases": [
+          "T8",
+          "T24",
+          "T25",
+          "T35"
+        ],
+        "passed_cases": [],
+        "fail_count": 6,
+        "pass_count": 0,
+        "pct_of_total": 12.0,
+        "total_cases": 6
+      },
+      "update_flights": {
+        "assigned_model": "base",
+        "success_rate": 0.0,
+        "failed_cases": [
+          "T11",
+          "T18"
+        ],
+        "passed_cases": [],
+        "fail_count": 4,
+        "pass_count": 0,
+        "pct_of_total": 8.0,
+        "total_cases": 4
+      },
+      "cancel_and_rebook_flights": {
+        "assigned_model": "base",
+        "success_rate": 0.0,
+        "failed_cases": [
+          "T7",
+          "T37",
+          "T44"
+        ],
+        "passed_cases": [],
+        "fail_count": 4,
+        "pass_count": 0,
+        "pct_of_total": 8.0,
+        "total_cases": 4
+      }
+    }
+  },
+  {
+    "attempt": 3,
+    "domain": "airline",
+    "result": {
+      "cancel_and_rebook_flights": {
+        "assigned_model": "base",
+        "success_rate": 0.0,
+        "failed_cases": [
+          "T7",
+          "T37",
+          "T44"
+        ],
+        "passed_cases": [],
+        "fail_count": 9,
+        "pass_count": 0,
+        "pct_of_total": 18.0,
+        "total_cases": 9
+      },
+      "book_new_reservation": {
+        "assigned_model": "base",
+        "success_rate": 0.0,
+        "failed_cases": [
+          "T20",
+          "T24",
+          "T25"
+        ],
+        "passed_cases": [],
+        "fail_count": 6,
+        "pass_count": 0,
+        "pct_of_total": 12.0,
+        "total_cases": 6
+      },
+      "update_flights": {
+        "assigned_model": "base",
+        "success_rate": 0.0,
+        "failed_cases": [
+          "T11",
+          "T18"
+        ],
+        "passed_cases": [],
+        "fail_count": 4,
+        "pass_count": 0,
+        "pct_of_total": 8.0,
+        "total_cases": 4
+      }
+    }
+  },
+  {
+    "attempt": 4,
+    "domain": "airline",
+    "result": {
+      "book_new_reservation": {
+        "assigned_model": "base",
+        "success_rate": 0.0,
+        "failed_cases": [
+          "T8",
+          "T20",
+          "T24"
+        ],
+        "passed_cases": [],
+        "fail_count": 5,
+        "pass_count": 0,
+        "pct_of_total": 10.0,
+        "total_cases": 5
+      },
+      "update_flights": {
+        "assigned_model": "base",
+        "success_rate": 0.0,
+        "failed_cases": [
+          "T11",
+          "T16",
+          "T18"
+        ],
+        "passed_cases": [],
+        "fail_count": 4,
+        "pass_count": 0,
+        "pct_of_total": 8.0,
+        "total_cases": 4
+      },
+      "cancel_reservation": {
+        "assigned_model": "base",
+        "success_rate": 0.0,
+        "failed_cases": [
+          "T19",
+          "T39"
+        ],
+        "passed_cases": [],
+        "fail_count": 4,
+        "pass_count": 0,
+        "pct_of_total": 8.0,
+        "total_cases": 4
+      }
+    }
+  },
+  {
+    "attempt": 5,
+    "domain": "airline",
+    "result": {
+      "multi_update:baggage+flights": {
+        "assigned_model": "base",
+        "success_rate": 0.0,
+        "failed_cases": [
+          "T21",
+          "T29",
+          "T33"
+        ],
+        "passed_cases": [],
+        "fail_count": 6,
+        "pass_count": 0,
+        "pct_of_total": 12.0,
+        "total_cases": 6
+      },
+      "book_new_reservation": {
+        "assigned_model": "base",
+        "success_rate": 0.0,
+        "failed_cases": [
+          "T8",
+          "T20",
+          "T25",
+          "T35"
+        ],
+        "passed_cases": [],
+        "fail_count": 5,
+        "pass_count": 0,
+        "pct_of_total": 10.0,
+        "total_cases": 5
+      },
+      "cancel_and_rebook_flights": {
+        "assigned_model": "base",
+        "success_rate": 0.0,
+        "failed_cases": [
+          "T7",
+          "T37",
+          "T44"
+        ],
+        "passed_cases": [],
+        "fail_count": 5,
+        "pass_count": 0,
+        "pct_of_total": 10.0,
+        "total_cases": 5
+      }
+    }
+  }
+]

@@ -1,0 +1,54 @@
+{
+  "attempt": 4,
+  "top5": [
+    {
+      "skill_id": 2,
+      "skill_name": "Tool calling precision",
+      "coverage": 69,
+      "covered_tasks": [
+        "A12","A14","A15","A16","A17","A18","A20","A21","A22","A23","A24","A25","A29","A32","A33",
+        "A35","A37","A38","A7","A8",
+        "R1","R100","R101","R102","R106","R107","R109","R110","R111","R112",
+        "R16","R21","R22","R23","R25","R27","R28","R29","R30","R33","R34","R36","R39",
+        "R41","R42","R44","R46","R47","R49","R5","R52","R6","R60","R64","R66",
+        "R7","R71","R72","R79","R80","R82","R83","R8","R9","R91","R92","R93","R97","R99"
+      ]
+    },
+    {
+      "skill_id": 4,
+      "skill_name": "Precondition verification",
+      "coverage": 28,
+      "covered_tasks": [
+        "A10","A11","A13","A19","A26","A27","A30","A31","A36","A38","A39","A43","A47","A49","A7",
+        "R10","R12","R101","R106","R107","R36","R37","R57","R59","R74","R82","R83","R90"
+      ]
+    },
+    {
+      "skill_id": 1,
+      "skill_name": "Structured data reasoning",
+      "coverage": 20,
+      "covered_tasks": [
+        "A15","A16","A18","A42","A44",
+        "R1","R112","R21","R29","R3","R30","R34","R4","R52","R64","R9","R91","R92","R93","R99"
+      ]
+    },
+    {
+      "skill_id": 5,
+      "skill_name": "Numerical reasoning",
+      "coverage": 19,
+      "covered_tasks": [
+        "A12","A14","A16","A2","A20","A23","A24","A25","A27","A35","A38",
+        "R16","R28","R44","R45","R46","R47","R49","R59"
+      ]
+    },
+    {
+      "skill_id": 3,
+      "skill_name": "Multi-step completion",
+      "coverage": 16,
+      "covered_tasks": [
+        "A21","A22","A23","A29","A33","A41","A42","A44","A7","A9",
+        "R102","R104","R31","R56","R62","R65"
+      ]
+    }
+  ]
+}

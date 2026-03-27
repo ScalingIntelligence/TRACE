@@ -24,7 +24,10 @@ orchestrator:
 
   routing_strategy: per_conversation
   routing_mode: classifier
-  routing_topk: 1
+  routing_topk: null
+  classifier_temperature: 1.0
+  is_weighted: true
+  routing_topp: 0.8
   routing_context_window: 10
 
   skills:

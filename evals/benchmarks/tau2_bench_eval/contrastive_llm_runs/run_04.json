@@ -1,0 +1,41 @@
+{
+  "attempt": 4,
+  "skills": [
+    {
+      "name": "Policy Boundary Enforcement",
+      "description": "The agent fails to hold firm to eligibility rules when processing requests: it approves cancellations, refunds, or modifications that do not meet stated preconditions, especially when users apply emotional pressure, make false claims, or express frustration. This includes acting on unverified user assertions (e.g., claimed insurance, claimed flight status) and yielding to urgency instead of checking whether the action is actually permitted.",
+      "covered_tasks": ["A-2", "A-7", "A-9", "A-10", "A-12", "A-13", "A-15", "A-26", "A-30", "A-31", "A-36", "A-38", "A-39", "A-41", "A-43", "A-47", "A-49", "R-51", "R-83", "R-90", "R-92"],
+      "reasoning": "Across both domains the agent executes actions that violate clearly stated eligibility criteria, either because it trusts user claims without verification or because it capitulates to emotional or persistent pressure rather than applying the rule consistently."
+    },
+    {
+      "name": "Precise Attribute Matching Under Preferences",
+      "description": "When a user specifies multiple constraints on a target item or option (e.g., color, size, capacity, CPU, water-resistance, power source preference order), the agent selects a variant that satisfies only some of those constraints or picks the wrong item entirely. The agent also sometimes executes the correct action type (exchange vs. return vs. modify) on the wrong item.",
+      "covered_tasks": ["A-16", "A-32", "A-33", "A-35", "R-1", "R-4", "R-5", "R-6", "R-7", "R-8", "R-9", "R-49", "R-52", "R-60", "R-64", "R-74", "R-93", "R-97"],
+      "reasoning": "In both domains the agent consistently loses track of one or more user-specified attribute constraints when choosing among multiple options, producing outcomes that technically resemble what was asked but differ in a critical dimension the user had specified."
+    },
+    {
+      "name": "Multi-step Conditional Branch Tracking",
+      "description": "When a user specifies a conditional action plan ('if X, do Y; otherwise do Z') or chains multiple dependent operations across several turns, the agent fails to correctly maintain and execute the correct branch. It either flattens all conditions into the first branch, forgets a later branch, or executes operations in the wrong order that invalidates subsequent steps.",
+      "covered_tasks": ["A-21", "A-22", "A-29", "A-42", "A-44", "R-56", "R-57", "R-66", "R-76", "R-99", "R-100", "R-104", "R-107"],
+      "reasoning": "Across airline (multi-reservation filter-then-act flows) and retail (conditional exchange/return/cancel chains), the agent loses track of the conditional structure the user established, executing the wrong branch or missing a necessary step after a tool call changes the state."
+    },
+    {
+      "name": "Numerical Calculation and Disclosure",
+      "description": "The agent produces or omits incorrect numerical totals that it is required to communicate: total refund amounts, total savings, remaining balances, specific charges to individual payment methods, or counts of available items. These errors occur both when amounts need to be summed across multiple records and when a single price difference is computed.",
+      "covered_tasks": ["A-7", "A-11", "A-14", "A-18", "A-23", "R-3", "R-16", "R-19", "R-21", "R-28", "R-34", "R-39", "R-44", "R-45", "R-46", "R-47", "R-67"],
+      "reasoning": "In both airline (aggregate savings, per-card charges, compensation amounts) and retail (total refund across orders, price differences, available variant counts), the agent either computes the wrong figure or fails to disclose the value the evaluation requires."
+    },
+    {
+      "name": "Cross-Record Information Retrieval",
+      "description": "When fulfilling a request requires information that exists in a different record than the one the user mentions (e.g., an address stored in another order, a delayed flight reservation the user does not specify by ID, or finding which order contains a particular item), the agent does not proactively search across all user records and instead either fails to locate the needed data or uses the wrong record as its reference.",
+      "covered_tasks": ["A-38", "A-43", "R-22", "R-25", "R-54", "R-67", "R-82", "R-83", "R-97", "R-101", "R-102", "R-109", "R-110", "R-111", "R-112"],
+      "reasoning": "Across both domains, when the answer to 'which record' or 'what address/flight' is implicit rather than stated, the agent fails to enumerate and inspect all user records to find the right one, leading to acting on the wrong record or abandoning the task."
+    },
+    {
+      "name": "Graceful Partial Failure Recovery",
+      "description": "When one step in a multi-step request encounters a hard block (unsupported refund method, undelivered item, wrong order ID, no matching item), the agent escalates to a human transfer or abandons remaining achievable sub-tasks rather than completing the parts it can and clearly explaining the constraint on the blocked part.",
+      "covered_tasks": ["R-12", "R-36", "R-47", "R-51", "R-83", "R-106", "R-107"],
+      "reasoning": "In retail scenarios where a single sub-request fails, the agent treats the failure as terminal and transfers or stops rather than completing the remaining valid sub-requests and communicating what it could not do and why."
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "attempt": 2,
+  "top5": [
+    {
+      "skill_id": 4,
+      "skill_name": "Precondition verification",
+      "coverage": 11,
+      "covered_tasks": ["A26", "A27", "A30", "A31", "A36", "A38", "A39", "A43", "A47", "A49", "R62"]
+    },
+    {
+      "skill_id": 1,
+      "skill_name": "Structured data reasoning",
+      "coverage": 11,
+      "covered_tasks": ["A35", "R52", "R64", "R65", "R79", "R80", "R82", "R83", "R93", "R99", "R106"]
+    },
+    {
+      "skill_id": 2,
+      "skill_name": "Tool calling precision",
+      "coverage": 9,
+      "covered_tasks": ["A29", "A32", "A33", "R60", "R74", "R90", "R91", "R107", "R112"]
+    },
+    {
+      "skill_id": 6,
+      "skill_name": "Record discovery",
+      "coverage": 9,
+      "covered_tasks": ["A41", "R54", "R71", "R72", "R97", "R101", "R102", "R109", "R111"]
+    },
+    {
+      "skill_id": 8,
+      "skill_name": "Conditional/state reasoning",
+      "coverage": 5,
+      "covered_tasks": ["R56", "R57", "R66", "R76", "R100"]
+    }
+  ]
+}

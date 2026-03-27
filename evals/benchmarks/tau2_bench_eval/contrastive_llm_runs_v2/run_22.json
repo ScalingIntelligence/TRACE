@@ -1,0 +1,511 @@
+{
+  "attempt": 22,
+  "assignments": {
+    "A2": {
+      "skills": ["S2", "S4"],
+      "notes": "Issued travel certificate with wrong amount (send_certificate failed). Agent acted on compensation without verifying correct policy amount — precondition check on certificate value failed, then used wrong argument."
+    },
+    "A7": {
+      "skills": ["S4", "S8"],
+      "notes": "Basic economy reservation — tried to upgrade it first then cancel, but policy prohibits upgrading basic economy. Failed to check precondition that basic economy is non-modifiable. Both cancel actions also failed, indicating wrong order/state reasoning."
+    },
+    "A8": {
+      "skills": ["S2", "S1"],
+      "notes": "book_reservation failed: needed to replicate exact prior flight (same flight number, same passengers), but agent constructed wrong arguments — failed to cross-reference prior trip data correctly from structured reservation record."
+    },
+    "A9": {
+      "skills": ["S3"],
+      "notes": "Agent got distracted by repetitive flattery prompts ('most lenient agent') and looped without completing the multi-step task (cancel IFOYYZ, cancel NQNU5R, change M20IZO). Hit max_steps — dropped subtasks due to social engineering derailment."
+    },
+    "A10": {
+      "skills": ["S2"],
+      "notes": "DB failed but communicate passed. Flight reschedule + cabin upgrade succeeded in DB check but action_checks show no failures — likely wrong payment method or amount argument in update_reservation_flights."
+    },
+    "A11": {
+      "skills": ["S4", "S7"],
+      "notes": "DB passed but communicate failed. Correctly updated the reservation, but failed to communicate the required refund amount to the user. Also initially tried wrong approach (update_reservation_passengers) before using update_reservation_flights — didn't check that passenger removal requires full flight update."
+    },
+    "A12": {
+      "skills": ["S1", "S2"],
+      "notes": "search_direct_flight called with wrong args twice (wrong route segments for a multi-leg BOS→MSP trip). Calculate also failed. Agent misread structured reservation data to determine correct search parameters."
+    },
+    "A13": {
+      "skills": ["S4", "S8"],
+      "notes": "Agent transferred to human immediately — failed to check that the task (change return flight from ATL to LAX to ATL→LAS nonstop) was actually feasible without transfer. Wrong state assessment, acted on transfer_to_human incorrectly."
+    },
+    "A14": {
+      "skills": ["S3", "S2"],
+      "notes": "Two failed actions: cancel then re-book (cheapest business round trip). Multi-step: needed to cancel existing reservation then book new one. Agent used wrong reservation/flights in book_reservation arguments."
+    },
+    "A15": {
+      "skills": ["S1", "S2"],
+      "notes": "update_reservation_flights failed — user wanted cheapest economy on day after original reservation. Agent searched correct route but selected wrong flight or date, failing to correctly identify 'day after' from structured date data."
+    },
+    "A16": {
+      "skills": ["S1", "S2"],
+      "notes": "Same pattern as A15 (same user, same task variant). update_reservation_flights failed — wrong flight selection when finding cheapest economy option on next day."
+    },
+    "A17": {
+      "skills": ["S2", "S4"],
+      "notes": "update_reservation_baggages failed — agent updated flights and passengers correctly but used wrong payment_id for baggage (charged credit card instead of gift card as requested). Failed to honor stated payment preference precondition."
+    },
+    "A18": {
+      "skills": ["S2", "S7"],
+      "notes": "All five update_reservation_flights calls failed + communicate check for '23553' missed. Agent could not correctly construct downgrade call (wrong flights/payment combination) and failed to communicate total refund amount."
+    },
+    "A19": {
+      "skills": ["S8", "S2"],
+      "notes": "cancel_reservation failed — agent cancelled the full reservation but task required only changing the return flight leg. Wrong API for the state (should have used update_reservation_flights, not cancel). Also conditional logic: change to later same-day flight if available, else next-day earliest."
+    },
+    "A20": {
+      "skills": ["S2", "S1"],
+      "notes": "book_reservation failed — complex booking with 3 bags, 2 certificates, no insurance, depart-after constraint. Agent failed to construct correct arguments (wrong payment split across certificates, or wrong passenger data from structured profile)."
+    },
+    "A21": {
+      "skills": ["S3", "S1"],
+      "notes": "update_reservation_flights failed (wrong return flight — agent picked wrong 'fastest' flight), update_reservation_baggages also failed. Multi-step: change return + add bag. Agent misidentified the fastest return from structured flight data."
+    },
+    "A22": {
+      "skills": ["S3", "S2"],
+      "notes": "All three update actions failed: flights, passengers, baggages. Multi-step modification (passenger change + cabin upgrade + add bags) with payment constraint. Agent could not complete any sub-steps correctly."
+    },
+    "A23": {
+      "skills": ["S1", "S7"],
+      "notes": "cancel then re-book for cheapest business round trip. Re-book failed repeatedly — agent could not identify cheapest business option by cross-referencing flight data. Also missed communicating balance of '327' (certificate/gift card balance)."
+    },
+    "A24": {
+      "skills": ["S4", "S2"],
+      "notes": "book_reservation failed — user wanted to remove a passenger (Ethan) from H9ZU1C but agent booked a completely new reservation instead of updating the existing one. Didn't check precondition for correct update path; used wrong tool."
+    },
+    "A25": {
+      "skills": ["S1", "S2"],
+      "notes": "book_reservation failed — needed to replicate user's existing reservation for friend Ivan Smith. Agent failed to correctly copy all structured details (flight numbers, dates, cabin, baggage) into the new booking."
+    },
+    "A26": {
+      "skills": ["S4"],
+      "notes": "Cancelled basic economy reservation and issued refund — but basic economy is non-refundable (no travel insurance). Agent failed to check refund eligibility precondition for basic economy class."
+    },
+    "A27": {
+      "skills": ["S2", "S4"],
+      "notes": "send_certificate failed — flight was delayed so agent should offer compensation, but used wrong amount. Failed to verify the correct compensation amount before issuing certificate."
+    },
+    "A29": {
+      "skills": ["S1", "S2"],
+      "notes": "update_reservation_flights failed — needed nonstop DTW→JFK arriving before 7am. Agent found correct flights but constructed wrong update arguments. update_reservation_baggages also failed."
+    },
+    "A30": {
+      "skills": ["S2", "S8"],
+      "notes": "update_reservation_flights failed — reservation already had nonstop flight HAT266 but agent re-submitted it anyway or with wrong args. Should have verified current state before updating."
+    },
+    "A31": {
+      "skills": ["S4", "S2"],
+      "notes": "Basic economy — user wanted to modify flight date, but agent updated it without checking that basic economy is non-modifiable. Action match shows no expected actions recorded but DB failed."
+    },
+    "A32": {
+      "skills": ["S2"],
+      "notes": "update_reservation_flights failed twice — nonstop EWR→LAX exists (HAT041) but agent could not construct the correct update call despite finding the flight via search."
+    },
+    "A33": {
+      "skills": ["S1", "S2"],
+      "notes": "search_direct_flight failed for return leg (SFO→IAH). update_reservation_flights failed. Agent misidentified the correct nonstop return flight from structured data and submitted wrong flight in update."
+    },
+    "A35": {
+      "skills": ["S4", "S3"],
+      "notes": "Agent cancelled flight (JFK→MCO) but then booked a new unrelated flight. Task was only cancel — agent added unrequested booking. Didn't verify preconditions for whether any new booking was needed."
+    },
+    "A36": {
+      "skills": ["S4"],
+      "notes": "Basic economy — user wanted date change, which is prohibited for basic economy. Agent changed it anyway without checking the policy precondition. DB failed because the change should not have been made."
+    },
+    "A37": {
+      "skills": ["S1", "S2"],
+      "notes": "Two search_direct_flight calls failed for the upgrade target (M20IZO to business class). Agent could not correctly identify correct flight segments to use in update_reservation_flights despite cancelling the other two reservations correctly."
+    },
+    "A38": {
+      "skills": ["S6", "S2"],
+      "notes": "get_reservation_details failed — agent could not find the correct delayed reservation (looked up wrong reservation_id for noah_muller). Also send_certificate wrong amount. Record discovery failure then wrong argument."
+    },
+    "A39": {
+      "skills": ["S4"],
+      "notes": "Agent cancelled all reservations correctly but issued unsolicited travel certificates for each. Task was just to cancel — agent performed extra unrequested action (certificate issuance) violating precondition of only doing what was asked."
+    },
+    "A41": {
+      "skills": ["S6", "S3"],
+      "notes": "Agent only cancelled reservation 8C8K4E. User said 'cancel all upcoming flights' — had multiple reservations. Agent failed to retrieve and cancel all (got_reservation_details failed for several IDs). Incomplete multi-step."
+    },
+    "A42": {
+      "skills": ["S3", "S5"],
+      "notes": "max_steps — agent got lost searching through many reservations to find DFW→JFK on May 17. Failed to systematically enumerate all reservations and identify the right one; then payment calculation failed (paid $103 but total was $283)."
+    },
+    "A43": {
+      "skills": ["S4", "S8"],
+      "notes": "Agent cancelled D1EW9B (ATL→JFK) which user said to cancel, but DB still failed. Likely wrong precondition — basic economy is non-refundable, so refund of $54 was incorrect. State-aware reasoning failure."
+    },
+    "A44": {
+      "skills": ["S1", "S3"],
+      "notes": "max_steps — complex task: cancel reservations with flights >4h, upgrade reservations with flights <=3h. Agent had to compute flight durations from structured data for multiple reservations and act correctly on each — failed to complete all steps."
+    },
+    "A47": {
+      "skills": ["S4"],
+      "notes": "Agent cancelled H8Q05L and issued full refund citing travel insurance — but reservation was basic economy. Basic economy with insurance may still have restrictions. Agent failed to correctly apply policy precondition on refund eligibility."
+    },
+    "A49": {
+      "skills": ["S4"],
+      "notes": "Agent cancelled correctly using travel insurance, but then issued an unsolicited $100 travel certificate 'as goodwill'. Extra unrequested action — failed to check that no certificate was requested."
+    },
+    "R1": {
+      "skills": ["S2"],
+      "notes": "exchange_delivered_order_items failed — found correct items but constructed wrong exchange arguments (likely wrong item_ids or payment method)."
+    },
+    "R3": {
+      "skills": ["S7", "S6"],
+      "notes": "Failed to communicate count of 10 t-shirt options. Also get_product_details failed early (missed a product variant). Information communication failure: agent counted incorrectly."
+    },
+    "R4": {
+      "skills": ["S1", "S2"],
+      "notes": "Multiple get_order_details failures — agent searched wrong orders. modify_pending_order_items also failed. Agent could not enumerate all orders correctly to find the right ones to modify."
+    },
+    "R5": {
+      "skills": ["S2", "S4"],
+      "notes": "return_delivered_order_items used instead of exchange — task was to exchange water bottle and desk lamp. Wrong tool selected. find_user_id failed first (wrong name/zip search)."
+    },
+    "R6": {
+      "skills": ["S2"],
+      "notes": "exchange_delivered_order_items failed with correct items found. Wrong arguments constructed for exchange call (likely wrong payment_id or item_ids)."
+    },
+    "R7": {
+      "skills": ["S2"],
+      "notes": "Same as R6 — exchange_delivered_order_items failed despite correct item lookup."
+    },
+    "R8": {
+      "skills": ["S2"],
+      "notes": "Same as R6/R7 — exchange_delivered_order_items failed despite correct item lookup."
+    },
+    "R9": {
+      "skills": ["S6", "S2"],
+      "notes": "get_order_details failed — agent looked up wrong order to find water bottle. get_product_details failed too. Then exchange_delivered_order_items failed. Record discovery failure led to wrong item being processed."
+    },
+    "R10": {
+      "skills": ["S4", "S8"],
+      "notes": "transfer_to_human_agents used — but task required cross-order refund swap (refund each order to the other's payment method). Agent transferred instead of attempting. Policy: refund must go to original payment — should have recognized this as infeasible and communicated, not transferred."
+    },
+    "R12": {
+      "skills": ["S4", "S8"],
+      "notes": "Payment method error: agent tried to refund to PayPal but original payment was different. transfer_to_human_agents incorrectly triggered. Failed to check precondition that refund must use original payment method."
+    },
+    "R16": {
+      "skills": ["S5", "S3"],
+      "notes": "calculate failed, cancel_pending_order and return_delivered_order_items failed. Failed to compute correct total refund of $8276.23. Multi-step: cancel orders + return watch, needed correct arithmetic."
+    },
+    "R19": {
+      "skills": ["S7", "S1"],
+      "notes": "DB passed but communicate failed: missed communicating savings amount of $41.64 for exchange option. get_order_details failed for one order. Failed to retrieve all order data and communicate both savings figures."
+    },
+    "R20": {
+      "skills": ["S2", "S3"],
+      "notes": "modify_pending_order_items failed and get_order_details failed for second order. Multi-step upgrade across two orders — agent completed first order but failed on second."
+    },
+    "R21": {
+      "skills": ["S6", "S5"],
+      "notes": "Item ID 4107812777 not found — agent searched wrong product. calculate also failed. Failed to discover the correct item record, then arithmetic for price difference was wrong."
+    },
+    "R22": {
+      "skills": ["S6", "S3"],
+      "notes": "Multiple 'User not found' errors — agent kept using wrong identity lookup. All subsequent actions failed. Multi-step address update completely blocked by record discovery failure."
+    },
+    "R23": {
+      "skills": ["S2"],
+      "notes": "modify_pending_order_items failed at the end — helmet and luggage exchanges succeeded but the pending order item modification failed with wrong arguments."
+    },
+    "R24": {
+      "skills": ["S7"],
+      "notes": "DB passed but communicate failed: agent did not communicate that one t-shirt was polyester. Task asked for t-shirt material details — information communication incomplete."
+    },
+    "R25": {
+      "skills": ["S6", "S3"],
+      "notes": "get_order_details failed for one order — agent missed finding all orders. Return was incomplete because one order was not retrieved. Multi-step return of multiple items from different orders."
+    },
+    "R27": {
+      "skills": ["S8", "S4"],
+      "notes": "exchange_delivered_order_items failed: 'Non-delivered order cannot be exchanged'. Agent tried to exchange hiking boots from a non-delivered order without checking delivery status precondition."
+    },
+    "R28": {
+      "skills": ["S3", "S5"],
+      "notes": "Multiple return failures across orders, calculate failed. Total refund of $918.43 not communicated. Multi-order return with cross-order item selection — agent completed some returns but missed items/orders."
+    },
+    "R29": {
+      "skills": ["S2"],
+      "notes": "Second exchange_delivered_order_items failed — first skateboard exchange succeeded but garden hose exchange failed with wrong arguments."
+    },
+    "R30": {
+      "skills": ["S6", "S7"],
+      "notes": "get_order_details and get_product_details failed for tablet order. Tracking number 746342064230 not communicated. Agent found wrong order, return_delivered_order_items failed accordingly."
+    },
+    "R31": {
+      "skills": ["S6"],
+      "notes": "max_steps — 'lost tablet order' task. Agent could not find the correct order with the tablet despite iterating. Record discovery failure looped."
+    },
+    "R33": {
+      "skills": ["S6"],
+      "notes": "get_order_details failed twice — wrong order IDs retrieved. Agent couldn't find the correct orders to cancel (office gear orders vs. hiking gear). Record discovery failure — correct cancel happened but missed identifying the hiking-specific exclusion."
+    },
+    "R34": {
+      "skills": ["S6", "S7"],
+      "notes": "get_order_details failed twice and modify_pending_order_address failed. Tracking number 1093.34 not communicated. Similar to R33 — wrong orders retrieved."
+    },
+    "R36": {
+      "skills": ["S4", "S8"],
+      "notes": "Transferred to human — payment split task (card has $1131, total $1160+). Agent should have removed most expensive item (camera, $481.50) from pending order. Failed to apply conditional logic: if payment insufficient, remove most expensive item."
+    },
+    "R37": {
+      "skills": ["S8", "S2"],
+      "notes": "modify_pending_order_items failed — same payment-split scenario. Agent found correct item (camera, $481.50) but constructed wrong modification arguments."
+    },
+    "R39": {
+      "skills": ["S6", "S7"],
+      "notes": "User not found errors (multiple lookup failures). modify_user_address failed. Couldn't communicate amount of $46.66 savings. Record discovery failure blocked all subsequent actions."
+    },
+    "R41": {
+      "skills": ["S6", "S3"],
+      "notes": "User not found + Order not found errors. modify_pending_order_address failed twice (wrong order found). Multi-step: puzzle swap + address correction. Failed to retrieve correct user/order records."
+    },
+    "R42": {
+      "skills": ["S6", "S3"],
+      "notes": "Same as R41 — modify_pending_order_address failed twice. Multi-step address + item change; wrong orders retrieved."
+    },
+    "R44": {
+      "skills": ["S5", "S7"],
+      "notes": "calculate failed, modify_pending_order_items failed. Failed to compute correct price difference ($17.99 not communicated). Arithmetic error in computing refund for desk lamp downgrade."
+    },
+    "R45": {
+      "skills": ["S7", "S6"],
+      "notes": "DB passed but communicate failed: didn't communicate savings of $9.89. Order not found error (searched wrong order ID format). Failed to report price difference."
+    },
+    "R46": {
+      "skills": ["S6", "S5"],
+      "notes": "get_order_details failed twice, calculate failed. Two refund amounts ($1126.04 and $1497.65) not communicated. Agent found wrong orders, then arithmetic on refund failed."
+    },
+    "R47": {
+      "skills": ["S6", "S5"],
+      "notes": "Same as R46 — get_order_details failed, calculate failed, transferred to human. Could not find air purifier + vacuum order."
+    },
+    "R49": {
+      "skills": ["S5", "S2"],
+      "notes": "calculate failed for price comparison, exchange_delivered_order_items failed. Needed to find cheapest earbuds from same order matching criteria — arithmetic failure and wrong exchange arguments."
+    },
+    "R51": {
+      "skills": ["S6", "S8"],
+      "notes": "get_product_details and get_user_details failed, return failed. Agent looked at pending order instead of delivered order for camera. Wrong order state assessment."
+    },
+    "R52": {
+      "skills": ["S2"],
+      "notes": "exchange_delivered_order_items failed — found camera with max zoom but constructed wrong exchange call arguments."
+    },
+    "R54": {
+      "skills": ["S6", "S3"],
+      "notes": "User not found errors throughout. Agent completely blocked — could not retrieve user identity, so could not enumerate orders to cancel/exchange. Multi-step task with identity lookup failure."
+    },
+    "R56": {
+      "skills": ["S6"],
+      "notes": "max_steps — agent could not find air purifier order for Ivan Hernandez. Record discovery failure looped."
+    },
+    "R57": {
+      "skills": ["S8", "S4"],
+      "notes": "Cancelled entire order instead of just cancelling the air purifier item. Task had conditional: if not shipped, cancel air purifier; if impossible, cancel whole order. Agent went straight to full cancellation without checking if item-level cancel was possible."
+    },
+    "R59": {
+      "skills": ["S5", "S3"],
+      "notes": "calculate failed, cancel_pending_order failed for older order. Multi-step: conditionally cancel older order if can't process in 5 days + address update. Arithmetic for payment and wrong cancellation."
+    },
+    "R60": {
+      "skills": ["S2"],
+      "notes": "modify_pending_order_items failed — found correct blue no-water-resistance earbuds ($242.92) but wrong modification arguments."
+    },
+    "R62": {
+      "skills": ["S4"],
+      "notes": "max_steps — agent tried to answer poetry question instead of refusing and redirecting to order support. Failed to apply precondition that out-of-scope requests should be declined."
+    },
+    "R64": {
+      "skills": ["S8", "S4"],
+      "notes": "exchange_delivered_order_items failed ('Non-delivered order cannot be exchanged'), then agent used modify_pending_order_items on a delivered order. Wrong API for order state."
+    },
+    "R65": {
+      "skills": ["S8"],
+      "notes": "max_steps — agent tried to exchange bookshelf for camera (cross-category swap not allowed). Failed to recognize that item exchange must be within same product category."
+    },
+    "R66": {
+      "skills": ["S8", "S4"],
+      "notes": "cancel_pending_order failed ('Non-delivered order cannot be returned'). Task was to change luggage color in pending order — agent tried wrong action (return instead of modify)."
+    },
+    "R67": {
+      "skills": ["S6", "S7"],
+      "notes": "DB passed but communicate failed: didn't communicate $829.43 order total. Multiple 'User not found' errors for 'Noah (NoNo)' lookup — couldn't map nickname to user ID."
+    },
+    "R71": {
+      "skills": ["S3", "S2"],
+      "notes": "modify_pending_order_address failed — address update not applied before item modification. Multi-step: address first, then item change. Agent completed item but address failed with wrong arguments."
+    },
+    "R72": {
+      "skills": ["S3", "S2"],
+      "notes": "Both modify_pending_order_address and modify_pending_order_items failed. Multi-step address + desk lamp + backpack update — agent failed both address and item modification."
+    },
+    "R74": {
+      "skills": ["S8", "S4"],
+      "notes": "cancel_pending_order and modify_pending_order_items both failed. Laptop was in delivered order — agent tried to cancel instead of exchange. Wrong API for order state (delivered, not pending)."
+    },
+    "R76": {
+      "skills": ["S2", "S3"],
+      "notes": "too_many_errors — exchange call mismatches (item count mismatch, same item_id). Agent couldn't correctly construct fleece jacket removal + address change. Multi-step modification with persistent argument errors."
+    },
+    "R79": {
+      "skills": ["S8", "S4"],
+      "notes": "modify_pending_order_items failed ('Non-delivered order cannot be exchanged'). Pending order — agent used exchange instead of modify. Wrong API for order state."
+    },
+    "R80": {
+      "skills": ["S3", "S6"],
+      "notes": "exchange_delivered_order_items failed — user was ambiguous about t-shirt specs. Agent got lost in conversational tangents and failed to identify the correct item to exchange. Record discovery + incomplete task."
+    },
+    "R82": {
+      "skills": ["S4", "S8"],
+      "notes": "Payment method error: tried to refund more expensive tablet to credit card but original payment was different. Transferred to human. Failed to check return payment precondition."
+    },
+    "R83": {
+      "skills": ["S4"],
+      "notes": "Same as R82 — return_delivered_order_items failed with 'Payment method should be the original payment method'. Agent tried to honor user preference over policy."
+    },
+    "R90": {
+      "skills": ["S8", "S4"],
+      "notes": "Cancelled entire order instead of just checking camera zoom feature. Task was information lookup then conditional cancel — agent went straight to full cancellation without answering the zoom question first."
+    },
+    "R91": {
+      "skills": ["S2", "S3"],
+      "notes": "exchange_delivered_order_items failed — agent returned skateboards and smart watch correctly but exchange call for remaining items failed. Multi-step return + exchange; exchange arguments wrong."
+    },
+    "R92": {
+      "skills": ["S3", "S4"],
+      "notes": "return_delivered_order_items for second skateboard failed. Also added smart watch to return which was not requested. Multi-step: only return the 2 skateboards, not other items."
+    },
+    "R93": {
+      "skills": ["S2"],
+      "notes": "exchange_delivered_order_items failed — found correct 15-inch i7 8GB 1TB laptop but wrong exchange arguments (wrong item_id or payment method)."
+    },
+    "R97": {
+      "skills": ["S3", "S2"],
+      "notes": "modify_pending_order_address and modify_pending_order_items both failed. Multi-step: speaker exchange + address change. Agent verbally confirmed but then failed to execute both actions."
+    },
+    "R99": {
+      "skills": ["S4", "S2"],
+      "notes": "exchange_delivered_order_items failed for bicycle ('Non-delivered order') and jigsaw (same item_id error). Agent didn't check delivery status before attempting exchange. Also camera exchange had wrong arguments."
+    },
+    "R100": {
+      "skills": ["S8", "S4"],
+      "notes": "modify_pending_order_items on already-modified order ('Non-pending order cannot be modified'). Luggage exchange succeeded but skateboard modification failed because order state changed. Wrong API for updated state."
+    },
+    "R101": {
+      "skills": ["S3", "S2"],
+      "notes": "modify_pending_order_address, then two modify_pending_order_items failed. Transferred to human. Multi-step: address + watch swap + air purifier exchange — all failed."
+    },
+    "R102": {
+      "skills": ["S3", "S2"],
+      "notes": "modify_pending_order_address failed + modify_pending_order_items failed + exchange_delivered_order_items failed. Three-part task: address change + pending item swap + delivered item exchange — all three wrong."
+    },
+    "R103": {
+      "skills": ["S7"],
+      "notes": "DB passed but communicate failed: didn't communicate tracking number 286422338955 for the return. Action was correct, just omitted the required information."
+    },
+    "R104": {
+      "skills": ["S6", "S3"],
+      "notes": "max_steps — Order not found errors. Agent could not find bookshelves and jigsaw puzzles from two different orders. Record discovery failure; multi-step return incomplete."
+    },
+    "R106": {
+      "skills": ["S6", "S4"],
+      "notes": "User not found errors — agent couldn't authenticate. exchange_delivered_order_items blocked. T-shirt exchange impossible because identity lookup failed repeatedly."
+    },
+    "R107": {
+      "skills": ["S8", "S4"],
+      "notes": "exchange_delivered_order_items failed ('Non-pending order cannot be modified' + 'Some item not found'). Wrong API for delivered order state. Also couldn't find item — record lookup and state-awareness both failed."
+    },
+    "R109": {
+      "skills": ["S3", "S2"],
+      "notes": "modify_pending_order_address failed, modify_user_address failed, modify_pending_order_items failed. Three-part task: order address + default address + tablet exchange — all three failed with wrong arguments."
+    },
+    "R110": {
+      "skills": ["S3", "S2"],
+      "notes": "modify_pending_order_address failed + modify_pending_order_items failed. Address + tablet exchange both failed with wrong arguments despite correct item lookup."
+    },
+    "R111": {
+      "skills": ["S6", "S2"],
+      "notes": "Item 1355937109 not found + Non-delivered order cannot be exchanged. Agent tried to exchange item not in the order and wrong order state. Record discovery failure."
+    },
+    "R112": {
+      "skills": ["S2", "S3"],
+      "notes": "modify_pending_order_items failed twice. Multi-step order modification with wrong item arguments both times."
+    }
+  },
+  "skill_summary": {
+    "S1": {
+      "label": "Structured data reasoning",
+      "airline_count": 9,
+      "retail_count": 5,
+      "total": 14,
+      "top_tasks": ["A8", "A12", "A15", "A16", "A23", "A25", "A33", "A44", "R4", "R19", "R21"],
+      "pattern": "Fails to correctly parse or cross-reference structured data from tool results — wrong flight numbers from reservation details, wrong order IDs, wrong item counts from product listings"
+    },
+    "S2": {
+      "label": "Tool calling precision",
+      "airline_count": 20,
+      "retail_count": 28,
+      "total": 48,
+      "top_tasks": ["A2", "A8", "A12", "A14", "A15", "A18", "A20", "A22", "A23", "A24", "A25", "A27", "A29", "A32", "A33", "R1", "R6", "R7", "R8", "R23", "R29", "R37", "R52", "R60", "R71", "R72", "R91", "R93", "R109", "R110", "R112"],
+      "pattern": "Most frequent failure: right tool selected but wrong arguments — wrong payment_id, wrong item_ids, wrong flight arrays, wrong cabin class, wrong passenger list in update/exchange/book calls"
+    },
+    "S3": {
+      "label": "Multi-step task completion",
+      "airline_count": 7,
+      "retail_count": 20,
+      "total": 27,
+      "top_tasks": ["A9", "A14", "A21", "A22", "A35", "A41", "A44", "R16", "R20", "R25", "R28", "R33", "R41", "R42", "R54", "R59", "R71", "R72", "R80", "R92", "R97", "R101", "R102", "R104", "R109", "R110", "R112"],
+      "pattern": "Drops sub-tasks or completes them in wrong order — cancels without re-booking, updates one order but not another, misses last step in multi-part requests"
+    },
+    "S4": {
+      "label": "Precondition verification",
+      "airline_count": 15,
+      "retail_count": 13,
+      "total": 28,
+      "top_tasks": ["A7", "A13", "A17", "A24", "A26", "A31", "A35", "A36", "A39", "A43", "A47", "A49", "R5", "R10", "R12", "R27", "R36", "R57", "R62", "R82", "R83", "R90", "R92", "R99"],
+      "pattern": "Acts without verifying conditions: exchanges/cancels non-refundable basic economy, applies refund to wrong payment method, issues unsolicited certificates, uses exchange for non-delivered orders, ignores that task is complete"
+    },
+    "S5": {
+      "label": "Numerical reasoning",
+      "airline_count": 1,
+      "retail_count": 8,
+      "total": 9,
+      "top_tasks": ["A42", "R16", "R28", "R44", "R46", "R47", "R49", "R59"],
+      "pattern": "Arithmetic errors in price difference calculations, total refund amounts, or payment splits — calculate tool fails or produces wrong output"
+    },
+    "S6": {
+      "label": "Record discovery and retrieval",
+      "airline_count": 4,
+      "retail_count": 22,
+      "total": 26,
+      "top_tasks": ["A38", "A41", "A9", "R3", "R9", "R22", "R25", "R30", "R31", "R33", "R34", "R39", "R41", "R42", "R45", "R46", "R47", "R51", "R54", "R56", "R67", "R80", "R104", "R106", "R111"],
+      "pattern": "Wrong user found, wrong order retrieved, item_id not found — agent looks up wrong record or fails identity lookup, blocking all subsequent actions"
+    },
+    "S7": {
+      "label": "Information communication",
+      "airline_count": 4,
+      "retail_count": 7,
+      "total": 11,
+      "top_tasks": ["A11", "A18", "A23", "A38", "R3", "R19", "R24", "R28", "R30", "R34", "R44", "R45", "R67", "R103"],
+      "pattern": "Right action taken, fails to state required values — tracking numbers, refund amounts, certificate balances, item material details not communicated"
+    },
+    "S8": {
+      "label": "Conditional and state-aware reasoning",
+      "airline_count": 5,
+      "retail_count": 15,
+      "total": 20,
+      "top_tasks": ["A7", "A13", "A19", "A30", "A43", "R10", "R12", "R27", "R36", "R51", "R57", "R64", "R65", "R66", "R74", "R79", "R90", "R100", "R107"],
+      "pattern": "Ignores if-then conditions or uses wrong API for current object state — uses exchange for non-delivered orders (should use modify), cancel instead of item-level modify, wrong branch of conditional logic"
+    }
+  }
+}

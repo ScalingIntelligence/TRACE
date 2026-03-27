@@ -1,0 +1,527 @@
+{
+  "attempt": 15,
+  "assignments": {
+    "A2": {
+      "skills": ["S4", "S5"],
+      "notes": "Agent offered $300 certificate (3 passengers x $100) for a 1-passenger delayed basic-economy flight that only qualifies for $50. Failed to verify passenger count and compensation policy before acting."
+    },
+    "A7": {
+      "skills": ["S3", "S4"],
+      "notes": "User requested upgrade-then-cancel on basic economy XEHM4B (not allowed) and cancel 59XX6W. Agent correctly refused XEHM4B modification but failed to cancel 59XX6W separately, leaving multi-step task incomplete."
+    },
+    "A8": {
+      "skills": ["S2", "S5"],
+      "notes": "Booking with extra passenger succeeded but DB mismatch suggests incorrect payment handling (used $500 certificate incorrectly when seat/bag cost structure required different split)."
+    },
+    "A9": {
+      "skills": ["S14", "S8"],
+      "notes": "max_steps failure. After completing the cancellation of NQNU5R the user repeatedly complimented the agent; agent kept responding to social flattery for 15+ turns instead of recognizing the conversation was complete. Context window / state management failure."
+    },
+    "A10": {
+      "skills": ["S4", "S8"],
+      "notes": "Agent upgraded cabin and changed date for IAH->SEA leg but the reservation is a round-trip: policy requires cabin changes to apply to all segments uniformly. Agent only changed the outbound leg, violating the rule that cabin class is reservation-wide."
+    },
+    "A11": {
+      "skills": ["S7", "S11"],
+      "notes": "DB=1 COMMUNICATE=0. Task required refusing passenger removal; DB succeeded. But agent downgraded entire reservation to basic economy without being explicitly authorized to do so, and failed to communicate the policy and refund amount clearly to the user."
+    },
+    "A12": {
+      "skills": ["S4", "S2"],
+      "notes": "Agent made two separate update_reservation calls to add bags and upgrade cabin, when bags should not have been reducible/changeable without a full reservation update. Violated policy that cabin upgrade applies to all passengers uniformly."
+    },
+    "A13": {
+      "skills": ["S4", "S8"],
+      "notes": "Agent changed the destination of the return segment (ATL->LAX changed to ATL->LAS), which is a change of origin/destination. Policy explicitly forbids modifying origin or destination of a reservation."
+    },
+    "A14": {
+      "skills": ["S5", "S6"],
+      "notes": "Agent found wrong reservation initially (R123456789 not found, then found K1NW8N). Payment split calculation was wrong: task required using both gift cards ($327 total) + 1 certificate ($500) + Mastercard ($44), but agent used all certificates resulting in over-coverage. Cheapest business flight logic also produced wrong route (SFO->SEA instead of correct return)."
+    },
+    "A15": {
+      "skills": ["S4", "S8"],
+      "notes": "Policy forbids changing origin/destination. Agent changed destination from PHL to EWR (treating them as interchangeable NY-area airports). This is a destination change which is not allowed."
+    },
+    "A16": {
+      "skills": ["S4", "S6"],
+      "notes": "Agent accepted user-specified 'Option 9' flights (HAT227+HAT139) without verifying these were actually the cheapest option for May 24. Agent should have found cheapest independently; instead it trusted user's claimed pricing."
+    },
+    "A17": {
+      "skills": ["S2", "S5"],
+      "notes": "Agent attempted to use gift card (balance insufficient) then fell back to credit card, but user had specified gift card payment. Agent failed to properly route the $150 bag fee to the correct payment method and confirmed the wrong payment method to user."
+    },
+    "A18": {
+      "skills": ["S3", "S6"],
+      "notes": "DB=0 COMMUNICATE=0. User asked to downgrade ALL business flights. Agent only processed one reservation (JG7FMM) but user had other business reservations. Agent failed to discover all reservations requiring downgrade and complete the full multi-reservation task."
+    },
+    "A19": {
+      "skills": ["S4"],
+      "notes": "Basic economy flights cannot be modified per policy. Agent changed the return flight (HAT207 to HAT195) on a basic economy reservation, which is not allowed."
+    },
+    "A20": {
+      "skills": ["S5", "S2"],
+      "notes": "Multiple payment errors: total price was $255 but agent tried to pay $350 (both full certificates), then $152 (only partial), then got confused about the correct split. Agent could not correctly compute certificate+credit card split to equal exact flight cost."
+    },
+    "A21": {
+      "skills": ["S8", "S3"],
+      "notes": "Agent found return flights from DEN but failed to verify they depart after the outbound arrival in DEN (same-day return). Also had a seat availability error that required a second attempt. Multi-step reasoning about flight timing ordering failed."
+    },
+    "A22": {
+      "skills": ["S3", "S4"],
+      "notes": "User wanted passenger change (not allowed), cabin upgrade, and 3 bags. Agent correctly refused passenger change, but then failed to complete the remaining valid changes (cabin upgrade + bags) as an alternative path when user abandoned the impossible request."
+    },
+    "A23": {
+      "skills": ["S5", "S2"],
+      "notes": "DB=0 COMMUNICATE=0. Complex payment calculation: agent used all three certificates ($1000+$500+$250) + gift card ($327) but incorrectly computed remainder for Mastercard. Correct split required only 1 certificate (policy). Numerical reasoning and tool call precision both failed."
+    },
+    "A24": {
+      "skills": ["S4", "S6"],
+      "notes": "Agent tried to remove a passenger (not allowed). Also had difficulty finding correct reservation for the open-ended flight booking request from NY."
+    },
+    "A25": {
+      "skills": ["S5", "S2"],
+      "notes": "Payment amount mismatch: total price was $810 but paid $658. Agent failed to correctly account for all payment sources when booking a duplicate reservation for friend."
+    },
+    "A26": {
+      "skills": ["S4", "S8"],
+      "notes": "Agent cancelled reservation 3FRNFB with refund even though the flight was not within 24h of booking and was not cancelled by airline. Cancellation criteria not met; agent failed to verify preconditions before cancelling."
+    },
+    "A27": {
+      "skills": ["S4", "S11"],
+      "notes": "User complained about delayed flight HAT039 and wanted compensation. Agent correctly identified the delay and offered $50 certificate. But when user kept pushing, agent cancelled an unrelated future reservation M61CQM instead of holding the policy line. Failed to resist social pressure."
+    },
+    "A29": {
+      "skills": ["S4", "S8"],
+      "notes": "Agent changed DTW->LGA to DTW->JFK and added a bag, but the destination changed from LGA to JFK. Policy forbids changing origin or destination of a reservation."
+    },
+    "A30": {
+      "skills": ["S4", "S2"],
+      "notes": "User asked to remove a checked bag. Policy forbids removing bags from a reservation (bags can be added but not removed). Agent incorrectly processed the bag removal in the same update_reservation call as the flight change."
+    },
+    "A31": {
+      "skills": ["S4"],
+      "notes": "Reservation DF89BM was basic economy. Basic economy flights cannot be modified. Agent changed the flight to HAT092 despite the basic economy restriction."
+    },
+    "A32": {
+      "skills": ["S4"],
+      "notes": "Reservation OWZ4XL was basic economy. Agent changed it to a nonstop flight in economy class. Basic economy cannot be modified."
+    },
+    "A33": {
+      "skills": ["S5", "S4"],
+      "notes": "Agent tried to upgrade to business but gift card balance insufficient (error). Also: the outbound/return date change was processed but DB failed. Payment calculation error when applying gift card to upgrade cost."
+    },
+    "A35": {
+      "skills": ["S4", "S8"],
+      "notes": "Agent cancelled M20IZO which is a silver-member flight without checking if cancellation with refund was actually allowed. Also appeared to book a new flight without verifying cancellation eligibility first."
+    },
+    "A36": {
+      "skills": ["S4"],
+      "notes": "Reservation EUJUY6 was basic economy. Agent changed the flight dates despite basic economy non-modifiable policy, even sympathizing with the user's situation (wife's death) and overriding the policy."
+    },
+    "A37": {
+      "skills": ["S4", "S2"],
+      "notes": "Agent cancelled IFOYYZ (basic economy, no insurance, booked more than 24h ago) which should not be cancellable with refund. Also processed M20IZO upgrade to business - DB check failed, suggesting incorrect execution of upgrade."
+    },
+    "A38": {
+      "skills": ["S4", "S5"],
+      "notes": "Agent issued $150 travel certificate to user who claimed 3 passengers on a flight that only had 2 passengers per system. Agent failed to verify the passenger count claim and issued compensation based on user's false claim."
+    },
+    "A39": {
+      "skills": ["S4", "S15"],
+      "notes": "User wrote in French requesting cancellation without refund. Agent cancelled all 7 reservations even though the API should not allow cancellation without refund. French-language request may have affected comprehension. Agent should have explained the policy constraint."
+    },
+    "A41": {
+      "skills": ["S4", "S2"],
+      "notes": "Agent cancelled 8C8K4E with a $5,680 refund even though the task specifies that cancellation without refund should not be allowed. The API should not permit it; agent found a way around this or misapplied the cancellation tool."
+    },
+    "A42": {
+      "skills": ["S6", "S5"],
+      "notes": "max_steps. User gave invalid order IDs (88210, 77345). Agent couldn't find them. Payment amount error when trying to book DFW->JFK. Agent failed to proactively look up all reservations to find the relevant ones and ran out of steps."
+    },
+    "A43": {
+      "skills": ["S4"],
+      "notes": "Agent cancelled D1EW9B (basic economy, ATL->JFK) with a $54 refund. Basic economy cancellations without special conditions (24h window, airline cancellation, insurance+health/weather) should not be allowed."
+    },
+    "A44": {
+      "skills": ["S3", "S1"],
+      "notes": "max_steps. Complex task: find all flights >4h, cancel those reservations; find all flights <=3h, upgrade to business where possible. Agent got partially through but timed out. Requires structured reasoning over multiple reservations and flight durations."
+    },
+    "A47": {
+      "skills": ["S4"],
+      "notes": "Insurance only covers health or weather cancellations. User wanted to cancel because flight coincides with friend's birthday. Agent cancelled with full refund despite this reason not qualifying under insurance policy."
+    },
+    "A49": {
+      "skills": ["S4", "S12"],
+      "notes": "User claimed to have insurance but reservation 3RK2T9 shows no insurance. Agent cancelled with full refund ($280) treating user's claim as valid. Agent hallucinated an insurance coverage that wasn't in the system data."
+    },
+    "R1": {
+      "skills": ["S2"],
+      "notes": "DB=0. Exchange processed for two items (keyboard+thermostat) but the tool call result shows a single exchange_delivered_order_items call. Likely called with wrong item IDs or wrong payment routing for the dual exchange."
+    },
+    "R3": {
+      "skills": ["S3", "S6"],
+      "notes": "DB=0 COMMUNICATE=0. Agent only found 2 pending T-shirt orders out of potentially 3 (missed #W4776164 which had a small T-shirt). Multi-order search and modification incomplete."
+    },
+    "R4": {
+      "skills": ["S6"],
+      "notes": "DB=0. Agent only modified one pending T-shirt order (#W6247578) but user also had #W4776164 with a small T-shirt that needed changing. Agent failed to discover all pending T-shirt orders."
+    },
+    "R5": {
+      "skills": ["S2"],
+      "notes": "DB=0. Agent processed exchange for water bottle and desk lamp but DB check failed. Likely used wrong item ID or wrong payment method for one of the exchanges."
+    },
+    "R6": {
+      "skills": ["S2"],
+      "notes": "DB=0. Same scenario as R5. Exchange of water bottle and desk lamp failed DB check - wrong item ID selection or payment routing."
+    },
+    "R7": {
+      "skills": ["S2"],
+      "notes": "DB=0. Same scenario (water bottle + desk lamp exchange). DB mismatch suggests wrong item variant selected or incorrect payment method used."
+    },
+    "R8": {
+      "skills": ["S2"],
+      "notes": "DB=0. Water bottle exchange (to bigger) + desk lamp exchange (to brighter). DB check failed - likely selected wrong brightness level or payment method."
+    },
+    "R9": {
+      "skills": ["S2"],
+      "notes": "DB=0. Same as R8 (water bottle + brighter desk lamp exchange). DB mismatch."
+    },
+    "R10": {
+      "skills": ["S4", "S2"],
+      "notes": "User wanted to swap payment methods between orders (refund each to the other order's payment method). Policy requires refund to original payment method. Error was returned, but agent then processed returns with original methods and claimed success when user wanted cross-payment-method refunds."
+    },
+    "R12": {
+      "skills": ["S4", "S11"],
+      "notes": "User wanted PayPal refund but policy requires refund to original payment method (credit card). Agent returned items correctly but to wrong payment method. Then when user complained, agent transferred instead of explaining the constraint clearly."
+    },
+    "R16": {
+      "skills": ["S7"],
+      "notes": "DB=0 COMMUNICATE=0. Agent cancelled W5199551 and returned watch correctly, but failed to communicate the total refund amount clearly. Task required knowing total refund - agent did not provide the summed figure."
+    },
+    "R19": {
+      "skills": ["S3", "S8"],
+      "notes": "DB=1 COMMUNICATE=0. After returning water bottle, the exchange of pet bed + office chair failed with 'Non-delivered order cannot be exchanged' (order status changed to return_requested). Agent failed to process return and exchange sequentially or communicate proper expectations."
+    },
+    "R20": {
+      "skills": ["S2"],
+      "notes": "DB=0. User wanted to upgrade all items to most expensive variants. Agent processed the change but DB check failed - likely wrong item ID selected for one of the 4 items (water bottle, keyboard, shoes, makeup kit)."
+    },
+    "R21": {
+      "skills": ["S6", "S2"],
+      "notes": "DB=0 COMMUNICATE=0. Error '4107812777 not found' - agent searched for a non-existent item ID. After error, agent substituted wrong shoe (yellow synthetic instead of white mesh requested). DB and communication both failed."
+    },
+    "R22": {
+      "skills": ["S6", "S8"],
+      "notes": "DB=0. User provided first name only ('Ethan') and zip 80280. Lookup failed repeatedly. Agent could not find user. Conditional state: user said address was previously 80280 and they changed it to 101 Highway NY, creating a chicken-and-egg verification problem."
+    },
+    "R23": {
+      "skills": ["S2", "S6"],
+      "notes": "DB=0. Error '7082455361 not found' for grill modification. Agent selected wrong item ID for the grill. Likely confused item IDs from the product variants."
+    },
+    "R24": {
+      "skills": ["S7"],
+      "notes": "DB=1 COMMUNICATE=0. Task required communicating which two T-shirts were ordered (material details) after user decided not to cancel grill. Agent found the T-shirts but COMMUNICATE check failed - likely didn't include required material details in response."
+    },
+    "R25": {
+      "skills": ["S4", "S2"],
+      "notes": "DB=0. User wanted refund to Amex credit card but original payment was a different method. Policy requires refund to original payment method. Agent should have told user and refunded to original method, but instead processed with Amex."
+    },
+    "R27": {
+      "skills": ["S3", "S8"],
+      "notes": "DB=0. After return of hose+backpack, the order status changed to 'return_requested' making exchange of hiking boots impossible. Agent failed to plan the correct sequence (exchange first, then return) or explain the sequencing constraint."
+    },
+    "R28": {
+      "skills": ["S3", "S6"],
+      "notes": "DB=0 COMMUNICATE=0. Complex: return skateboard+hose+backpack+keyboard+bed from delivered order, cancel hose from pending order. Agent cancelled wrong order or missed items. User originally couldn't provide email, causing lookup delay."
+    },
+    "R29": {
+      "skills": ["S2"],
+      "notes": "DB=0. Exchange of skateboard and modification of garden hose completed, but DB failed. Wrong item ID selected or payment routing error for one of the dual exchanges."
+    },
+    "R30": {
+      "skills": ["S3", "S8"],
+      "notes": "DB=0 COMMUNICATE=0. Tablet exchange processed correctly, but charger in a separate pending order needed to be cancelled. Then user asked to return sneakers from the same 'exchange requested' order - agent couldn't because order was in non-pending state. Multi-order state management failed."
+    },
+    "R31": {
+      "skills": ["S3", "S14"],
+      "notes": "max_steps. Complex scenario: user lost tablet, wanted tracking number, then asked if agent could help with anything else. Task involved tracking, return/exchange with emotional context. Agent hit max_steps navigating the open-ended conversation."
+    },
+    "R33": {
+      "skills": ["S2"],
+      "notes": "DB=0. User wanted to cancel home office items from order. Agent cancelled entire order W1845024 rather than specific items (keyboard, cycling helmet, headphones, office chair). Over-cancelled."
+    },
+    "R34": {
+      "skills": ["S3", "S2"],
+      "notes": "DB=0 COMMUNICATE=0. Similar to R33 - agent cancelled entire order instead of specific items. Also failed to communicate correctly (COMMUNICATE=0)."
+    },
+    "R36": {
+      "skills": ["S4", "S12"],
+      "notes": "DB=0. User wanted to remove Action Camera from pending order. Policy does not allow removing items from an order without replacement (must exchange). Agent tried return (error: non-delivered), then tried to remove without replacement (error: items must match). Agent hallucinated a valid tool call sequence that doesn't exist."
+    },
+    "R37": {
+      "skills": ["S4", "S8"],
+      "notes": "DB=0. User couldn't reduce individual item, so cancelled entire order W9348897. However DB check failed - agent may have cancelled wrong order or the cancellation was not properly confirmed."
+    },
+    "R39": {
+      "skills": ["S6", "S8"],
+      "notes": "DB=0 COMMUNICATE=0. User Fatima Taylor (moved from Florida to Phoenix) couldn't be found initially. Multiple lookup failures with wrong zip codes. Agent eventually found user but address update processing failed DB check."
+    },
+    "R41": {
+      "skills": ["S6", "S2"],
+      "notes": "DB=0. Error 'Order not found' for order 8829105. User gave wrong format (missing W prefix and full number). Agent eventually found correct order #W4082615, but exchange or address update had DB mismatch."
+    },
+    "R42": {
+      "skills": ["S2"],
+      "notes": "DB=0. Jigsaw puzzle exchange and address update processed, but DB check failed. Wrong item ID selected or address format issue."
+    },
+    "R44": {
+      "skills": ["S7"],
+      "notes": "DB=0 COMMUNICATE=0. Task required exchanging to cheapest desk lamp and reporting how much user gets back. Agent processed the exchange but COMMUNICATE=0 suggests the refund amount was not properly communicated or was wrong."
+    },
+    "R45": {
+      "skills": ["S6", "S4"],
+      "notes": "DB=1 COMMUNICATE=0. Error 'Order not found' for order 9502127 (missing W). Agent eventually found W9502127. DB succeeded. COMMUNICATE=0 - agent failed to communicate that a gift card refund wasn't possible (user didn't have one) and handled the payment explanation poorly."
+    },
+    "R46": {
+      "skills": ["S7", "S5"],
+      "notes": "DB=0 COMMUNICATE=0. Return of air purifier + vacuum cleaner processed, but then user asked for total of remaining items. Agent listed wrong items or wrong amounts. Both DB and communication failed."
+    },
+    "R47": {
+      "skills": ["S7", "S5"],
+      "notes": "DB=0 COMMUNICATE=0. Same scenario as R46. Return of air purifier + vacuum cleaner with DB mismatch and communication failure."
+    },
+    "R49": {
+      "skills": ["S2", "S1"],
+      "notes": "DB=0. User wanted to exchange IPX7 earbud for one with same water resistance as their other earbuds. Agent needed to look up other earbuds' water resistance level and match it. Exchange processed but DB failed - wrong item variant selected."
+    },
+    "R51": {
+      "skills": ["S4", "S8"],
+      "notes": "DB=0. Order W8855135 was in 'pending' status, not delivered. Agent correctly identified this and said return is not possible. But task required cancellation instead. Agent failed to transition to the correct action (cancel pending order) when return wasn't possible."
+    },
+    "R52": {
+      "skills": ["S2"],
+      "notes": "DB=0. Exchange processed for digital camera (3x to 5x zoom) but DB check failed. Likely selected wrong item ID from the variants or wrong payment method."
+    },
+    "R54": {
+      "skills": ["S6", "S11"],
+      "notes": "DB=0 COMMUNICATE=0. User Amelia Silva (Philadelphia 19102) couldn't be found via email or name+zip. Multiple lookup failures. Agent couldn't verify identity to proceed with any task."
+    },
+    "R56": {
+      "skills": ["S3", "S8"],
+      "notes": "max_steps. Agent cancelled order W4284542, then tried to modify it (error: non-pending). Then tried to create new order but kept hitting errors. State tracking failed - agent lost track of the cancelled order status and couldn't properly place a new order."
+    },
+    "R57": {
+      "skills": ["S4", "S8"],
+      "notes": "DB=0. Task: if air purifier not shipped, cancel it; if can't cancel just it, cancel whole order; then buy cheapest air purifier. Agent cancelled entire order W4284542 (correct), but DB check failed - possibly the subsequent new order placement was wrong."
+    },
+    "R59": {
+      "skills": ["S3", "S2"],
+      "notes": "DB=0. Complex multi-step: check order status differences, cancel W2702727, update address on W8268610. Agent cancelled W2702727 but the combined address update + cancellation had DB mismatch."
+    },
+    "R60": {
+      "skills": ["S2"],
+      "notes": "DB=0. User wanted to change wireless earbuds to blue. Agent found blue option but DB check failed - wrong item ID or payment method selected."
+    },
+    "R62": {
+      "skills": ["S3", "S12"],
+      "notes": "max_steps. User first tried to get agent to guess a poem (refused correctly). Then wanted to replace Bluetooth speaker with cheapest available under $300. Error '6455132774 not found'. Agent searched many product catalogs but kept getting errors and ran out of steps."
+    },
+    "R64": {
+      "skills": ["S4", "S8"],
+      "notes": "DB=0. Pending order W7464385 cannot be exchanged (not delivered). Agent tried exchange first (error), then correctly pivoted to modify. But DB check failed - modification used wrong item ID or wrong pricing."
+    },
+    "R65": {
+      "skills": ["S3", "S12"],
+      "notes": "max_steps. Order W5362037 status was 'processed' (not pending, not delivered). Agent couldn't modify it, tried to cancel items, tried to place new order but kept getting 'Non-pending order cannot be modified' errors repeatedly. Tool call confusion - tried to call modify on processed order multiple times."
+    },
+    "R66": {
+      "skills": ["S4", "S8"],
+      "notes": "DB=0. User wanted to change luggage to coat (different product category). Agent correctly identified this isn't possible via exchange. Then user wanted to return luggage from pending order (error: non-delivered). Agent pivoted to modify to different luggage variant but DB failed."
+    },
+    "R67": {
+      "skills": ["S6"],
+      "notes": "DB=1 COMMUNICATE=0. User identified as 'Noah' (NoNo) from Seattle with uncertain zip code. Multiple lookup failures (98186, 98187). User couldn't be found. Agent communicated failure but COMMUNICATE=0 suggests required info (order total) was never actually delivered."
+    },
+    "R71": {
+      "skills": ["S2", "S3"],
+      "notes": "DB=0. Address change + backpack modification. Agent updated address and modified backpack but DB failed - likely wrong item selected (grey medium polyester vs what was actually available) or payment routing error."
+    },
+    "R72": {
+      "skills": ["S2"],
+      "notes": "DB=0. Address was already Charlotte (no change needed), backpack modification was processed. DB failed - wrong item ID or payment routing for backpack change."
+    },
+    "R74": {
+      "skills": ["S4", "S2"],
+      "notes": "DB=0. Pending order W5166363 - agent tried exchange (error: non-delivered), then correctly pivoted to modify. But modification to i9/256GB/silver laptop had DB mismatch - wrong laptop item ID selected."
+    },
+    "R76": {
+      "skills": ["S12", "S2"],
+      "notes": "too_many_errors. User wanted to remove fleece jacket from pending order. Policy requires exchange to match counts. Agent tried repeatedly to exchange with wrong counts. Hallucinated that the remove-item operation was possible via modify. 8+ consecutive errors."
+    },
+    "R79": {
+      "skills": ["S4", "S2"],
+      "notes": "DB=0. User wanted to exchange 500ml bottle for 1000ml. Pending order W8661412 - tried exchange first (error: non-delivered), then correctly pivoted to modify. But DB check for the modification failed - wrong item selected."
+    },
+    "R80": {
+      "skills": ["S14", "S11"],
+      "notes": "DB=0. User was extremely chatty and indecisive about T-shirt exchange. Agent got caught in long conversational loops responding to user's philosophical musings and cat stories instead of keeping the conversation focused on completing the exchange. Context management failed."
+    },
+    "R82": {
+      "skills": ["S4", "S11"],
+      "notes": "DB=0. User wanted refund to credit card but original payment was gift card. Error thrown. Agent then processed return to gift card anyway and claimed success. User was upset. Agent then transferred. Failed to explain the policy clearly before taking action."
+    },
+    "R83": {
+      "skills": ["S4", "S7"],
+      "notes": "DB=0. Same as R82 - refund to credit card not possible (gift card original payment). Error thrown twice. Agent correctly explained the policy but then transferred user when they refused gift card refund, rather than completing the return to gift card."
+    },
+    "R90": {
+      "skills": ["S2", "S8"],
+      "notes": "DB=0. User wanted 10x zoom camera; current had 5x, 10x was out of stock. User then cancelled order W9284598. DB check failed - agent may have cancelled wrong order or used wrong cancellation reason."
+    },
+    "R91": {
+      "skills": ["S2", "S3"],
+      "notes": "DB=0. User wanted to return 2 skateboards and get refund to credit card. Agent processed return of skateboards + smart watch + e-reader (user expanded scope mid-conversation). DB check failed for the multi-item return."
+    },
+    "R92": {
+      "skills": ["S2", "S3"],
+      "notes": "DB=0. Similar to R91. User returned 2 skateboards + smart watch. DB check failed - wrong items included or payment routing error."
+    },
+    "R93": {
+      "skills": ["S2"],
+      "notes": "DB=0. User wanted to exchange 15-inch 32GB laptop for i7/8GB/1TB. Exchange processed but DB failed - wrong target item ID selected (likely picked wrong storage or RAM combination)."
+    },
+    "R97": {
+      "skills": ["S6", "S2"],
+      "notes": "DB=0. Two tasks: change LA order to NYC address (from another order), exchange Bluetooth speaker to cheapest green. Agent needed to discover NYC address from other order. DB failed - likely wrong address discovered or wrong speaker item ID."
+    },
+    "R99": {
+      "skills": ["S3", "S2"],
+      "notes": "DB=0. Complex multi-item task: exchange bicycle (larger frame), exchange jigsaw (1000 more pieces), cancel skateboard. Error 'Non-delivered order cannot be exchanged' + 'items must match'. Agent handled partial success but the combined operations had DB mismatch."
+    },
+    "R100": {
+      "skills": ["S3", "S8"],
+      "notes": "DB=0. Return luggage+skateboard for exchanges, then hiking boots. 'Non-delivered order cannot be exchanged' error + 'Non-pending order cannot be modified' error. Agent navigated errors but final DB state was wrong - couldn't properly handle the cascading order status changes."
+    },
+    "R101": {
+      "skills": ["S6", "S3"],
+      "notes": "DB=0. User wanted address changed to NYC (from other order - needed discovery), modify silicone watch to metal, then also modify air purifier + speaker order (already delivered). Agent transferred on the air purifier request. Multi-step completion with cross-order discovery failed."
+    },
+    "R102": {
+      "skills": ["S2", "S6"],
+      "notes": "DB=0. Agent found wrong order (W3445693 - delivered with sneakers/air purifier/helmet, not the watch order). Tried to process exchange on wrong items from wrong order. Record discovery failed - couldn't identify the correct watch order."
+    },
+    "R103": {
+      "skills": ["S7"],
+      "notes": "DB=1 COMMUNICATE=0. Task required agent to know that bookshelf+jigsaw is from one order. The return was processed correctly (DB=1). But COMMUNICATE=0 - agent failed to communicate something required (likely the total refund amount or tracking number in the right format)."
+    },
+    "R104": {
+      "skills": ["S6", "S3"],
+      "notes": "max_steps. User gave wrong order IDs (88210, 77345). Agent couldn't find them. Eventually found orders via description, returned bookshelf+jigsaw+backpack. But one order was already 'return_requested' from prior interaction. Agent ran out of steps managing the complex multi-order scenario."
+    },
+    "R106": {
+      "skills": ["S6"],
+      "notes": "DB=0. User Sofia Thomas with email sofia.thomas3019@example.com and zip 90210 - neither found. Agent couldn't verify identity and transferred. Record discovery failed completely."
+    },
+    "R107": {
+      "skills": ["S3", "S12"],
+      "notes": "DB=0. User Yara Ito wanted to exchange hiking boots (worn) + jigsaw. Multiple errors: 'Non-pending order cannot be modified', 'Some item not found', 'Non-delivered order cannot be returned'. Agent tried many approaches but failed. Hallucinated valid tool sequences that don't exist for the current order states."
+    },
+    "R109": {
+      "skills": ["S2", "S3"],
+      "notes": "DB=0. Address change for luggage order + exchange tablet. Agent updated address and processed tablet exchange but DB failed - likely wrong tablet variant selected or address not applied to correct order."
+    },
+    "R110": {
+      "skills": ["S2"],
+      "notes": "DB=0. Address update + tablet exchange processed but DB failed - wrong tablet item ID or payment method for the exchange."
+    },
+    "R111": {
+      "skills": ["S6", "S2"],
+      "notes": "DB=0. User wanted laptop order modified to NYC address (from another order) + laptop spec change + watch change. Error 'Number of 1355937109 not found' suggests wrong item number lookup. Multiple operations with DB mismatch."
+    },
+    "R112": {
+      "skills": ["S2", "S8"],
+      "notes": "DB=0. User wanted address changed to NYC (from profile), laptop changed to 9844888101. User ultimately only wanted address change. Agent processed only address change but DB failed - possibly applied wrong address or missed updating order address vs user profile."
+    }
+  },
+  "skill_summary": {
+    "S1": {
+      "count": 2,
+      "tasks": ["A44", "R49"],
+      "description": "Structured data reasoning: reasoning over flight durations, product specifications across multiple records"
+    },
+    "S2": {
+      "count": 43,
+      "tasks": ["A8","A12","A17","A20","A23","A25","A30","A37","A41","R1","R5","R6","R7","R8","R9","R20","R23","R25","R29","R33","R34","R41","R42","R49","R52","R59","R60","R64","R70","R71","R72","R74","R79","R90","R91","R92","R93","R97","R99","R102","R109","R110","R111","R112"],
+      "description": "Tool calling precision: incorrect item IDs, wrong payment method routing, wrong tool parameters leading to DB mismatches"
+    },
+    "S3": {
+      "count": 21,
+      "tasks": ["A7","A9","A18","A21","A22","A44","R19","R27","R28","R30","R31","R34","R56","R59","R62","R91","R92","R99","R100","R101","R104"],
+      "description": "Multi-step completion: failing to complete all required actions across multiple orders/reservations, or losing track mid-conversation"
+    },
+    "S4": {
+      "count": 30,
+      "tasks": ["A2","A7","A10","A12","A13","A15","A19","A22","A24","A26","A27","A29","A30","A31","A32","A36","A37","A38","A39","A41","A43","A47","A49","R10","R12","R25","R36","R51","R57","R66"],
+      "description": "Precondition verification: failing to check cancellation eligibility, basic economy restrictions, origin/destination change prohibition, insurance coverage requirements"
+    },
+    "S5": {
+      "count": 9,
+      "tasks": ["A2","A8","A14","A17","A20","A23","A25","A33","A38"],
+      "description": "Numerical reasoning: incorrect payment splits, wrong certificate/gift card math, wrong compensation amounts"
+    },
+    "S6": {
+      "count": 14,
+      "tasks": ["A14","A16","A18","A24","A42","R4","R22","R23","R39","R41","R54","R67","R97","R102","R106"],
+      "description": "Record discovery: failing to find correct reservations, wrong order IDs, inability to locate user accounts, missing relevant records"
+    },
+    "S7": {
+      "count": 6,
+      "tasks": ["A11","R16","R24","R44","R45","R83","R103"],
+      "description": "Information communication: DB succeeded but failed to communicate required details (refund amounts, item specifications, tracking numbers)"
+    },
+    "S8": {
+      "count": 18,
+      "tasks": ["A9","A10","A13","A15","A21","A26","A29","A35","R19","R22","R27","R37","R39","R51","R56","R57","R66","R100","R107","R112"],
+      "description": "Conditional/state reasoning: wrong order state transitions, failure to adapt when initial action changes order status, misreading conditional task instructions"
+    },
+    "S9": {
+      "count": 0,
+      "tasks": [],
+      "description": "Language fluency: no clear evidence of failures attributable to language generation quality"
+    },
+    "S10": {
+      "count": 0,
+      "tasks": [],
+      "description": "Response latency: not measurable from conversation logs"
+    },
+    "S11": {
+      "count": 5,
+      "tasks": ["A11","A27","A39","R12","R82"],
+      "description": "Tone/empathy: failing to hold policy under social pressure, or failing to explain difficult news empathetically"
+    },
+    "S12": {
+      "count": 5,
+      "tasks": ["A49","R36","R62","R65","R76","R107"],
+      "description": "Hallucination of tools: attempting invalid tool call sequences (remove item without replacement, exchange non-pending orders), or accepting user claims not in system data"
+    },
+    "S13": {
+      "count": 0,
+      "tasks": [],
+      "description": "Format compliance: no clear evidence of format-specific failures"
+    },
+    "S14": {
+      "count": 3,
+      "tasks": ["A9","R31","R80"],
+      "description": "Context window management: getting stuck in repetitive loops, failing to recognize conversation completion, losing track of task state over long conversations"
+    },
+    "S15": {
+      "count": 1,
+      "tasks": ["A39"],
+      "description": "Multilingual handling: French-language request may have affected policy comprehension"
+    },
+    "S16": {
+      "count": 0,
+      "tasks": [],
+      "description": "Proactive upselling: no evidence of failures in this dimension"
+    }
+  }
+}

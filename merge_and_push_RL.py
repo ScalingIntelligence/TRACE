@@ -14,7 +14,7 @@ from safetensors.torch import load_file
 
 # --- Configuration ---
 
-HF_TOKEN = "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"
+HF_TOKEN = "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"
 
 # Each entry: (target_repo, adapters_list, optional_config_dict)
 #
@@ -76,10 +76,16 @@ MERGE_JOBS = [
     #     ],
     #     {"method": "ties_dare"},
     # ),
+    # (
+    #     "tarsur909/sft-distill-selfexpert-v1",
+    #     [
+    #         ("/home/ubuntu/.cache/huggingface/default/sft/sft_ckpt_epoch_0_20260325_230506", 1.0)
+    #     ]
+    # ),
     (
-        "tarsur909/sft-adp-v1",
+        "tarsur385/taubench-target-20",
         [
-            ("/home/ubuntu/.cache/huggingface/adp_baseline/sft_lora/checkpoint-120", 1.0)
+            ("/home/ubuntu/.cache/huggingface/tau2_bench/grpo_ckpt_iter_20_20260327_065803", 1.0)
         ]
     ),
 ]
@@ -219,21 +225,15 @@ def load_lora_ab_pairs(adapter_path):
         b_key = key.replace("lora_A", "lora_B")
         if b_key not in state:
             continue
-        # Strip PEFT prefix and .lora_A.weight suffix to get the model weight key
         base_name = key.replace(".lora_A.weight", "")
-        A = state[key] * scaling  # pre-apply LoRA scaling so delta_W = B @ A
+        A = state[key] * scaling
         B = state[b_key]
         ab_pairs[base_name] = (A, B)
     return ab_pairs
 
 
 def _peft_key_to_model_key(peft_base_name):
-    """Convert PEFT adapter key to model state_dict key.
-
-    e.g. 'base_model.model.model.layers.0.mlp.experts.0.down_proj'
-      -> 'model.layers.0.mlp.experts.0.down_proj.weight'
-    """
-    # Strip 'base_model.model.' prefix added by PEFT
+    """Convert PEFT adapter key to model state_dict key."""
     key = peft_base_name
     if key.startswith("base_model.model."):
         key = key[len("base_model.model."):]
@@ -297,26 +297,17 @@ def _merge_core_matrices_tsv(M_list, weights):
     """Task Singular Vector merge: allocate each adapter a proportional share of
     singular directions, then re-orthogonalize.
 
-    Each adapter's core matrix M_i is SVD'd. The top (1/T) fraction of singular
-    vectors from each adapter are placed into dedicated slots, preserving each
-    task's most important directions without interference. Final reconstruction
-    re-orthogonalizes U and V via SVD to produce a valid matrix.
-
-    Uses batched SVD for GPU efficiency — all per-adapter SVDs run in a single
-    kernel launch instead of T sequential calls.
+    Uses batched SVD for GPU efficiency.
     """
     T = len(M_list)
-    dim = M_list[0].shape[0]  # T*r
-    k = max(1, int(dim / T))  # singular directions per adapter
+    dim = M_list[0].shape[0]
+    k = max(1, int(dim / T))
 
-    # Apply weights and batch all adapter matrices for a single batched SVD
     w_tensor = torch.tensor(weights[:T], dtype=M_list[0].dtype, device=M_list[0].device)
-    stacked = torch.stack(M_list) * w_tensor.view(T, 1, 1)  # (T, dim, dim)
+    stacked = torch.stack(M_list) * w_tensor.view(T, 1, 1)
 
-    # Batched SVD: one kernel launch for all adapters
     U_all, S_all, Vh_all = torch.linalg.svd(stacked, full_matrices=False)
 
-    # Scatter top-k singular components from each adapter into assembled matrices
     sum_u = torch.zeros(dim, dim, dtype=stacked.dtype, device=stacked.device)
     sum_s = torch.zeros(dim, dtype=stacked.dtype, device=stacked.device)
     sum_v = torch.zeros(dim, dim, dtype=stacked.dtype, device=stacked.device)
@@ -327,14 +318,11 @@ def _merge_core_matrices_tsv(M_list, weights):
         sum_s[sl] = S_all[i, :k]
         sum_v[sl, :] = Vh_all[i, :k, :]
 
-    # Re-orthogonalize U and V via SVD
     u_u, _, v_u = torch.linalg.svd(sum_u, full_matrices=False)
     u_v, _, v_v = torch.linalg.svd(sum_v, full_matrices=False)
 
-    # Efficient diagonal scaling: (A @ diag(s) @ B) = (A * s[None,:]) @ B
-    # Avoids materializing a full (dim, dim) diagonal matrix
-    left = u_u @ v_u   # (dim, dim)
-    right = u_v @ v_v   # (dim, dim)
+    left = u_u @ v_u
+    right = u_v @ v_v
     return (left * sum_s.unsqueeze(0)) @ right
 
 

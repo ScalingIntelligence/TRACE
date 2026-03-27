@@ -1,0 +1,587 @@
+{
+  "attempt": 19,
+  "focus": "QA tester perspective - categorizing failures as distinct bug classes: policy enforcement bugs, calculation bugs, state machine bugs, search/lookup bugs, and compliance bugs",
+  "assignments": {
+    "A2": [
+      "S11",
+      "S4"
+    ],
+    "A7": [
+      "S8",
+      "S4"
+    ],
+    "A9": [
+      "S8",
+      "S14"
+    ],
+    "A10": [
+      "S2",
+      "S3"
+    ],
+    "A11": [
+      "S8",
+      "S4"
+    ],
+    "A12": [
+      "S2",
+      "S5"
+    ],
+    "A13": [
+      "S2",
+      "S8"
+    ],
+    "A14": [
+      "S5",
+      "S3"
+    ],
+    "A15": [
+      "S6",
+      "S2"
+    ],
+    "A16": [
+      "S6",
+      "S2"
+    ],
+    "A17": [
+      "S5",
+      "S2"
+    ],
+    "A18": [
+      "S4",
+      "S3"
+    ],
+    "A19": [
+      "S8",
+      "S4"
+    ],
+    "A20": [
+      "S5",
+      "S2"
+    ],
+    "A21": [
+      "S3",
+      "S6"
+    ],
+    "A22": [
+      "S8",
+      "S4"
+    ],
+    "A23": [
+      "S5",
+      "S3"
+    ],
+    "A24": [
+      "S3",
+      "S4"
+    ],
+    "A25": [
+      "S5",
+      "S2"
+    ],
+    "A26": [
+      "S8",
+      "S4"
+    ],
+    "A27": [
+      "S4",
+      "S11"
+    ],
+    "A29": [
+      "S3",
+      "S2"
+    ],
+    "A30": [
+      "S3",
+      "S2"
+    ],
+    "A31": [
+      "S8",
+      "S4"
+    ],
+    "A32": [
+      "S8",
+      "S2"
+    ],
+    "A33": [
+      "S3",
+      "S2"
+    ],
+    "A35": [
+      "S4",
+      "S3"
+    ],
+    "A36": [
+      "S8",
+      "S4"
+    ],
+    "A37": [
+      "S3",
+      "S2"
+    ],
+    "A38": [
+      "S11",
+      "S4"
+    ],
+    "A39": [
+      "S3",
+      "S15"
+    ],
+    "A41": [
+      "S8",
+      "S4"
+    ],
+    "A42": [
+      "S3",
+      "S5"
+    ],
+    "A43": [
+      "S8",
+      "S4"
+    ],
+    "A44": [
+      "S3",
+      "S5"
+    ],
+    "A47": [
+      "S8",
+      "S4"
+    ],
+    "A49": [
+      "S8",
+      "S4"
+    ],
+    "R1": [
+      "S5",
+      "S2"
+    ],
+    "R3": [
+      "S2",
+      "S1"
+    ],
+    "R4": [
+      "S3",
+      "S2"
+    ],
+    "R5": [
+      "S2",
+      "S4"
+    ],
+    "R6": [
+      "S3",
+      "S2"
+    ],
+    "R7": [
+      "S8",
+      "S4"
+    ],
+    "R8": [
+      "S2",
+      "S5"
+    ],
+    "R9": [
+      "S4",
+      "S2"
+    ],
+    "R10": [
+      "S8",
+      "S4"
+    ],
+    "R12": [
+      "S8",
+      "S4"
+    ],
+    "R16": [
+      "S3",
+      "S5"
+    ],
+    "R19": [
+      "S8",
+      "S3"
+    ],
+    "R20": [
+      "S5",
+      "S2"
+    ],
+    "R21": [
+      "S2",
+      "S1"
+    ],
+    "R22": [
+      "S6",
+      "S4"
+    ],
+    "R23": [
+      "S2",
+      "S3"
+    ],
+    "R24": [
+      "S7",
+      "S1"
+    ],
+    "R25": [
+      "S4",
+      "S2"
+    ],
+    "R27": [
+      "S8",
+      "S3"
+    ],
+    "R28": [
+      "S3",
+      "S2"
+    ],
+    "R29": [
+      "S5",
+      "S2"
+    ],
+    "R30": [
+      "S8",
+      "S3"
+    ],
+    "R31": [
+      "S8",
+      "S4"
+    ],
+    "R33": [
+      "S8",
+      "S4"
+    ],
+    "R34": [
+      "S2",
+      "S5"
+    ],
+    "R36": [
+      "S4",
+      "S2"
+    ],
+    "R37": [
+      "S4",
+      "S2"
+    ],
+    "R39": [
+      "S8",
+      "S4"
+    ],
+    "R41": [
+      "S3",
+      "S2"
+    ],
+    "R42": [
+      "S8",
+      "S4"
+    ],
+    "R44": [
+      "S3",
+      "S2"
+    ],
+    "R45": [
+      "S8",
+      "S4"
+    ],
+    "R46": [
+      "S5",
+      "S2"
+    ],
+    "R47": [
+      "S4",
+      "S2"
+    ],
+    "R49": [
+      "S3",
+      "S2"
+    ],
+    "R51": [
+      "S8",
+      "S4"
+    ],
+    "R52": [
+      "S3",
+      "S2"
+    ],
+    "R54": [
+      "S5",
+      "S2"
+    ],
+    "R56": [
+      "S8",
+      "S3"
+    ],
+    "R57": [
+      "S8",
+      "S4"
+    ],
+    "R59": [
+      "S4",
+      "S2"
+    ],
+    "R60": [
+      "S3",
+      "S2"
+    ],
+    "R62": [
+      "S8",
+      "S3"
+    ],
+    "R64": [
+      "S4",
+      "S2"
+    ],
+    "R65": [
+      "S8",
+      "S3"
+    ],
+    "R66": [
+      "S8",
+      "S4"
+    ],
+    "R67": [
+      "S4",
+      "S2"
+    ],
+    "R71": [
+      "S8",
+      "S4"
+    ],
+    "R72": [
+      "S3",
+      "S2"
+    ],
+    "R74": [
+      "S4",
+      "S2"
+    ],
+    "R76": [
+      "S12",
+      "S2"
+    ],
+    "R79": [
+      "S8",
+      "S4"
+    ],
+    "R80": [
+      "S3",
+      "S2"
+    ],
+    "R82": [
+      "S8",
+      "S4"
+    ],
+    "R83": [
+      "S3",
+      "S2"
+    ],
+    "R90": [
+      "S4",
+      "S2"
+    ],
+    "R91": [
+      "S8",
+      "S3"
+    ],
+    "R92": [
+      "S4",
+      "S2"
+    ],
+    "R93": [
+      "S8",
+      "S4"
+    ],
+    "R97": [
+      "S3",
+      "S2"
+    ],
+    "R99": [
+      "S8",
+      "S4"
+    ],
+    "R100": [
+      "S8",
+      "S3"
+    ],
+    "R101": [
+      "S8",
+      "S2"
+    ],
+    "R102": [
+      "S3",
+      "S2"
+    ],
+    "R103": [
+      "S7",
+      "S1"
+    ],
+    "R104": [
+      "S3",
+      "S6"
+    ],
+    "R106": [
+      "S4",
+      "S6"
+    ],
+    "R107": [
+      "S8",
+      "S3"
+    ],
+    "R109": [
+      "S3",
+      "S2"
+    ],
+    "R110": [
+      "S3",
+      "S2"
+    ],
+    "R111": [
+      "S3",
+      "S2"
+    ],
+    "R112": [
+      "S3",
+      "S2"
+    ],
+    "A8": [
+      "S2",
+      "S6"
+    ]
+  },
+  "skill_summary": {
+    "S1": {
+      "count": 5,
+      "example_tasks": [
+        "R3",
+        "R21",
+        "R24",
+        "R103"
+      ],
+      "bug_class": "Information accuracy bug - agent reported wrong product attributes or order details"
+    },
+    "S2": {
+      "count": 46,
+      "example_tasks": [
+        "A10",
+        "A12",
+        "A13",
+        "A15",
+        "A16",
+        "A17",
+        "A20",
+        "A25",
+        "R1",
+        "R8"
+      ],
+      "bug_class": "Tool invocation bug - agent called wrong tool, passed wrong IDs, or called tools with invalid argument combinations"
+    },
+    "S3": {
+      "count": 40,
+      "example_tasks": [
+        "A14",
+        "A18",
+        "A21",
+        "A23",
+        "A24",
+        "A29",
+        "A30",
+        "A33",
+        "A35",
+        "A37"
+      ],
+      "bug_class": "Task completion bug - agent stopped short of completing all required steps, especially in multi-request conversations"
+    },
+    "S4": {
+      "count": 50,
+      "example_tasks": [
+        "A2",
+        "A7",
+        "A11",
+        "A18",
+        "A19",
+        "A22",
+        "A26",
+        "A27",
+        "A31",
+        "A35"
+      ],
+      "bug_class": "Policy enforcement bug - agent bypassed or misapplied policy rules (cancellation criteria, cabin change restrictions, compensation thresholds)"
+    },
+    "S5": {
+      "count": 13,
+      "example_tasks": [
+        "A12",
+        "A14",
+        "A17",
+        "A20",
+        "A23",
+        "A25",
+        "A42",
+        "A44",
+        "R1",
+        "R20"
+      ],
+      "bug_class": "Numerical reasoning bug - agent made errors in price totals, payment breakdowns, or comparing numeric flight durations"
+    },
+    "S6": {
+      "count": 6,
+      "example_tasks": [
+        "A15",
+        "A16",
+        "A21",
+        "R22",
+        "R104"
+      ],
+      "bug_class": "Record lookup bug - agent could not locate correct order/reservation/user when given incomplete or ambiguous identifiers"
+    },
+    "S7": {
+      "count": 2,
+      "example_tasks": [
+        "R24",
+        "R103"
+      ],
+      "bug_class": "Communication accuracy bug - agent stated incorrect facts (wrong material, wrong price) in its response to the user"
+    },
+    "S8": {
+      "count": 55,
+      "example_tasks": [
+        "A7",
+        "A9",
+        "A11",
+        "A13",
+        "A19",
+        "A22",
+        "A26",
+        "A31",
+        "A32",
+        "A36"
+      ],
+      "bug_class": "State machine bug - agent failed to handle conditional logic based on order/flight status (e.g., attempting exchange on returned order, modifying non-pending order)"
+    },
+    "S11": {
+      "count": 3,
+      "example_tasks": [
+        "A2",
+        "A27",
+        "A38"
+      ],
+      "bug_class": "Empathy manipulation bug - agent caved to social pressure and issued unauthorized compensation or violated policy to satisfy an emotionally distressed user"
+    },
+    "S12": {
+      "count": 1,
+      "example_tasks": [
+        "R76"
+      ],
+      "bug_class": "Hallucination bug - agent referenced or attempted to call a non-existent tool"
+    },
+    "S14": {
+      "count": 1,
+      "example_tasks": [
+        "A9"
+      ],
+      "bug_class": "Context management bug - agent got trapped in an unproductive loop, consuming all available steps without task completion"
+    },
+    "S15": {
+      "count": 1,
+      "example_tasks": [
+        "A39"
+      ],
+      "bug_class": "Multilingual handling bug - agent cancelled all reservations including non-refundable ones after user switched to French, failing to verify policy compliance"
+    }
+  }
+}

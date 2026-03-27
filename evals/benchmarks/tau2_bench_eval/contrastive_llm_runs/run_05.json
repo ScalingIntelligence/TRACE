@@ -1,0 +1,132 @@
+{
+  "attempt": 5,
+  "skills": [
+    {
+      "name": "Multi-attribute Item Selection",
+      "description": "When a user specifies multiple ranked or conjunctive attributes for a replacement item (e.g., size AND color AND material, or 'battery first, then USB'), the agent must correctly identify the single best matching variant from the product catalog, not just one that satisfies some attributes. The agent fails when it picks a variant that satisfies only a subset of constraints, picks the wrong item from a filtered set, or conflates which item in an order the user is referring to.",
+      "covered_tasks": [
+        "A8",
+        "A12",
+        "R1",
+        "R5",
+        "R6",
+        "R7",
+        "R8",
+        "R9",
+        "R23",
+        "R49",
+        "R52",
+        "R60",
+        "R64",
+        "R80",
+        "R91",
+        "R93",
+        "R99",
+        "R106",
+        "R107"
+      ],
+      "reasoning": "In both airline (wrong flight/cabin combination booked) and retail (wrong product variant exchanged despite correct product type), the agent selects an item that does not match all user-specified attributes when multiple must be satisfied simultaneously."
+    },
+    {
+      "name": "Policy Constraint Enforcement",
+      "description": "The agent must check and respect hard constraints before executing irreversible actions: refunds must go to the original payment method, compensation amounts must follow policy rules, cancellations require specific eligibility conditions, and unauthorized payment methods must be rejected. The agent fails when it executes the action anyway after a constraint-violating request, ignores the error returned by the system, or misidentifies which constraint applies.",
+      "covered_tasks": [
+        "A2",
+        "A17",
+        "A27",
+        "A38",
+        "A47",
+        "A49",
+        "R10",
+        "R12",
+        "R82",
+        "R83"
+      ],
+      "reasoning": "In airline tasks the agent issues certificates of wrong amounts or cancels ineligible reservations; in retail tasks the agent accepts refund targets that differ from the original payment method, even when the system returns an error."
+    },
+    {
+      "name": "Action Scope Precision",
+      "description": "When a multi-step task involves several sub-actions (e.g., change flight AND add baggage, cancel item A AND keep item B, update address AND update items), the agent must execute exactly the right set of sub-actions on exactly the right target objects. The agent fails when it applies changes to the wrong order or reservation, omits required sub-actions, applies modifications that were not requested, or conflates targets across multiple orders.",
+      "covered_tasks": [
+        "A15",
+        "A16",
+        "A19",
+        "A20",
+        "A21",
+        "A22",
+        "A29",
+        "A30",
+        "A32",
+        "A33",
+        "A35",
+        "A41",
+        "R20",
+        "R33",
+        "R36",
+        "R37",
+        "R59",
+        "R71",
+        "R72",
+        "R74",
+        "R97",
+        "R100",
+        "R101",
+        "R102",
+        "R109",
+        "R110",
+        "R111",
+        "R112"
+      ],
+      "reasoning": "Across both domains the agent consistently either does too much (applying changes to the full reservation when only the return leg was requested) or too little (updating items but not the address, or canceling the wrong order) when tasks contain multiple parallel or sequential sub-goals."
+    },
+    {
+      "name": "Ranked Fallback Resolution",
+      "description": "When the user expresses a preference ordering such as 'option A if available, otherwise B, otherwise C' or 'if cost exceeds X do Y instead', the agent must correctly resolve the chain at execution time by checking availability/conditions sequentially and acting on the correct fallback, not on the first option stated regardless of feasibility.",
+      "covered_tasks": [
+        "A12",
+        "A13",
+        "A24",
+        "A25",
+        "R5",
+        "R6",
+        "R7",
+        "R8",
+        "R49",
+        "R66"
+      ],
+      "reasoning": "In airline tasks the agent books wrong payment splits or ignores budget cutoffs; in retail tasks it picks the wrong item from a ranked preference list (e.g., battery > USB > AC) by not checking availability before committing to the top preference."
+    },
+    {
+      "name": "Correct Target Identification",
+      "description": "When a user references a target (order, reservation, item) without a unique ID, or when multiple similar candidates exist, the agent must search for and confirm the correct one before acting. The agent fails when it retrieves the wrong order among a user's multiple orders, acts on a reservation not matching the described route or date, or confuses items across different orders when the user's description is ambiguous.",
+      "covered_tasks": [
+        "A41",
+        "A43",
+        "R4",
+        "R22",
+        "R25",
+        "R27",
+        "R33",
+        "R51",
+        "R64",
+        "R66"
+      ],
+      "reasoning": "In airline tasks the agent cancels the wrong reservation or fails to retrieve the correct one from multiple reservations; in retail tasks it finds the wrong order or operates on a different order's items when the user described an item without specifying the order ID."
+    },
+    {
+      "name": "State-Aware Operation Sequencing",
+      "description": "Before executing certain operations (exchanges, returns, cancellations, modifications), the agent must check the current state of the target object (e.g., pending vs. delivered, already returned, already modified) and apply the correct operation type that is valid for that state. The agent fails when it attempts to return a pending order, exchange a delivered-and-already-returned item, or use an exchange API on a pending order that requires a modify API.",
+      "covered_tasks": [
+        "A13",
+        "A19",
+        "R27",
+        "R36",
+        "R37",
+        "R64",
+        "R66",
+        "R90"
+      ],
+      "reasoning": "In both domains the agent calls the wrong operation for the item's current lifecycle state\u2014using 'exchange' on a pending order, 'return' on a not-yet-delivered order, or acting after a state change has already rendered the intended operation invalid."
+    }
+  ]
+}

@@ -10,8 +10,8 @@ Supports two serving modes:
 
 Supports three routing modes:
   - llm: JSON output routing (original)
-  - classifier: 1 forward pass with structured_outputs (hard selection)
-  - weighted_classifier: classifier + logprobs -> soft LoRA merge
+  - classifier: 1 forward pass with structured_outputs + logprobs -> weighted LoRA
+  - embedding: cosine similarity between conversation and skill descriptions (SentenceTransformer)
 """
 
 import json
@@ -34,6 +34,30 @@ from tau2.data_model.message import (
 )
 from tau2.environment.tool import Tool
 from tau2.utils.llm_utils import generate
+
+
+# ---------------------------------------------------------------------------
+# Embedding model singleton — loaded once, reused across agent instances
+# ---------------------------------------------------------------------------
+
+_embedding_model_cache: dict[tuple[str, str], object] = {}
+
+
+def _get_embedding_model(model_name: str, device: str):
+    """Return a cached SentenceTransformer, loading it only on first call."""
+    key = (model_name, device)
+    if key not in _embedding_model_cache:
+        from sentence_transformers import SentenceTransformer
+
+        logger.info(f"[Embedding] Loading {model_name} on {device}")
+        _embedding_model_cache[key] = SentenceTransformer(
+            model_name,
+            device=device,
+            tokenizer_kwargs={"padding_side": "left"},
+        )
+    else:
+        logger.info(f"[Embedding] Reusing cached {model_name} on {device}")
+    return _embedding_model_cache[key]
 
 
 # ---------------------------------------------------------------------------
@@ -64,9 +88,16 @@ class OrchestratorConfig(BaseModel):
     skip_routing: Optional[str] = None  # always use this skill (ablation)
     routing_context_window: Optional[int] = None  # None = use entire conversation
     routing_strategy: str = "per_turn"  # "per_turn" or "per_conversation"
-    routing_mode: str = "llm"  # "llm", "classifier", "weighted_classifier" (soft LoRA merge), or "embedding"
-    routing_topk: Optional[int] = None  # limit weighted routing to top-k adapters (None=all)
-    embedding_model: str = "Qwen/Qwen3-Embedding-8B"  # model name for sentence_transformers when routing_mode == "embedding"
+    routing_mode: str = "llm"  # "llm", "llm_multi", "classifier", or "embedding"
+    routing_topk: Optional[int] = None  # limit routing to top-k adapters; applies to classifier and embedding modes (None=all)
+    routing_topp: Optional[float] = None  # top-p nucleus filtering: keep fewest adapters whose cumulative weight >= topp; applies to classifier and embedding
+    classifier_temperature: float = 1.0  # temperature scaling applied to logprobs before softmax (>1 = softer, <1 = sharper)
+    min_blend_confidence: Optional[float] = None  # only blend when primary's raw (pre-temp) probability < this; else hard-route
+    is_weighted: bool = False  # True: use classifier logprob weights; False: weight=1.0 for all selected adapters
+    # Embedding-based routing
+    embedding_model: Optional[str] = None  # e.g. "Qwen/Qwen3-Embedding-8B"; required when routing_mode="embedding"
+    embedding_gpu: Optional[str] = None  # device for the embedding model, e.g. "cuda:0" (default: "cpu")
+    embedding_threshold: float = 0.5  # similarity threshold; skills above this are activated
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +110,7 @@ class SkillRoutingDecision(BaseModel):
 
     selected_skill: str
     reasoning: Optional[str] = None
-    skill_weights: Optional[Dict[str, float]] = None  # soft weights for weighted_classifier mode
+    skill_weights: Optional[Dict[str, float]] = None  # soft weights for weighted LoRA merge
 
 
 # ---------------------------------------------------------------------------
@@ -141,23 +172,39 @@ class OrchestratorAgentState(BaseModel):
 # Routing prompt
 # ---------------------------------------------------------------------------
 
-ROUTING_SYSTEM_PROMPT = """You are a routing orchestrator for a customer service agent system.
+ROUTING_SYSTEM_PROMPT = """You are a routing classifier for a customer service agent system.
 
-Given the current conversation, decide which skill should handle the agent's next response.
+Given the current conversation, decide which skill should handle the agent's next response. Emotional tone does not affect routing. The number of actions does not determine routing — focus on the nature of the request.
 
 Available skills:
 {skill_descriptions}
 
-Think step-by-step about which skill best matches this conversation, then state your final choice.
+Output your answer as: SELECTED_SKILL: skill_name
+"""
 
-Format your response as:
-1. Free-form reasoning about the conversation and which skill fits best.
-2. End with your final answer on its own line in this exact format:
-   SELECTED_SKILL: skill_name
+ROUTING_MULTI_SYSTEM_PROMPT = """You are a routing classifier for a customer service agent system.
+Each skill is a complete, independently trained agent.
 
-Rules:
-- Select the single best skill for the current task.
-- Only select a skill from the available list above.
+Available skills:
+{skill_descriptions}
+
+Route by what the customer needs done, not by emotional tone.
+
+Output your answer as:
+SELECTED_SKILL: skill_name
+CONFIDENCE: high or low
+
+Use high when one skill clearly matches. Use low when the request
+touches two different skill areas and you are unsure which is best.
+If low, add: SECONDARY_SKILL: skill_name
+
+Examples of CONFIDENCE calibration:
+- "Change the name on my reservation" → high (single clear action)
+- "Cancel my flight and get a refund" → high (single clear action)
+- "I want to cancel two bookings and upgrade a third to business" → low (execution + comparison)
+- "Book the exact same flight I had last week" → low (execution + checking past data)
+- "My flight was delayed, I need compensation" → low (data lookup + policy check)
+- "I want to downgrade my cabin class due to money issues" → low (comparison + possible restriction)
 """
 
 
@@ -205,9 +252,11 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
         self._routing_system_prompt = ROUTING_SYSTEM_PROMPT.format(
             skill_descriptions=skill_descriptions
         )
-
-        # Build label-to-skill mapping for classifier and weighted_classifier modes
-        if orchestrator_config.routing_mode in ("classifier", "weighted_classifier"):
+        self._routing_multi_system_prompt = ROUTING_MULTI_SYSTEM_PROMPT.format(
+            skill_descriptions=skill_descriptions
+        )
+        # Build label-to-skill mapping for classifier mode
+        if orchestrator_config.routing_mode == "classifier":
             self._label_to_skill: dict[str, str] = {}
             self._skill_to_label: dict[str, str] = {}
             label_lines = []
@@ -227,39 +276,35 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
             )
             self._classifier_labels = list(self._label_to_skill.keys())
 
-        # Build embedding model and pre-encode skill descriptions for embedding mode
+        # Pre-load embedding model (singleton) and encode skill descriptions
         if orchestrator_config.routing_mode == "embedding":
-            from sentence_transformers import SentenceTransformer
+            emb_model_name = orchestrator_config.embedding_model or "Qwen/Qwen3-Embedding-8B"
+            emb_device = orchestrator_config.embedding_gpu or "cpu"
 
-            logger.info(
-                f"[Embedding Router] Loading model: {orchestrator_config.embedding_model}"
+            self._embedding_model = _get_embedding_model(emb_model_name, emb_device)
+
+            # Encode skill descriptions as retrieval documents (no query prompt)
+            self._embedding_skill_names: list[str] = [
+                s.name for s in orchestrator_config.skills
+            ]
+            skill_desc_texts = [s.description for s in orchestrator_config.skills]
+            self._skill_description_embeddings = self._embedding_model.encode(
+                skill_desc_texts
             )
-            self._embedding_model = SentenceTransformer(
-                orchestrator_config.embedding_model,
-                model_kwargs={"attn_implementation": "sdpa", "device_map": "auto"},
-                tokenizer_kwargs={"padding_side": "left"},
-            )
-            # Map each skill name to its description for encoding
-            self._embedding_skill_names: list[str] = []
-            skill_docs: list[str] = []
-            for skill_config in orchestrator_config.skills:
-                self._embedding_skill_names.append(skill_config.name)
-                skill_docs.append(
-                    f"{skill_config.name}: {skill_config.description}"
-                )
-            # Pre-encode skill descriptions as documents (no query prompt)
-            self._embedding_skill_vectors = self._embedding_model.encode(skill_docs)
+            self._embedding_threshold = orchestrator_config.embedding_threshold
             logger.info(
-                f"[Embedding Router] Pre-encoded {len(skill_docs)} skill descriptions"
+                f"[Embedding] Encoded {len(skill_desc_texts)} skill descriptions"
             )
 
-        # Validate skip_routing target exists
+        # Validate skip_routing target(s) exist (supports comma-separated)
         if orchestrator_config.skip_routing:
-            if orchestrator_config.skip_routing not in self.skill_backends:
-                raise ValueError(
-                    f"skip_routing skill '{orchestrator_config.skip_routing}' "
-                    f"not found. Available: {list(self.skill_backends.keys())}"
-                )
+            for sk in orchestrator_config.skip_routing.split(","):
+                sk = sk.strip()
+                if sk not in self.skill_backends:
+                    raise ValueError(
+                        f"skip_routing skill '{sk}' "
+                        f"not found. Available: {list(self.skill_backends.keys())}"
+                    )
 
     @property
     def system_prompt(self) -> str:
@@ -286,17 +331,41 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
     def _clear_weighted_lora(self):
         """Clear the weighted LoRA config file to disable weighted mode.
 
-        Deletes the file rather than writing [] so that the engine's
-        mtime cache resets to 0.0 (OSError path).  This guarantees the
-        next _set_weighted_lora write is always a cache miss, avoiding
-        stale-mtime races where rapid writes produce identical mtimes.
+        Deletes the per-port config file(s) so that the engine's reader
+        sees an OSError and falls back to single-adapter mode.
         """
         import os, tempfile
-        config_path = os.path.join(tempfile.gettempdir(), "vllm_weighted_lora_config.json")
-        try:
-            os.remove(config_path)
-        except OSError:
-            pass
+        from urllib.parse import urlparse
+
+        # Collect unique ports from skill api_base URLs
+        ports: set[str] = set()
+        for skill_config in self.orchestrator_config.skills:
+            api_base = (skill_config.llm_args or {}).get("api_base", "")
+            if api_base:
+                parsed = urlparse(api_base)
+                if parsed.port:
+                    ports.add(str(parsed.port))
+        orchestrator_api_base = (
+            self.orchestrator_config.orchestrator_llm_args or {}
+        ).get("api_base", "")
+        if orchestrator_api_base:
+            parsed = urlparse(orchestrator_api_base)
+            if parsed.port:
+                ports.add(str(parsed.port))
+
+        # Fall back to "default" if no ports found
+        if not ports:
+            ports = {"default"}
+
+        for port_tag in ports:
+            config_path = os.path.join(
+                tempfile.gettempdir(),
+                f"vllm_weighted_lora_config_{port_tag}.json",
+            )
+            try:
+                os.remove(config_path)
+            except OSError:
+                pass
 
     def _hot_swap_adapter(self, skill_name: str):
         """Unload all LoRA adapters then reload only the selected one.
@@ -382,17 +451,22 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
     def _route(self, messages: list[Message]) -> SkillRoutingDecision:
         """Call the orchestrator LLM to decide routing."""
         # Fast path: skip routing if configured
+        # Supports comma-separated skill names for multi-adapter blending
         if self.orchestrator_config.skip_routing:
+            skills = [s.strip() for s in self.orchestrator_config.skip_routing.split(",")]
+            weights = {s: 1.0 for s in skills if s in self.skill_backends}
+            primary = skills[0] if skills[0] in self.skill_backends else list(self.skill_backends.keys())[0]
             return SkillRoutingDecision(
-                selected_skill=self.orchestrator_config.skip_routing,
+                selected_skill=primary,
                 reasoning="skip_routing configured",
+                skill_weights=weights,
             )
 
         if self.orchestrator_config.routing_mode == "classifier":
             return self._route_classifier(messages)
 
-        if self.orchestrator_config.routing_mode == "weighted_classifier":
-            return self._route_weighted_classifier(messages)
+        if self.orchestrator_config.routing_mode == "llm_multi":
+            return self._route_llm_multi(messages)
 
         if self.orchestrator_config.routing_mode == "embedding":
             return self._route_embedding(messages)
@@ -415,7 +489,7 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
         routing_messages.append(
             UserMessage(
                 role="user",
-                content="Based on the conversation above, which skill should handle the agent's next response? Think step-by-step, then end with SELECTED_SKILL: skill_name",
+                content="Based on the conversation above, which skill should handle the agent's next response? Answer with SELECTED_SKILL: skill_name",
             )
         )
 
@@ -428,92 +502,107 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
             )
         except Exception as e:
             logger.error(f"Orchestrator routing call failed: {e}")
-            return self._fallback_decision()
+            decision = self._fallback_decision()
+            decision.skill_weights = {decision.selected_skill: 1.0}
+            return decision
 
-        return self._parse_routing_response(response)
+        decision = self._parse_routing_response(response)
+        # Use deterministic weighted LoRA path (weight=1.0 for hard selection)
+        decision.skill_weights = {decision.selected_skill: 1.0}
+        return decision
 
-    def _route_classifier(self, messages: list[Message]) -> SkillRoutingDecision:
-        """Route using single-forward-pass classifier with vLLM structured_outputs.
+    def _route_llm_multi(self, messages: list[Message]) -> SkillRoutingDecision:
+        """Route using LLM that predicts multiple skills with equal weights."""
+        import re
 
-        Uses vLLM's structured_outputs choice API to constrain the output to
-        one of the label IDs (A, B, C, ...) in a single forward pass.
-        """
-        from openai import OpenAI
-
-        orch_args = self.orchestrator_config.orchestrator_llm_args or {}
-
-        # Extract connection params from orchestrator_llm_args
-        api_base = orch_args.get("api_base", "http://localhost:8080/v1")
-        api_key = orch_args.get("api_key", "EMPTY")
-
-        # Strip litellm "openai/" prefix for direct OpenAI client
-        model_name = self.orchestrator_config.orchestrator_model
-        if model_name.startswith("openai/"):
-            model_name = model_name[len("openai/"):]
-
-        # Build classifier messages (simple dicts for OpenAI client)
         window = self.orchestrator_config.routing_context_window
-        classifier_messages: list[dict] = [
-            {"role": "system", "content": self._classifier_system_prompt},
+        routing_messages: list[Message] = [
+            SystemMessage(role="system", content=self._routing_multi_system_prompt),
         ]
         non_system = [m for m in messages if not isinstance(m, SystemMessage)]
         recent = non_system[-window:] if window is not None else non_system
+        routing_messages.extend(recent)
 
-        for m in recent:
-            content = getattr(m, "content", None) or ""
-            if not content:
-                continue
-            # Map tool messages to user role for simple context
-            role = "assistant" if m.role == "assistant" else "user"
-            classifier_messages.append({"role": role, "content": content})
-
-        classifier_messages.append(
-            {"role": "user", "content": "Which skill should handle the next response?"}
+        routing_messages.append(
+            UserMessage(
+                role="user",
+                content=(
+                    "Based on the conversation above, which skill should handle this? "
+                    "Answer with SELECTED_SKILL and CONFIDENCE."
+                ),
+            )
         )
 
         try:
-            client = OpenAI(base_url=api_base, api_key=api_key)
-            completion = client.chat.completions.create(
-                model=model_name,
-                messages=classifier_messages,
-                extra_body={
-                    "structured_outputs": {
-                        "choice": self._classifier_labels,
-                    }
-                },
-                temperature=orch_args.get("temperature", 0.0),
-                max_tokens=1,
-                seed=orch_args.get("seed"),
+            response = generate(
+                model=self.orchestrator_config.orchestrator_model,
+                messages=routing_messages,
+                tools=None,
+                **(self.orchestrator_config.orchestrator_llm_args or {}),
             )
-            chosen_label = completion.choices[0].message.content.strip()
         except Exception as e:
-            logger.error(f"Classifier routing call failed: {e}")
+            logger.error(f"LLM multi routing call failed: {e}")
             return self._fallback_decision()
 
-        if chosen_label in self._label_to_skill:
-            skill_name = self._label_to_skill[chosen_label]
-            logger.info(
-                f"[Classifier] label={chosen_label} -> skill={skill_name}"
-            )
-            return SkillRoutingDecision(
-                selected_skill=skill_name,
-                reasoning=f"classifier label {chosen_label}",
-            )
-        else:
-            logger.warning(
-                f"Classifier returned unexpected label: '{chosen_label}'. "
-                f"Expected one of {self._classifier_labels}"
-            )
+        content = (response.content or "").strip()
+
+        # Parse primary skill: SELECTED_SKILL(S): skill_name(, skill_2)
+        match = re.search(
+            r'SELECTED_SKILLS?:\s*(.+)', content, re.IGNORECASE
+        )
+        if not match:
+            logger.warning(f"LLM multi routing parse failed: {content[:200]}")
             return self._fallback_decision()
 
-    def _route_weighted_classifier(
-        self, messages: list[Message]
-    ) -> SkillRoutingDecision:
+        raw = match.group(1).strip()
+        skill_names = [s.strip().rstrip(".") for s in raw.split(",")]
+        valid = [s for s in skill_names if s in self.skill_backends]
+        if not valid:
+            logger.warning(f"No valid skills in: {skill_names}")
+            return self._fallback_decision()
+
+        primary = valid[0]
+        skills = [primary]
+
+        # Check for SECONDARY_SKILL (confidence-gated format)
+        sec_match = re.search(
+            r'SECONDARY_SKILL:\s*(\S+)', content, re.IGNORECASE
+        )
+        if sec_match:
+            sec = sec_match.group(1).strip().rstrip(".")
+            if sec in self.skill_backends and sec != primary:
+                skills.append(sec)
+
+        # Also include comma-separated skills from SELECTED_SKILLS line
+        for s in valid[1:]:
+            if s not in skills:
+                skills.append(s)
+
+        weights = {s: 1.0 for s in skills}
+        reasoning = content[:match.start()].strip()
+        short_reasoning = reasoning[-200:] if len(reasoning) > 200 else reasoning
+
+        weight_str = ", ".join(f"{s}:1.0" for s in skills)
+        print(
+            f"[LLM_MULTI] {' + '.join(skills)} | {weight_str}",
+            flush=True,
+        )
+        logger.info(f"[LLM_MULTI] skills={skills}")
+
+        return SkillRoutingDecision(
+            selected_skill=primary,
+            reasoning=short_reasoning,
+            skill_weights=weights,
+        )
+
+    def _route_classifier(self, messages: list[Message]) -> SkillRoutingDecision:
         """Route using classifier + logprobs -> softmax weights for LoRA merge.
 
-        Same classifier call as _route_classifier but requests logprobs to get
-        soft probability distribution over all skills. These weights are used
-        to create a weighted LoRA merge via /v1/create_weighted_lora.
+        Uses vLLM's structured_outputs choice API to constrain the output to
+        one of the label IDs (A, B, C, ...) in a single forward pass, and
+        requests logprobs to get a soft probability distribution over all
+        skills. These weights are used to create a weighted LoRA merge via
+        /v1/create_weighted_lora.
 
         NOTE: temperature controls weight sharpness. At temp=0.0, weights will
         be extremely peaked (~hard routing). Use temp>0 (e.g., 0.5-1.0) for
@@ -581,14 +670,26 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
                     for alt in token_logprob.top_logprobs:
                         label_logprobs[alt.token.strip()] = alt.logprob
 
+            # Compute raw primary probability (before temperature scaling) for confidence gating
+            if label_logprobs:
+                raw_probs = {l: math.exp(lp) for l, lp in label_logprobs.items()}
+                raw_total = sum(raw_probs.values())
+                if raw_total > 0:
+                    raw_probs = {l: p / raw_total for l, p in raw_probs.items()}
+                self._last_primary_raw_prob = max(raw_probs.values()) if raw_probs else 1.0
+            else:
+                self._last_primary_raw_prob = 1.0
+
             # Convert to skill weights via exp + normalize
+            # Apply classifier_temperature scaling: logprob / T before exp
+            cls_temp = getattr(self.orchestrator_config, 'classifier_temperature', 1.0)
             skill_weights: Dict[str, float] = {}
             if label_logprobs:
-                # exp(logprob) for each label that maps to a known skill
+                # exp(logprob / T) for each label that maps to a known skill
                 exp_probs = {}
                 for label, lp in label_logprobs.items():
                     if label in self._label_to_skill:
-                        exp_probs[label] = math.exp(lp)
+                        exp_probs[label] = math.exp(lp / cls_temp) if cls_temp > 0 else (1.0 if lp == max(label_logprobs.values()) else 0.0)
 
                 # Normalize
                 total = sum(exp_probs.values())
@@ -601,7 +702,7 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
             if len(label_logprobs) < len(self._classifier_labels):
                 missing = set(self._classifier_labels) - set(label_logprobs.keys())
                 logger.warning(
-                    f"[WeightedClassifier] Missing labels in logprobs: {missing}. "
+                    f"[Classifier] Missing labels in logprobs: {missing}. "
                     f"Got: {list(label_logprobs.keys())}"
                 )
 
@@ -610,30 +711,120 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
                 f"{s}:{w:.4f}" for s, w in sorted(skill_weights.items())
             )
             logger.info(
-                f"[WeightedClassifier] label={chosen_label} weights=[{weight_str}]"
+                f"[Classifier] label={chosen_label} weights=[{weight_str}]"
             )
             print(
-                f"[WEIGHTED] label={chosen_label} | {weight_str}",
+                f"[CLASSIFIER] label={chosen_label} | {weight_str}",
                 flush=True,
             )
 
         except Exception as e:
-            logger.error(f"Weighted classifier routing call failed: {e}")
+            logger.error(f"Classifier routing call failed: {e}")
             return self._fallback_decision()
 
         if chosen_label in self._label_to_skill:
             skill_name = self._label_to_skill[chosen_label]
             return SkillRoutingDecision(
                 selected_skill=skill_name,
-                reasoning=f"weighted_classifier label {chosen_label}",
+                reasoning=f"classifier label {chosen_label}",
                 skill_weights=skill_weights,
             )
         else:
             logger.warning(
-                f"Weighted classifier returned unexpected label: '{chosen_label}'. "
+                f"Classifier returned unexpected label: '{chosen_label}'. "
                 f"Expected one of {self._classifier_labels}"
             )
             return self._fallback_decision()
+
+    def _route_embedding(self, messages: list[Message]) -> SkillRoutingDecision:
+        """Route using embedding cosine similarity between conversation and skill descriptions.
+
+        Encodes the recent conversation as a query and computes cosine similarity
+        against pre-encoded skill descriptions. Skills with similarity > threshold
+        are activated with normalized similarity scores as weights. If none exceed
+        the threshold, the highest-similarity skill is selected alone.
+        """
+        window = self.orchestrator_config.routing_context_window
+        non_system = [m for m in messages if not isinstance(m, SystemMessage)]
+        recent = non_system[-window:] if window is not None else non_system
+
+        # Build query text from conversation (user messages only, skip greetings)
+        query_parts = []
+        for m in recent:
+            content = getattr(m, "content", None) or ""
+            if content and m.role == "user":
+                query_parts.append(content)
+        query_text = "\n".join(query_parts) if query_parts else "general inquiry"
+
+        try:
+            # Encode query with custom instruction for skill routing
+            query_embedding = self._embedding_model.encode(
+                [query_text],
+                prompt="Instruct: Given a customer service request, identify which skill category best handles it\nQuery: "
+            )
+
+            # Compute cosine similarity: shape (1, num_skills) -> (num_skills,)
+            similarities = self._embedding_model.similarity(
+                query_embedding, self._skill_description_embeddings
+            )[0]
+        except Exception as e:
+            logger.error(f"Embedding routing failed: {e}")
+            return self._fallback_decision()
+
+        # Build (name, score) pairs sorted descending
+        skill_scores = sorted(
+            [
+                (self._embedding_skill_names[i], float(similarities[i]))
+                for i in range(len(self._embedding_skill_names))
+            ],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+
+        # Filter by threshold
+        threshold = self._embedding_threshold
+        above_threshold = [
+            (name, score) for name, score in skill_scores if score > threshold
+        ]
+
+        if not above_threshold:
+            # None above threshold -> route to highest similarity only
+            selected = [skill_scores[0]]
+        else:
+            selected = above_threshold
+
+        # Build weights
+        if len(selected) == 1:
+            # Single skill: weight = 1.0 (same execution path as topk=1)
+            skill_weights: Dict[str, float] = {selected[0][0]: 1.0}
+        else:
+            # Multiple skills: use similarity scores as weights, clamp >= 0
+            raw = {name: max(score, 0.0) for name, score in selected}
+            total = sum(raw.values())
+            if total > 0:
+                skill_weights = {name: w / total for name, w in raw.items()}
+            else:
+                skill_weights = {name: 1.0 / len(selected) for name, _ in selected}
+
+        primary = selected[0][0]
+
+        # Log
+        weight_str = ", ".join(f"{s}:{w:.4f}" for s, w in skill_weights.items())
+        score_str = ", ".join(f"{s}:{sc:.4f}" for s, sc in skill_scores)
+        logger.info(
+            f"[Embedding] scores=[{score_str}] threshold={threshold} "
+            f"selected=[{weight_str}]"
+        )
+        print(
+            f"[EMBEDDING] {primary} | {weight_str} | scores: {score_str}",
+            flush=True,
+        )
+
+        return SkillRoutingDecision(
+            selected_skill=primary,
+            reasoning=f"embedding similarity (top={skill_scores[0][1]:.4f})",
+            skill_weights=skill_weights,
+        )
 
     def _set_weighted_lora(
         self, skill_weights: Dict[str, float]
@@ -662,20 +853,67 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
                     if first_adapter_model is None:
                         first_adapter_model = f"openai/{skill_config.adapter_name}"
 
+        # Confidence gating: if primary adapter's raw probability exceeds threshold, hard-route
+        min_blend = getattr(self.orchestrator_config, 'min_blend_confidence', None)
+        if min_blend and len(lora_adapters) > 1:
+            sorted_adapters = sorted(lora_adapters, key=lambda a: a["weight"], reverse=True)
+            # Compute raw (pre-temperature) probability of primary
+            raw_total = sum(math.exp(lp) for lp in label_logprobs_raw.values()) if hasattr(self, '_last_label_logprobs_raw') else 0
+            primary_raw = sorted_adapters[0]["weight"]  # Use the weight as proxy
+            # Actually, we need the raw logprobs. Store them from _route_classifier.
+            if hasattr(self, '_last_primary_raw_prob') and self._last_primary_raw_prob >= min_blend:
+                lora_adapters = [sorted_adapters[0]]
+                first_adapter_model = f"openai/{lora_adapters[0]['name']}"
+                logger.info(
+                    f"[ConfGate] Primary raw prob {self._last_primary_raw_prob:.4f} >= {min_blend}, hard-routing"
+                )
+
         # Apply top-k filtering if configured
         routing_topk = getattr(self.orchestrator_config, 'routing_topk', None)
         if routing_topk and len(lora_adapters) > routing_topk:
             lora_adapters.sort(key=lambda a: a["weight"], reverse=True)
             lora_adapters = lora_adapters[:routing_topk]
-            # Renormalize weights
+            first_adapter_model = f"openai/{lora_adapters[0]['name']}"
+
+        # Apply top-p (nucleus) filtering if configured (not used for embedding mode)
+        routing_topp = getattr(self.orchestrator_config, 'routing_topp', None)
+        if routing_topp and len(lora_adapters) > 1 and self.orchestrator_config.routing_mode != "embedding":
+            lora_adapters.sort(key=lambda a: a["weight"], reverse=True)
+            cumsum = 0.0
+            keep = []
+            for a in lora_adapters:
+                keep.append(a)
+                cumsum += a["weight"]
+                if cumsum >= routing_topp:
+                    break
+            lora_adapters = keep
+            first_adapter_model = f"openai/{lora_adapters[0]['name']}"
+            adapter_strs = [f"{a['name']}:{a['weight']:.3f}" for a in lora_adapters]
+            logger.info(
+                f"[TopP] Kept {len(lora_adapters)} adapters "
+                f"(cumsum={cumsum:.3f}, topp={routing_topp}): {adapter_strs}"
+            )
+
+        # When is_weighted=False, set all selected adapters to equal 1/N
+        # (classifier ranking was only used for topk selection above).
+        # Equal weighting preserves the same total LoRA magnitude as a
+        # single adapter: y += sum_i (1/N) * B_i @ A_i @ x
+        if not self.orchestrator_config.is_weighted and lora_adapters:
+            equal_w = 1.0 / len(lora_adapters)
+            for a in lora_adapters:
+                a["weight"] = equal_w
+        elif lora_adapters:
+            # Renormalize weights (is_weighted=True)
             total_w = sum(a["weight"] for a in lora_adapters)
             if total_w > 0:
                 for a in lora_adapters:
                     a["weight"] /= total_w
-            first_adapter_model = f"openai/{lora_adapters[0]['name']}"
 
         if not lora_adapters:
-            # All weight on base model skill -> use base model directly
+            # All weight on base model skill -> use base model directly.
+            # Clear any stale config file so the engine doesn't pick up
+            # weighted LoRA from a prior routing decision.
+            self._clear_weighted_lora()
             first_skill = self.orchestrator_config.skills[0]
             if first_skill.model:
                 return first_skill.model
@@ -713,60 +951,6 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
 
         # Return first adapter as model name — triggers LoRA code path
         return first_adapter_model
-
-    def _route_embedding(self, messages: list[Message]) -> SkillRoutingDecision:
-        """Route by encoding the conversation and finding the most similar skill description.
-
-        Uses SentenceTransformer cosine similarity between a query built from
-        recent conversation messages and the pre-encoded skill descriptions.
-        No API call is needed — inference runs locally on the loaded model.
-        """
-        # Build query from recent conversation messages
-        window = self.orchestrator_config.routing_context_window
-        non_system = [m for m in messages if not isinstance(m, SystemMessage)]
-        recent = non_system[-window:] if window is not None else non_system
-
-        # Concatenate recent message contents into a single query string
-        query_parts: list[str] = []
-        for m in recent:
-            content = getattr(m, "content", None) or ""
-            if content:
-                query_parts.append(content)
-
-        if not query_parts:
-            logger.warning("[Embedding Router] No message content for routing query")
-            return self._fallback_decision()
-
-        query_text = "\n".join(query_parts)
-
-        try:
-            # Encode the query using the "query" prompt (as recommended by Qwen3-Embedding)
-            query_embedding = self._embedding_model.encode(
-                [query_text], prompt_name="query"
-            )
-            # Compute cosine similarity against pre-encoded skill descriptions
-            similarity = self._embedding_model.similarity(
-                query_embedding, self._embedding_skill_vectors
-            )
-            # similarity shape: (1, num_skills) — get the best match
-            scores = similarity[0]  # first (only) query row
-            best_idx = int(scores.argmax())
-            best_score = float(scores[best_idx])
-            skill_name = self._embedding_skill_names[best_idx]
-
-            score_details = [f'{self._embedding_skill_names[i]}:{float(scores[i]):.4f}' for i in range(len(self._embedding_skill_names))]
-            logger.info(
-                f"[Embedding Router] Best match: {skill_name} "
-                f"(score={best_score:.4f}, scores={score_details})"
-            )
-            print(f"[EMBED] {skill_name} (best={best_score:.4f}) | {' '.join(score_details)}", flush=True)
-            return SkillRoutingDecision(
-                selected_skill=skill_name,
-                reasoning=f"embedding similarity {best_score:.4f}",
-            )
-        except Exception as e:
-            logger.error(f"Embedding routing failed: {e}")
-            return self._fallback_decision()
 
     def _parse_routing_response(
         self, response: AssistantMessage
@@ -834,6 +1018,7 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
         return SkillRoutingDecision(
             selected_skill=first_skill,
             reasoning="fallback — routing parse failed",
+            skill_weights={first_skill: 1.0},
         )
 
     # ------------------------------------------------------------------
@@ -848,13 +1033,30 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
         return backend.generate(messages)
 
     def _weighted_generate(
-        self, skill_weights: Dict[str, float], messages: list[Message]
+        self, skill_weights: Dict[str, float], messages: list[Message],
+        selected_skill: Optional[str] = None,
     ) -> AssistantMessage:
         """Generate using a weighted LoRA merge of multiple skills.
 
         Sets weighted LoRA config, then generates through the appropriate
         skill backend. Falls back to hard selection if config fails.
+
+        If `selected_skill` is a base-model skill (no LoRA adapter),
+        bypasses the weighted LoRA path entirely and generates directly
+        with the base model to avoid residual adapter weights from the
+        soft classifier distribution.
         """
+        # If the selected skill is a base-model skill (no adapter),
+        # generate directly without weighted LoRA.
+        if selected_skill:
+            is_base_model_skill = not any(
+                s.adapter_name for s in self.orchestrator_config.skills
+                if s.name == selected_skill
+            )
+            if is_base_model_skill:
+                self._clear_weighted_lora()
+                return self._single_skill_generate(selected_skill, messages)
+
         merged_model = self._set_weighted_lora(skill_weights)
 
         if merged_model is None:
@@ -922,28 +1124,64 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
         )
         print(f"[ROUTING] Task routing -> {decision.selected_skill} (reason: {decision.reasoning})")
 
-        # Step 2: For per_conversation + topk=1, hot-swap so only the
-        # selected adapter is loaded (once, on first routing decision).
-        # This ensures the adapter always occupies slot 0 on a clean slate,
-        # matching single-adapter serving behavior exactly.
+        # Step 2: For per_conversation, hot-swap so only the selected
+        # adapter is loaded (once, on first routing decision) when the
+        # effective number of adapters is 1.  This ensures the adapter
+        # always occupies slot 0 on a clean slate, matching single-adapter
+        # serving behavior exactly.
         topk = self.orchestrator_config.routing_topk
+        effective_single = topk == 1
+        if not effective_single and len(state.routing_history) == 1:
+            # Check if topp filtering would leave only 1 adapter (not used for embedding)
+            routing_topp = getattr(self.orchestrator_config, 'routing_topp', None)
+            skill_weights = decision.skill_weights or {}
+            if routing_topp and skill_weights and self.orchestrator_config.routing_mode != "embedding":
+                adapter_weights = sorted(
+                    (w for name, w in skill_weights.items()
+                     if any(s.adapter_name for s in self.orchestrator_config.skills
+                            if s.name == name) and w > 0),
+                    reverse=True,
+                )
+                if adapter_weights:
+                    cumsum = 0.0
+                    n_kept = 0
+                    for w in adapter_weights:
+                        cumsum += w
+                        n_kept += 1
+                        if cumsum >= routing_topp:
+                            break
+                    effective_single = n_kept == 1
+
+        # For embedding mode, single-skill selection → same path as topk=1
+        if not effective_single and self.orchestrator_config.routing_mode == "embedding":
+            if decision.skill_weights and len(decision.skill_weights) == 1:
+                effective_single = True
+
         if (
             strategy == "per_conversation"
-            and topk == 1
+            and effective_single
             and len(state.routing_history) == 1  # first turn only
         ):
             self._hot_swap_adapter(decision.selected_skill)
 
-        # Step 3: Generate using the selected skill (or weighted merge)
-        if decision.skill_weights:
-            # Weighted classifier mode: create merged LoRA and generate
-            assistant_message = self._weighted_generate(
-                decision.skill_weights, full_messages
-            )
-        else:
-            assistant_message = self._single_skill_generate(
-                decision.selected_skill, full_messages
-            )
+        # Step 3: Generate using weighted LoRA (deterministic torch.matmul path).
+        # Always prefer _weighted_generate for determinism — the standard Triton
+        # lora_shrink uses SPLIT_K>1 atomic_add which is nondeterministic.
+        # Construct skill_weights if missing (e.g. from fallback/skip_routing).
+        # When effective_single, use {skill: 1.0} to match solo config path exactly.
+        weights = decision.skill_weights
+        if not weights or effective_single:
+            weights = {decision.selected_skill: 1.0}
+
+        # When is_weighted=False, keep classifier ranking for topk filtering
+        # but set final weights to equal (1.0) for all selected adapters.
+        # _set_weighted_lora does topk filtering using the weights, so we
+        # pass them through for filtering, then equalize in _set_weighted_lora.
+        # We signal this by storing the flag on the config (already there).
+
+        assistant_message = self._weighted_generate(
+            weights, full_messages, selected_skill=decision.selected_skill
+        )
 
         state.messages.append(assistant_message)
         return assistant_message, state

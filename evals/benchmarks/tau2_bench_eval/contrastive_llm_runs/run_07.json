@@ -1,0 +1,67 @@
+{
+  "attempt": 7,
+  "skills": [
+    {
+      "name": "Exact Parameter Recall",
+      "description": "When executing tool calls, the agent consistently selects wrong specific identifiers or values — wrong item IDs, flight numbers, payment method IDs, reservation IDs, refund amounts, or order IDs — even though the correct information is present in the conversation context. The right action type is chosen but the specific arguments are incorrect.",
+      "covered_tasks": [
+        "A2", "A8", "A12", "A15", "A16", "A17", "A19", "A20", "A21", "A22",
+        "A24", "A25", "A27", "A29", "A30", "A31", "A32", "A33", "A35", "A37",
+        "A38",
+        "R1", "R5", "R6", "R7", "R8", "R9", "R20", "R22", "R23", "R29",
+        "R39", "R41", "R42", "R44", "R49", "R54", "R59", "R60", "R64", "R66",
+        "R67", "R71", "R72", "R79", "R92", "R93", "R97", "R99", "R100",
+        "R109", "R111", "R112"
+      ],
+      "reasoning": "This is the single most common failure pattern: the agent performs the semantically correct action (update flight, exchange item, cancel reservation) but with wrong specific parameter values, causing the database operation to act on the wrong entity or with incorrect attributes."
+    },
+    {
+      "name": "Sequential Multi-step Completion",
+      "description": "When a task requires executing multiple distinct operations in sequence, the agent fails to complete all of them — either stopping after the first operation, missing secondary requests, or having later steps become blocked because an earlier action changed the state in a way that prevents subsequent operations (e.g., initiating a return before attempting an exchange on the same order).",
+      "covered_tasks": [
+        "A18", "A37", "A41",
+        "R16", "R25", "R28", "R30", "R33", "R34", "R91", "R101", "R102",
+        "R103", "R104"
+      ],
+      "reasoning": "The agent systematically fails at compound tasks: it either does some but not all requested operations, or the ordering of operations creates state conflicts (e.g., return-then-exchange) that the agent fails to anticipate or work around."
+    },
+    {
+      "name": "Policy-Constrained Action Selection",
+      "description": "The agent misapplies domain policies when choosing what action to take: it either refuses valid requests by citing an inapplicable policy constraint, performs actions that should be blocked by policy, or takes the wrong conditional branch in tasks with if-then-else logic (e.g., 'cancel if unavailable, otherwise modify').",
+      "covered_tasks": [
+        "A7", "A13", "A14", "A23", "A26", "A36", "A39", "A43", "A47", "A49",
+        "R10", "R12", "R19", "R36", "R37", "R46", "R47", "R82", "R83",
+        "R106", "R107"
+      ],
+      "reasoning": "The agent consistently makes the wrong binary choice when policies constrain action eligibility — sometimes completing actions that should be refused or transferred, and other times refusing or transferring when the action should be completed."
+    },
+    {
+      "name": "Task Scope Adherence",
+      "description": "The agent either over-executes (cancels an entire order when asked to cancel one item, issues a large compensation when a small one was specified, operates on adjacent resources not mentioned in the task) or under-executes by narrowing the task scope and missing required work. This is about the breadth of WHAT actions are taken, not the specifics of HOW they are parameterized.",
+      "covered_tasks": [
+        "A10", "A11",
+        "R3", "R4", "R21", "R24", "R27", "R45", "R51", "R52", "R57", "R74",
+        "R80", "R90", "R110"
+      ],
+      "reasoning": "The agent systematically misjudges the intended scope: it cancels whole orders when partial actions were needed, issues disproportionate compensations, or applies exchanges to the wrong item category — showing consistent difficulty calibrating how much to act versus how much to withhold."
+    },
+    {
+      "name": "Conversation Closure Under Social Pressure",
+      "description": "Once the task is functionally complete, the agent fails to close the conversation when the user engages in flattery, emotional storytelling, or sustained indecision. The agent keeps responding in kind — sometimes taking additional unintended actions — rather than politely acknowledging and ending the interaction.",
+      "covered_tasks": [
+        "A9",
+        "R62", "R80"
+      ],
+      "reasoning": "The agent lacks a termination signal when customers become socially or emotionally engaging after task completion: it gets drawn into multi-turn flattery loops (A9: 30+ turns), prolonged narrative engagement (R80: t-shirt decision loop), or off-topic tool calls (R62: random product lookups after declining irrelevant poem question)."
+    },
+    {
+      "name": "Tool Error Recovery",
+      "description": "When a tool call returns an error, the agent enters repetitive retry loops, invents workaround actions that compound the error state, or fails to reach a clean resolution within the conversation step limit. The agent does not cleanly detect and communicate an impasse, nor does it fall back to a transfer-to-human path when recovery is impossible.",
+      "covered_tasks": [
+        "A42", "A44",
+        "R31", "R56", "R65", "R76"
+      ],
+      "reasoning": "These cases all hit max_steps or too_many_errors termination because the agent loops on failed tool calls: it retries the same failing call, generates alternative workarounds that create new errors, or calls irrelevant tools while unable to progress — never recognizing that the impasse requires escalation or graceful termination."
+    }
+  ]
+}

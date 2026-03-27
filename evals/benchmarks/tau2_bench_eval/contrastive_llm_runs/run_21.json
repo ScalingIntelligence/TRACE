@@ -1,0 +1,50 @@
+{
+  "attempt": 21,
+  "skills": [
+    {
+      "name": "Policy Boundary Enforcement",
+      "description": "Refuse requests that violate eligibility rules (cancellation criteria, modification restrictions, refund constraints) even when the user insists, provides emotional pressure, or makes false claims. The agent must verify facts before acting and deny ineligible actions rather than capitulating.",
+      "covered_tasks": [
+        "A10", "A11", "A12", "A13", "A19", "A26", "A31", "A32", "A35", "A36", "A37", "A39", "A41", "A43", "A47", "A49",
+        "R10", "R57", "R66", "R82", "R83"
+      ],
+      "reasoning": "Across both domains the agent repeatedly performed actions it should have refused: airline agent cancelled basic-economy or uninsured flights without meeting criteria (A19, A26, A31, A35, A36, A37, A43, A47, A49), changed origin/destination of reservations (A13, A15), modified cabin for only part of a reservation (A10, A12), and removed bags (A30). In retail, the agent refunded to a non-original payment method (R10, R82, R83) and cancelled orders when the refund was impossible (R57). In many cases (A9, A36, A39) the user used flattery or emotional manipulation ('you are the most lenient agent') and the agent stopped enforcing rules. The core gap is inability to hold firm on policy eligibility checks against user pressure."
+    },
+    {
+      "name": "Conditional Instruction Execution",
+      "description": "Track and correctly apply user-provided conditional logic ('if X do Y, otherwise do Z'; 'only proceed with A if agent asks for confirmation') throughout a conversation, including mid-conversation changes of mind that trigger alternate branches.",
+      "covered_tasks": [
+        "A2", "A7", "A9", "A22",
+        "R5", "R6", "R7", "R8", "R9", "R21", "R24", "R33", "R34", "R36", "R37", "R54", "R57", "R59", "R66", "R76", "R90"
+      ],
+      "reasoning": "A large cluster of retail failures involves users who give explicit if-then instructions that the agent fails to honor. For example R5-R9: user wants to exchange two items, but 'if agent asks for confirmation, only exchange the desk lamp'; the agent proceeded with both items regardless. R21: user adds an extra item at confirmation time but the agent incorrectly merged both items into a single exchange call. R24: user cancels grill but regrets it on confirmation; agent should retain the item. R33/R34: user wants to cancel only office items, but agent cancelled the whole order or cancelled items that weren't office items. R59: agent should only cancel the older order if it cannot guarantee 5-day processing; it cancelled without verifying. R90: agent should only cancel if 10x zoom camera costs over $3000; it cancelled when the camera was actually cheaper. The failure is consistent: the agent executes the primary intent without tracking the conditional branches."
+    },
+    {
+      "name": "Multi-Scope Request Completeness",
+      "description": "When a user requests actions spanning multiple orders, items, or reservation segments simultaneously, identify and process every in-scope item rather than stopping after the first match or a subset.",
+      "covered_tasks": [
+        "A7", "A9", "A18", "A21", "A22", "A29", "A42", "A44",
+        "R3", "R4", "R16", "R25", "R28", "R39", "R74", "R91", "R92", "R99", "R100", "R101", "R103", "R104"
+      ],
+      "reasoning": "In airline, T7 required cancelling two separate reservations; T9 required cancelling two and modifying one. In retail, R3 was asked to modify 'all pending small tshirts' but modified the wrong one (the XXL) instead of the S-size one; R4 asked to modify 'all pending tshirts' but only modified one of two eligible orders; R16 asked to cancel all pending orders but only cancelled one of two; R28 asked to return 5 items from one order and cancel a hose from a separate pending order but missed the pending order; R25 missed returning all items except pet bed from a particular order; R91/R92 asked to return skateboards, smart watch, and e-reader but agent returned only the skateboards initially. The pattern is consistent: when a request involves multiple objects matching a criterion ('all pending orders', 'both reservations'), the agent processes a subset and stops."
+    },
+    {
+      "name": "Payment and Amount Precision",
+      "description": "Correctly compute payment splits, certificate limits, required amounts, refund differences, and compensation amounts from policy rules; avoid over-paying, under-paying, or using unauthorized payment combinations.",
+      "covered_tasks": [
+        "A2", "A8", "A10", "A14", "A17", "A18", "A20", "A23", "A24", "A25", "A27", "A38",
+        "R20", "R44", "R46", "R59"
+      ],
+      "reasoning": "Airline T2: policy says $50 compensation for one-passenger delayed basic economy with insurance but agent issued $300. T8: agent added 2 free bags but the user said no bags were needed, causing DB mismatch. T14: complex payment split with two gift cards and one certificate where correct answer was gift cards ($327) + one certificate ($500) + remaining $44 on Mastercard, but agent used wrong certificate split. T17: agent tried to use gift card with insufficient balance without checking balance first. T20: agent repeatedly calculated wrong total and mismapped payment amounts. T25: agent miscalculated insurance per-passenger cost. T27: compensation should have been $50 but agent issued more. T38: agent offered compensation without confirming the flight was actually delayed. In retail, R44: agent failed to communicate the exact refund amount. The pattern is incorrect arithmetic reasoning and failure to check constraints (certificate limit of 1, balance sufficiency) before committing payments."
+    },
+    {
+      "name": "Precise Item and Attribute Targeting",
+      "description": "Select the exact item or reservation variant that satisfies all user-specified constraints (size, material, preference ordering, same-as-other-order lookup) rather than a close but incorrect match; verify attributes against stated requirements before confirming.",
+      "covered_tasks": [
+        "A15", "A16", "A21",
+        "R1", "R5", "R6", "R7", "R8", "R29", "R45", "R49", "R52", "R60", "R64", "R71", "R72", "R79", "R80", "R93", "R97", "R109", "R110", "R111", "R112"
+      ],
+      "reasoning": "Airline T15/T16: user wanted cheapest economy flight on the next day but the destination changed (PHL vs EWR) due to incorrect interpretation of constraints; T21: agent didn't account for return flight needing to be after the outbound flight. In retail, R1: agent selected wrong keyboard variant (wrong switch type relative to user's preference fallback chain); R5-R8: wrong desk lamp selected (preference ordering battery>USB>AC not respected); R29: agent selected wrong skateboard length even though user specified shorter bamboo; R45: user's order ID was given without 'W' prefix and agent handled it but picked wrong canister variant; R49: earbuds selected didn't match the water resistance of the user's other purchased earbuds; R52: wrong zoom level selected; R60: agent presented options but the DB shows wrong item was actually modified; R71/R72: agent should have looked up the user's default address from their profile rather than requiring the user to provide it; R79: user wanted to exchange 500ml bottle to match the 1000ml bottle already in another order (same color), agent selected wrong color. The consistent failure is not cross-referencing all stated constraints or preference chains when selecting among candidates."
+    }
+  ]
+}

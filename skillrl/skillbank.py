@@ -20,12 +20,18 @@ class SkillBank:
         Args:
             skills_path: Path to JSON file with format:
                 {"general_skills": [...], "category_skills": {"cat_name": [...]}}
+                OR flat format: {"skills": [...]}
         """
         with open(skills_path) as f:
             data = json.load(f)
 
-        self.general_skills: List[dict] = data.get("general_skills", [])
-        self.category_skills: Dict[str, List[dict]] = data.get("category_skills", {})
+        # Support flat format: {"skills": [...]}
+        if "skills" in data and "general_skills" not in data:
+            self.general_skills: List[dict] = data["skills"]
+            self.category_skills: Dict[str, List[dict]] = {}
+        else:
+            self.general_skills: List[dict] = data.get("general_skills", [])
+            self.category_skills: Dict[str, List[dict]] = data.get("category_skills", {})
         self.skills_path = skills_path
         self._domain = Path(skills_path).stem.replace("_skills", "")
 
@@ -39,12 +45,19 @@ class SkillBank:
         return len(self.general_skills) + cat_count
 
     def _format_skill(self, skill: dict) -> str:
-        return SKILL_ENTRY_TEMPLATE.format(
-            skill_id=skill["skill_id"],
-            title=skill["title"],
-            principle=skill["principle"],
-            when_to_apply=skill["when_to_apply"],
-        )
+        if "when_to_apply" in skill:
+            return SKILL_ENTRY_TEMPLATE.format(
+                skill_id=skill["skill_id"],
+                title=skill["title"],
+                principle=skill["principle"],
+                when_to_apply=skill["when_to_apply"],
+            )
+        else:
+            return "[{skill_id}] {title}\n  Principle: {principle}".format(
+                skill_id=skill["skill_id"],
+                title=skill["title"],
+                principle=skill["principle"],
+            )
 
     def _format_skill_list(self, skills: List[dict]) -> str:
         return "\n".join(self._format_skill(s) for s in skills)
@@ -93,13 +106,23 @@ class SkillBank:
 
         Args:
             conversation_text: Current conversation for category detection.
-            top_k: Max number of category-specific skills to include.
+            top_k: Max total number of skills to include (general + category).
+                   For flat-format skill banks, this limits the total directly.
             categories: Override detected categories.
 
         Returns:
             Formatted skills section string.
         """
-        # General skills always included
+        # For flat-format skill banks (no categories), just take top_k from general
+        if not self.category_skills:
+            skills = self.general_skills[:top_k]
+            skills_text = self._format_skill_list(skills)
+            return SKILL_SECTION_TEMPLATE.format(
+                general_skills=skills_text,
+                category_skills="(None)",
+            )
+
+        # Hierarchical format: general skills always included
         general_text = self._format_skill_list(self.general_skills)
 
         # Detect or use provided categories
@@ -117,8 +140,9 @@ class SkillBank:
             for skills_list in self.category_skills.values():
                 cat_skills.extend(skills_list)
 
-        # Top-K limit
-        cat_skills = cat_skills[:top_k]
+        # Top-K limit on category skills
+        remaining = max(0, top_k - len(self.general_skills))
+        cat_skills = cat_skills[:remaining]
         cat_text = self._format_skill_list(cat_skills) if cat_skills else "(No specific skills matched)"
 
         return SKILL_SECTION_TEMPLATE.format(

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Mixed GRPO training: SDR + multistep + precondition + tau_tool_calling (4 games)
-# Warm-start from precondition-v1-40 LoRA
+# Mixed GRPO training: revised SDR + multistep + precondition + tau_tool_calling (4 games)
+# Uses _revised envs: adversarial users, conditional fallback, DB hash verification,
+# cross-entity reasoning, progressive disclosure
 # Agent rollout model: vLLM (base Qwen3-30B) on port 8080
 # User simulator: vLLM (base Qwen3-30B) on port 9000
 
@@ -17,7 +18,7 @@ VLLM_ALLOW_RUNTIME_LORA_UPDATING=True \
 VLLM_RPC_TIMEOUT=2000 \
 PYTHONUNBUFFERED=1 \
 torchrun --nproc_per_node=6 --master-port 29501 train_grpo_optimized.py \
-    --games "structured_data_reasoning:0.25,multistep_task:0.25,precondition_check:0.25,tau_tool_calling:0.25" \
+    --games "structured_data_reasoning_revised:0.25,multistep_task_revised:0.25,precondition_check_revised:0.25,tau_tool_calling_revised:0.25" \
     --model Qwen/Qwen3-30B-A3B-Instruct-2507 \
     --compact-tools \
     --lr 5e-6 \

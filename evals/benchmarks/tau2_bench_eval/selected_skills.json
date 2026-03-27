@@ -1,0 +1,30 @@
+[
+  {
+    "skill": "simple_update",
+    "assigned_model": "base",
+    "mean_success_rate": 54.0,
+    "consistency": 100.0,
+    "appearances": 5
+  },
+  {
+    "skill": "simple_information_lookup",
+    "assigned_model": "base",
+    "mean_success_rate": 33.22,
+    "consistency": 100.0,
+    "appearances": 2
+  },
+  {
+    "skill": "update_with_search",
+    "assigned_model": "base",
+    "mean_success_rate": 27.87,
+    "consistency": 100.0,
+    "appearances": 4
+  },
+  {
+    "skill": "two_step_modification",
+    "assigned_model": "base",
+    "mean_success_rate": 19.52,
+    "consistency": 100.0,
+    "appearances": 5
+  }
+]

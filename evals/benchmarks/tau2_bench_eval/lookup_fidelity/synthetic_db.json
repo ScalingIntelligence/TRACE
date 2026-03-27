@@ -1,0 +1,216 @@
+{
+  "products": {
+    "P001": {
+      "name": "Wireless Headphones",
+      "product_id": "P001",
+      "variants": {
+        "V001A": {"item_id": "V001A", "options": {"color": "black", "type": "over-ear", "noise_cancelling": "yes"}, "available": true, "price": 249.99},
+        "V001B": {"item_id": "V001B", "options": {"color": "white", "type": "over-ear", "noise_cancelling": "yes"}, "available": true, "price": 259.99},
+        "V001C": {"item_id": "V001C", "options": {"color": "black", "type": "in-ear", "noise_cancelling": "yes"}, "available": true, "price": 179.99},
+        "V001D": {"item_id": "V001D", "options": {"color": "silver", "type": "over-ear", "noise_cancelling": "no"}, "available": true, "price": 149.99},
+        "V001E": {"item_id": "V001E", "options": {"color": "black", "type": "over-ear", "noise_cancelling": "no"}, "available": false, "price": 139.99},
+        "V001F": {"item_id": "V001F", "options": {"color": "blue", "type": "in-ear", "noise_cancelling": "no"}, "available": true, "price": 89.99},
+        "V001G": {"item_id": "V001G", "options": {"color": "white", "type": "in-ear", "noise_cancelling": "yes"}, "available": false, "price": 189.99}
+      }
+    },
+    "P002": {
+      "name": "Running Shoes",
+      "product_id": "P002",
+      "variants": {
+        "V002A": {"item_id": "V002A", "options": {"size": "9", "color": "red", "material": "mesh", "sole": "rubber"}, "available": true, "price": 129.99},
+        "V002B": {"item_id": "V002B", "options": {"size": "10", "color": "black", "material": "leather", "sole": "EVA"}, "available": true, "price": 159.99},
+        "V002C": {"item_id": "V002C", "options": {"size": "9", "color": "blue", "material": "mesh", "sole": "EVA"}, "available": true, "price": 139.99},
+        "V002D": {"item_id": "V002D", "options": {"size": "10", "color": "white", "material": "mesh", "sole": "rubber"}, "available": true, "price": 119.99},
+        "V002E": {"item_id": "V002E", "options": {"size": "9", "color": "black", "material": "leather", "sole": "rubber"}, "available": false, "price": 169.99},
+        "V002F": {"item_id": "V002F", "options": {"size": "11", "color": "red", "material": "mesh", "sole": "EVA"}, "available": true, "price": 134.99},
+        "V002G": {"item_id": "V002G", "options": {"size": "10", "color": "red", "material": "leather", "sole": "rubber"}, "available": true, "price": 174.99},
+        "V002H": {"item_id": "V002H", "options": {"size": "9", "color": "white", "material": "leather", "sole": "EVA"}, "available": true, "price": 154.99}
+      }
+    },
+    "P003": {
+      "name": "Smart Watch",
+      "product_id": "P003",
+      "variants": {
+        "V003A": {"item_id": "V003A", "options": {"color": "black", "band": "silicone", "display": "AMOLED", "gps": "yes"}, "available": true, "price": 349.99},
+        "V003B": {"item_id": "V003B", "options": {"color": "silver", "band": "metal", "display": "AMOLED", "gps": "yes"}, "available": true, "price": 429.99},
+        "V003C": {"item_id": "V003C", "options": {"color": "gold", "band": "leather", "display": "LCD", "gps": "no"}, "available": true, "price": 279.99},
+        "V003D": {"item_id": "V003D", "options": {"color": "black", "band": "metal", "display": "LCD", "gps": "yes"}, "available": false, "price": 399.99},
+        "V003E": {"item_id": "V003E", "options": {"color": "silver", "band": "silicone", "display": "AMOLED", "gps": "no"}, "available": true, "price": 299.99},
+        "V003F": {"item_id": "V003F", "options": {"color": "rose gold", "band": "leather", "display": "AMOLED", "gps": "yes"}, "available": true, "price": 449.99}
+      }
+    },
+    "P004": {
+      "name": "Desk Lamp",
+      "product_id": "P004",
+      "variants": {
+        "V004A": {"item_id": "V004A", "options": {"color": "white", "brightness": "high", "power_source": "USB"}, "available": true, "price": 64.99},
+        "V004B": {"item_id": "V004B", "options": {"color": "black", "brightness": "low", "power_source": "battery"}, "available": true, "price": 39.99},
+        "V004C": {"item_id": "V004C", "options": {"color": "white", "brightness": "medium", "power_source": "AC"}, "available": true, "price": 54.99},
+        "V004D": {"item_id": "V004D", "options": {"color": "silver", "brightness": "high", "power_source": "AC"}, "available": true, "price": 74.99},
+        "V004E": {"item_id": "V004E", "options": {"color": "black", "brightness": "medium", "power_source": "USB"}, "available": true, "price": 49.99},
+        "V004F": {"item_id": "V004F", "options": {"color": "white", "brightness": "low", "power_source": "battery"}, "available": false, "price": 34.99}
+      }
+    },
+    "P005": {
+      "name": "Backpack",
+      "product_id": "P005",
+      "variants": {
+        "V005A": {"item_id": "V005A", "options": {"capacity": "20L", "color": "black", "material": "nylon", "waterproof": "yes"}, "available": true, "price": 79.99},
+        "V005B": {"item_id": "V005B", "options": {"capacity": "30L", "color": "navy", "material": "polyester", "waterproof": "no"}, "available": true, "price": 59.99},
+        "V005C": {"item_id": "V005C", "options": {"capacity": "30L", "color": "black", "material": "nylon", "waterproof": "yes"}, "available": true, "price": 99.99},
+        "V005D": {"item_id": "V005D", "options": {"capacity": "20L", "color": "gray", "material": "canvas", "waterproof": "no"}, "available": true, "price": 49.99},
+        "V005E": {"item_id": "V005E", "options": {"capacity": "40L", "color": "green", "material": "nylon", "waterproof": "yes"}, "available": true, "price": 119.99},
+        "V005F": {"item_id": "V005F", "options": {"capacity": "30L", "color": "black", "material": "canvas", "waterproof": "no"}, "available": false, "price": 69.99}
+      }
+    },
+    "P006": {
+      "name": "Coffee Maker",
+      "product_id": "P006",
+      "variants": {
+        "V006A": {"item_id": "V006A", "options": {"type": "drip", "capacity": "12-cup", "color": "black", "grinder": "none"}, "available": true, "price": 89.99},
+        "V006B": {"item_id": "V006B", "options": {"type": "espresso", "capacity": "2-cup", "color": "silver", "grinder": "built-in"}, "available": true, "price": 299.99},
+        "V006C": {"item_id": "V006C", "options": {"type": "drip", "capacity": "8-cup", "color": "white", "grinder": "none"}, "available": true, "price": 69.99},
+        "V006D": {"item_id": "V006D", "options": {"type": "espresso", "capacity": "2-cup", "color": "black", "grinder": "none"}, "available": true, "price": 199.99},
+        "V006E": {"item_id": "V006E", "options": {"type": "french press", "capacity": "4-cup", "color": "black", "grinder": "none"}, "available": true, "price": 34.99},
+        "V006F": {"item_id": "V006F", "options": {"type": "drip", "capacity": "12-cup", "color": "silver", "grinder": "built-in"}, "available": true, "price": 149.99},
+        "V006G": {"item_id": "V006G", "options": {"type": "espresso", "capacity": "4-cup", "color": "silver", "grinder": "built-in"}, "available": false, "price": 349.99}
+      }
+    }
+  },
+  "users": {
+    "alice_chen_4521": {
+      "user_id": "alice_chen_4521",
+      "name": {"first_name": "Alice", "last_name": "Chen"},
+      "address": {"address1": "742 Maple Drive", "address2": "Apt 3B", "city": "Portland", "country": "USA", "state": "OR", "zip": "97201"},
+      "email": "alice.chen4521@example.com",
+      "payment_methods": {
+        "credit_card_8891234": {"source": "credit_card", "id": "credit_card_8891234", "brand": "visa", "last_four": "4532"},
+        "gift_card_7712345": {"source": "gift_card", "id": "gift_card_7712345", "balance": 150.00},
+        "paypal_3345678": {"source": "paypal", "id": "paypal_3345678"}
+      },
+      "orders": ["#W1001001", "#W1001002", "#W1001003"]
+    },
+    "bob_martinez_7832": {
+      "user_id": "bob_martinez_7832",
+      "name": {"first_name": "Bob", "last_name": "Martinez"},
+      "address": {"address1": "518 Oak Street", "address2": "", "city": "Austin", "country": "USA", "state": "TX", "zip": "78701"},
+      "email": "bob.martinez7832@example.com",
+      "payment_methods": {
+        "credit_card_5567890": {"source": "credit_card", "id": "credit_card_5567890", "brand": "mastercard", "last_four": "9876"},
+        "gift_card_2234567": {"source": "gift_card", "id": "gift_card_2234567", "balance": 75.00}
+      },
+      "orders": ["#W1002001", "#W1002002"]
+    },
+    "carol_nguyen_3156": {
+      "user_id": "carol_nguyen_3156",
+      "name": {"first_name": "Carol", "last_name": "Nguyen"},
+      "address": {"address1": "203 Pine Avenue", "address2": "Suite 100", "city": "Seattle", "country": "USA", "state": "WA", "zip": "98101"},
+      "email": "carol.nguyen3156@example.com",
+      "payment_methods": {
+        "credit_card_9901234": {"source": "credit_card", "id": "credit_card_9901234", "brand": "visa", "last_four": "1234"},
+        "gift_card_4456789": {"source": "gift_card", "id": "gift_card_4456789", "balance": 200.00},
+        "paypal_6678901": {"source": "paypal", "id": "paypal_6678901"}
+      },
+      "orders": ["#W1003001", "#W1003002", "#W1003003"]
+    }
+  },
+  "orders": {
+    "#W1001001": {
+      "order_id": "#W1001001",
+      "user_id": "alice_chen_4521",
+      "address": {"address1": "742 Maple Drive", "address2": "Apt 3B", "city": "Portland", "country": "USA", "state": "OR", "zip": "97201"},
+      "items": [
+        {"name": "Wireless Headphones", "product_id": "P001", "item_id": "V001A", "price": 249.99, "options": {"color": "black", "type": "over-ear", "noise_cancelling": "yes"}},
+        {"name": "Smart Watch", "product_id": "P003", "item_id": "V003C", "price": 279.99, "options": {"color": "gold", "band": "leather", "display": "LCD", "gps": "no"}}
+      ],
+      "status": "delivered",
+      "fulfillments": [{"tracking_id": ["TRK100100101"], "item_ids": ["V001A", "V003C"]}],
+      "payment_history": [{"transaction_type": "payment", "amount": 529.98, "payment_method_id": "credit_card_8891234"}]
+    },
+    "#W1001002": {
+      "order_id": "#W1001002",
+      "user_id": "alice_chen_4521",
+      "address": {"address1": "742 Maple Drive", "address2": "Apt 3B", "city": "Portland", "country": "USA", "state": "OR", "zip": "97201"},
+      "items": [
+        {"name": "Running Shoes", "product_id": "P002", "item_id": "V002A", "price": 129.99, "options": {"size": "9", "color": "red", "material": "mesh", "sole": "rubber"}},
+        {"name": "Backpack", "product_id": "P005", "item_id": "V005B", "price": 59.99, "options": {"capacity": "30L", "color": "navy", "material": "polyester", "waterproof": "no"}}
+      ],
+      "status": "pending",
+      "fulfillments": [],
+      "payment_history": [{"transaction_type": "payment", "amount": 189.98, "payment_method_id": "gift_card_7712345"}]
+    },
+    "#W1001003": {
+      "order_id": "#W1001003",
+      "user_id": "alice_chen_4521",
+      "address": {"address1": "742 Maple Drive", "address2": "Apt 3B", "city": "Portland", "country": "USA", "state": "OR", "zip": "97201"},
+      "items": [
+        {"name": "Desk Lamp", "product_id": "P004", "item_id": "V004A", "price": 64.99, "options": {"color": "white", "brightness": "high", "power_source": "USB"}},
+        {"name": "Coffee Maker", "product_id": "P006", "item_id": "V006A", "price": 89.99, "options": {"type": "drip", "capacity": "12-cup", "color": "black", "grinder": "none"}}
+      ],
+      "status": "delivered",
+      "fulfillments": [{"tracking_id": ["TRK100100301"], "item_ids": ["V004A", "V006A"]}],
+      "payment_history": [{"transaction_type": "payment", "amount": 154.98, "payment_method_id": "paypal_3345678"}]
+    },
+    "#W1002001": {
+      "order_id": "#W1002001",
+      "user_id": "bob_martinez_7832",
+      "address": {"address1": "518 Oak Street", "address2": "", "city": "Austin", "country": "USA", "state": "TX", "zip": "78701"},
+      "items": [
+        {"name": "Smart Watch", "product_id": "P003", "item_id": "V003E", "price": 299.99, "options": {"color": "silver", "band": "silicone", "display": "AMOLED", "gps": "no"}},
+        {"name": "Wireless Headphones", "product_id": "P001", "item_id": "V001C", "price": 179.99, "options": {"color": "black", "type": "in-ear", "noise_cancelling": "yes"}},
+        {"name": "Desk Lamp", "product_id": "P004", "item_id": "V004E", "price": 49.99, "options": {"color": "black", "brightness": "medium", "power_source": "USB"}}
+      ],
+      "status": "delivered",
+      "fulfillments": [{"tracking_id": ["TRK100200101"], "item_ids": ["V003E", "V001C", "V004E"]}],
+      "payment_history": [{"transaction_type": "payment", "amount": 529.97, "payment_method_id": "credit_card_5567890"}]
+    },
+    "#W1002002": {
+      "order_id": "#W1002002",
+      "user_id": "bob_martinez_7832",
+      "address": {"address1": "518 Oak Street", "address2": "", "city": "Austin", "country": "USA", "state": "TX", "zip": "78701"},
+      "items": [
+        {"name": "Coffee Maker", "product_id": "P006", "item_id": "V006D", "price": 199.99, "options": {"type": "espresso", "capacity": "2-cup", "color": "black", "grinder": "none"}},
+        {"name": "Running Shoes", "product_id": "P002", "item_id": "V002D", "price": 119.99, "options": {"size": "10", "color": "white", "material": "mesh", "sole": "rubber"}}
+      ],
+      "status": "pending",
+      "fulfillments": [],
+      "payment_history": [{"transaction_type": "payment", "amount": 319.98, "payment_method_id": "gift_card_2234567"}]
+    },
+    "#W1003001": {
+      "order_id": "#W1003001",
+      "user_id": "carol_nguyen_3156",
+      "address": {"address1": "203 Pine Avenue", "address2": "Suite 100", "city": "Seattle", "country": "USA", "state": "WA", "zip": "98101"},
+      "items": [
+        {"name": "Backpack", "product_id": "P005", "item_id": "V005C", "price": 99.99, "options": {"capacity": "30L", "color": "black", "material": "nylon", "waterproof": "yes"}},
+        {"name": "Running Shoes", "product_id": "P002", "item_id": "V002C", "price": 139.99, "options": {"size": "9", "color": "blue", "material": "mesh", "sole": "EVA"}}
+      ],
+      "status": "delivered",
+      "fulfillments": [{"tracking_id": ["TRK100300101"], "item_ids": ["V005C", "V002C"]}],
+      "payment_history": [{"transaction_type": "payment", "amount": 239.98, "payment_method_id": "credit_card_9901234"}]
+    },
+    "#W1003002": {
+      "order_id": "#W1003002",
+      "user_id": "carol_nguyen_3156",
+      "address": {"address1": "203 Pine Avenue", "address2": "Suite 100", "city": "Seattle", "country": "USA", "state": "WA", "zip": "98101"},
+      "items": [
+        {"name": "Wireless Headphones", "product_id": "P001", "item_id": "V001B", "price": 259.99, "options": {"color": "white", "type": "over-ear", "noise_cancelling": "yes"}},
+        {"name": "Coffee Maker", "product_id": "P006", "item_id": "V006B", "price": 299.99, "options": {"type": "espresso", "capacity": "2-cup", "color": "silver", "grinder": "built-in"}},
+        {"name": "Smart Watch", "product_id": "P003", "item_id": "V003A", "price": 349.99, "options": {"color": "black", "band": "silicone", "display": "AMOLED", "gps": "yes"}}
+      ],
+      "status": "pending",
+      "fulfillments": [],
+      "payment_history": [{"transaction_type": "payment", "amount": 909.97, "payment_method_id": "credit_card_9901234"}]
+    },
+    "#W1003003": {
+      "order_id": "#W1003003",
+      "user_id": "carol_nguyen_3156",
+      "address": {"address1": "203 Pine Avenue", "address2": "Suite 100", "city": "Seattle", "country": "USA", "state": "WA", "zip": "98101"},
+      "items": [
+        {"name": "Desk Lamp", "product_id": "P004", "item_id": "V004D", "price": 74.99, "options": {"color": "silver", "brightness": "high", "power_source": "AC"}}
+      ],
+      "status": "delivered",
+      "fulfillments": [{"tracking_id": ["TRK100300301"], "item_ids": ["V004D"]}],
+      "payment_history": [{"transaction_type": "payment", "amount": 74.99, "payment_method_id": "gift_card_4456789"}]
+    }
+  }
+}

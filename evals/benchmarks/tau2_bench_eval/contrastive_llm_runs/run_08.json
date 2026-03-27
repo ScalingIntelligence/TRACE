@@ -1,0 +1,62 @@
+{
+  "attempt": 8,
+  "skills": [
+    {
+      "name": "Policy Compliance Under Pressure",
+      "description": "The agent incorrectly approves requests that violate eligibility rules, often capitulating when users apply emotional pressure, false claims, or repeated insistence. Passed tasks show the agent correctly refusing or transferring; failed tasks show it granting refunds, cancellations, or compensation that policy forbids.",
+      "covered_tasks": [
+        "A7", "A26", "A31", "A36", "A39", "A41", "A43", "A47", "A49",
+        "R46", "R47", "R82", "R83"
+      ],
+      "reasoning": "In A26/A39/A41/A43 the agent cancelled basic-economy or multi-passenger reservations that did not meet cancellation criteria; in A47/A49 it cancelled flights despite insurance not covering the stated reason; in R46/R47 it promised an impossible 3-day refund timeline; in R82/R83 it attempted to refund to a non-original payment method — all cases where user pushback caused the agent to abandon correct policy enforcement."
+    },
+    {
+      "name": "Precise Constraint-Aware Resource Selection",
+      "description": "The agent selects the wrong flight, product variant, or order item when multiple candidates exist and the task specifies constraints such as cheapest price, specific attributes, airport flexibility, or matching an existing record. Passed tasks involve simpler or more explicit selection; failed tasks require filtering a search space against several simultaneous criteria.",
+      "covered_tasks": [
+        "A15", "A16", "A20", "A21", "A24", "A25", "A29", "A30",
+        "R1", "R5", "R6", "R8", "R23", "R27", "R28", "R29",
+        "R41", "R42", "R49", "R52", "R64", "R71", "R72", "R74",
+        "R79", "R91", "R92", "R93", "R97", "R99", "R100"
+      ],
+      "reasoning": "A15/A16 chose incorrect flight combinations when given open airport options; A20 booked a departure that violated the stated time constraint; R52 picked the wrong camera zoom variant; R93 used the wrong order entirely — all cases where the agent browsed available options but matched the wrong one against the user's stated requirements."
+    },
+    {
+      "name": "Multi-Step Transaction Execution",
+      "description": "The agent fails to complete all required sub-operations when a task involves a coordinated sequence of distinct actions (e.g., cancel-then-rebook, return-then-exchange, or address-change plus item-modification). Passed tasks involving single actions succeed; failed tasks require the agent to plan, execute, and verify multiple dependent or independent steps without omitting any.",
+      "covered_tasks": [
+        "A10", "A12", "A13", "A14", "A22", "A23", "A33", "A37", "A42", "A44",
+        "R10", "R12", "R19", "R28", "R30", "R33", "R41", "R42",
+        "R71", "R72", "R76", "R97", "R99", "R100", "R101", "R102", "R109", "R110", "R111", "R112"
+      ],
+      "reasoning": "A14 required cancel+rebook with per-reservation certificate limits; A23 required three separate bookings to use three certificates; R41/R42 modified the item but omitted the required order address change; R19 broke after the first return because it did not complete the subsequent exchange — in every case the agent completed some steps while missing others that were equally required."
+    },
+    {
+      "name": "Scope Discipline Under Distraction",
+      "description": "The agent abandons or derails its primary task when users introduce emotional narratives, flattery, unrelated questions, or side complaints. Passed tasks involve users who stay on topic; failed tasks include users who deliberately shift the conversation away from the original request before it is completed.",
+      "covered_tasks": [
+        "A2", "A9", "A27", "A35", "A38",
+        "R62"
+      ],
+      "reasoning": "In A2 the user's delay complaint redirected the agent into issuing a goodwill certificate instead of completing the flight booking; in A9 repeated compliments caused the agent to lose track of the three-reservation task; in R62 a nonsensical poem question caused the agent to execute a spurious order modification — each failure shares the pattern of the user successfully steering the agent away from the assigned goal."
+    },
+    {
+      "name": "Action Execution Verification",
+      "description": "The agent reports task completion without having called the required write-side tool, or abandons an achievable task when a single sub-step fails rather than finding an alternative path. Passed tasks show actual tool invocations confirming the state change; failed tasks contain either phantom confirmations with no corresponding tool call or premature escalation/transfer when continuation was still possible.",
+      "covered_tasks": [
+        "A18", "A22",
+        "R7", "R9", "R22", "R51", "R54", "R60", "R80", "R106"
+      ],
+      "reasoning": "A18 calculated the savings and announced the downgrade was complete without ever calling update_reservation_flights; R7/R9 confirmed the exchange plan verbally but never called exchange_delivered_order_items; R106 transferred to a human after one failed lookup method without trying the alternative — all share the agent treating intermediate reasoning or partial progress as a completed outcome."
+    },
+    {
+      "name": "Multi-Constraint Logical Reasoning",
+      "description": "The agent cannot construct or verify a solution that must simultaneously satisfy several independent constraints such as price ceilings, payment-method restrictions, attribute requirements, and policy eligibility — particularly when the constraints interact or require comparing multiple candidates.",
+      "covered_tasks": [
+        "A14", "A44",
+        "R3", "R4", "R20", "R36", "R37", "R44", "R59", "R66", "R90", "R103", "R104"
+      ],
+      "reasoning": "A14 required finding the cheapest business round-trip while using at most one certificate per reservation across three new bookings; R36/R37 required resolving a payment-shortage constraint (insufficient card balance) with a creative split or item removal; R59 required conditionally cancelling the older of two pending orders based on placement date — in each case the agent found a partial solution that violated at least one stated constraint."
+    }
+  ]
+}

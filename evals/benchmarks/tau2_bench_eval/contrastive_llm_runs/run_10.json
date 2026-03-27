@@ -1,0 +1,41 @@
+{
+  "attempt": 10,
+  "skills": [
+    {
+      "name": "Policy Enforcement Under Pressure",
+      "description": "The agent must identify when a user request violates explicit rules and refuse to execute it, even when the user provides emotional stories, insists repeatedly, or frames the request sympathetically. The agent consistently performs the forbidden action instead of declining.",
+      "covered_tasks": ["A26", "A31", "A36", "A43", "A47", "A49", "A10", "A13", "A39", "A41", "R43", "R47", "R10", "R12", "R91", "R57"],
+      "reasoning": "In both domains the agent complies with requests it should refuse: canceling ineligible reservations (basic economy without insurance, wrong refund target), modifying immutable data, or accepting policy-violating payment routing, even after users apply emotional pressure or false justifications."
+    },
+    {
+      "name": "Claim Verification Before Action",
+      "description": "The agent must cross-check user-stated facts against retrieved data before acting, and must not proactively offer benefits or take actions based on unverified assertions. The agent skips verification steps or accepts false user claims without challenging them.",
+      "covered_tasks": ["A2", "A38", "A9", "A11", "A12", "A33", "R30", "R45", "R46", "R51"],
+      "reasoning": "Across both domains the agent grants compensation, accepts claimed passenger counts, or processes returns/exchanges based on user assertions it never verified against tool results, leading to incorrect outcomes (wrong certificate amounts, wrong number of passengers, wrong order IDs accepted)."
+    },
+    {
+      "name": "Exhaustive Multi-Record Enumeration",
+      "description": "When a task requires operating on all items matching some criterion across multiple records or accounts, the agent must enumerate every qualifying record before acting. The agent consistently stops early, misses records, or processes the wrong subset.",
+      "covered_tasks": ["A18", "A39", "A41", "A44", "A9", "R4", "R16", "R22", "R33", "R34", "R54", "R39"],
+      "reasoning": "Tasks requiring bulk operations across all reservations or all orders expose a systematic gap: the agent processes only the first matching record, skips already-flown records incorrectly, or fails to enumerate all user records before deciding which qualify for cancellation or modification."
+    },
+    {
+      "name": "Constraint-Aware Option Selection",
+      "description": "When searching for a replacement item or flight, the agent must apply all stated user constraints simultaneously (budget, preferred features, timing, payment method limits) and select the option that satisfies all of them. The agent frequently selects options that violate one or more constraints.",
+      "covered_tasks": ["A14", "A15", "A20", "A21", "A24", "A25", "A29", "A30", "A32", "A35", "A37", "R1", "R5", "R6", "R7", "R8", "R9", "R29", "R49", "R52", "R64", "R79", "R93", "R99", "R100", "R106", "R107"],
+      "reasoning": "In both airline (find cheapest nonstop within budget on correct date) and retail (find product variant matching all feature preferences), the agent selects an incorrect option that satisfies only some constraints, or confuses which features to optimize when multiple criteria apply."
+    },
+    {
+      "name": "Multi-Payment and Cost Calculation",
+      "description": "When a transaction involves multiple payment instruments, partial charges across instruments, or the agent must compute and communicate exact refund or charge amounts, the agent makes arithmetic errors or misallocates payment sources.",
+      "covered_tasks": ["A11", "A14", "A18", "A23", "A27", "R16", "R44", "R45", "R59", "R80", "R82", "R83"],
+      "reasoning": "Both domains surface errors in payment arithmetic: wrong certificate amounts for compensation, incorrect per-passenger refund calculations, failure to correctly split charges across gift cards and credit cards, or reporting the wrong total saved when downgrading multiple reservations."
+    },
+    {
+      "name": "Coordinated Multi-Action Task Completion",
+      "description": "When a user requests several distinct operations in one session, the agent must execute all of them correctly and in a coherent sequence, confirming each sub-task before proceeding. The agent often completes only a subset of the required actions or performs them in the wrong order.",
+      "covered_tasks": ["A7", "A17", "A22", "A37", "R19", "R23", "R27", "R97", "R101", "R102", "R109", "R110", "R111", "R112"],
+      "reasoning": "Tasks combining e.g. flight upgrade plus baggage change plus passenger update (airline) or address change plus item modification plus exchange (retail) expose that the agent loses track of pending sub-tasks, halts after the first action, or requires re-prompting to complete later steps."
+    }
+  ]
+}

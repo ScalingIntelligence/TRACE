@@ -1,0 +1,16 @@
+[
+  {
+    "skill": "exchange_with_product_lookup",
+    "assigned_model": "base",
+    "mean_success_rate": 20.12,
+    "consistency": 100.0,
+    "appearances": 5
+  },
+  {
+    "skill": "modify_items_with_product_lookup",
+    "assigned_model": "base",
+    "mean_success_rate": 16.67,
+    "consistency": 100.0,
+    "appearances": 1
+  }
+]

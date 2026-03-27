@@ -1,0 +1,55 @@
+
+\section{Introduction}
+\label{sec:introduction}
+
+A core challenge in deploying language models (LMs) is \textit{verification}: determining the quality or correctness of a model's response. 
+This problem arises across various components of the LM  pipeline, including dataset curation, model alignment, and inference-time decision-making.  
+Verification relies on \textit{verifiers}—functions that score responses. 
+When combined with repeated sampling---generating multiple candidate responses from a LM---a perfect verifier can be used to select a correct candidate response, significantly enhancing model capability on tasks such as math, code, and reasoning \citep{snell2024scalingllmtesttimecompute, brown2024largelanguagemonkeysscaling, puri2025probabilisticinferenceapproachinferencetime}. 
+For example, Llama 3.1 8B Instruct can match Llama 3.1 70B Instruct and even GPT-4o performances on MATH500 \citep{hendrycks2021measuring} and MiniF2F \citep{zheng2022minif2fcrosssystembenchmarkformal} when paired with perfect verifiers for these mathematics tasks.  
+However, without a perfect verifier, a \textit{generation-verification gap} emerges \citep{song2025mindgapexaminingselfimprovement}: a LM can generate a correct response, but we fail to identify it. 
+
+The generation-verification gap is prevalent across many tasks across mathematics, coding, scientific reasoning, instruction-following, and more.
+For some of these settings, we have access to \textit{oracle verifiers} that can perfectly identify correct responses. A prominent example is Lean, a formal theorem prover that can be used for problems such MiniF2F \citep{zheng2022minif2fcrosssystembenchmarkformal}. However, this is often a limited setup, as not all mathematical proofs can be processed by Lean. 
+Alternatively, humans could judge LM responses but manual evaluation is often expensive, noisy, and difficult to scale \citep{hosking2024humanfeedbackgoldstandard, clark2021thatshumangoldevaluating, karpinska2021perilsusingmechanicalturk}.
+In contrast, LMs prompted as judges \citep{chiang2024chatbot} and reward models \citep{lambert2024rewardbenchevaluatingrewardmodels, singhi2025solveverifycomputeoptimalproblem, liu20251bllmsurpass405b} can be applied off-the-shelf to tasks like mathematics, coding, scientific reasoning, instruction-following \citep{hendrycks2021measuring, rein2024gpqa, jain2024livecodebenchholisticcontaminationfree, alpaca_eval}. 
+However, these \textit{weak verifiers} produce noisy, inconsistent scores, often exhibit poor calibration, and suffer from high false positive rates \citep{stroebl2024inferencescalingflawslimits}. 
+We ask: \textit{to what extent can we leverage weak verifiers to improve accuracy in the repeated sampling regime?}
+
+We explore \textit{scaling verification}, specifically how to combine \textit{multiple weak verifiers} to improve response selection for repeated sampling.
+As new pre-trained models become available, the pool of weak verifiers continues to expand and offer diverse, complementary sources of signal that could improve response selection if they can be aggregated effectively.
+Recent work has explored scaling verification through techniques such as self-verification or averaging LM judge scores \citep{lifshitz2025multiagentverificationscalingtesttime, zhao2025sample, chen2025sets} although other work has found limitations to scaling test-time compute when utilizing weak verifiers for response selection \citep{stroebl2024inferencescalingflawslimits}.  
+We observe three key challenges towards ensembling weak verifiers:
+
+\input{tables_and_figures/main_figure}
+
+\begin{enumerate} [itemsep=0.00pt,topsep=0pt,leftmargin=12pt]
+    \item \textbf{Naively aggregating weak verifiers is insufficient for reliable verification.} Weak verifiers such as LM-based judges or reward models produce noisy, biased, and poorly calibrated scores, leading to inconsistent performance. \citep{stroebl2024inferencescalingflawslimits, lambert2024rewardbenchevaluatingrewardmodels, chiang2024chatbot}. 
+    While using a naive unweighted average of verifier scores is straightforward, it implicitly assumes uniform verifier quality, causing low-quality verifiers to dominate and degrade the overall accuracy~\citep{verga2024replacingjudgesjuriesevaluating, xu2024perfectblendredefiningrlhf, eisenstein2023helping}. Moreover, while previous work has hypothesized that more sophisticated weighted ensembles should perform better, this claim has not been studied~\citep{lifshitz2025multiagentverificationscalingtesttime}. 
+   
+    \item \textbf{Effective ensembling with limited labeled data is challenging.} More sophisticated ensembling techniques typically learn verifier weights from labeled data, but such data is expensive and difficult to obtain. 
+    \textit{Weak Supervision} (WS), a family of statistical techniques developed for data labeling, offers a potential solution through algorithms that aggregate multiple weak signals---such as crowd-worker annotations and expert-defined heuristics---while only requiring a small amount of labeled data \citep{ratner2016data, ratner2019training, fu2020fast}.  
+    In traditional WS, practitioners can design and shape each weak signal to ensure sufficient quality (i.e., iteratively tweaking program-based heuristics), and guarantees of WS hinge on a baseline level of quality.
+    Our weak signals, however, are fixed pre-trained language model verifiers, which have wildly varying accuracy---especially when applied to out-of-distribution tasks---and can emit incompatible outputs (logits, binary scores, Likert scores)~\citep{lambert2024rewardbenchevaluatingrewardmodels} that we cannot easily tweak. Due to these conditions, WS algorithms may not perform well when directly applied to verification.
+    \item \textbf{Verification is expensive to deploy at inference.}
+    Verification can dominate inference-time costs \citep{singhi2025solveverifycomputeoptimalproblem, liu20251bllmsurpass405b}, since each verifier must process both the problem and its candidate response(s) \cite{lightman2023letsverifystepstep}, often evaluating intermediate steps \cite{lightman2023letsverifystepstep} and multiple solution paths \cite{snell2024scalingllmtesttimecompute}. 
+    In fact, achieving gains over unverified generation (i.e. majority voting) can require $10\times$ to $128\times$ the inference compute per query \citep{singhi2025whentosolve, lifshitz2025multiagentverificationscalingtesttime, zhao2025sample, chen2025sets}. 
+    
+\end{enumerate}
+
+
+In this work, we introduce \weaver{}, a framework for aggregating weak verifiers without supervised finetuning on ground truth labels (Figure \ref{fig:main_figure}). 
+First, we demonstrate that if we have access to a large corpus of labeled training data (e.g., 50,000 query-response pairs), we can learn weighted ensembles that can outperform naive averaging by up to 11.2\% points. This is because weighted ensembles take advantage of wide variability in verifier accuracy. However, in many real-world scenarios, we do not have access to such quantities of labeled data.
+Second, to reduce the dependency on labeled data, we adapt Weak Supervision to the verification setting by addressing challenges around inconsistent outputs and low-accuracy verifiers. 
+\weaver{} filters out uninformative verifiers, normalizes verifier scores, and builds a latent variable model over these scores and the unknown true labels to estimate the verifier accuracies to be used as weights for the ensemble~\citep{ratner2016data, hall2003generalized}.
+
+Empirically, given a repeated sampling budget and a set of verifiers, \weaver{} improves over repeated sampling with unweighted averaging of verifier scores by 17.1\% and with majority voting by 13.5\% (Table \ref{tab:verifier_ablations}; Figure \ref{fig:fp_and_pass@1}).
+Compared to an LM's $Pass@1$, \weaver{} allows us to improve performance by 17.9\% for 8B models and 14.5\% for 70B models across reasoning and mathematics tasks (Tables \ref{tab:verifier_ablations} and \ref{tab:8B_verifier_ablations}).
+\textit{This mirrors the performance jump from GPT-4o to o3-mini} (73.9\% vs. 88.2\%)---but only via increased sampling at test time rather than parameter tuning or post-training procedures. 
+We also study how \weaver{} scales along different axes of test-time compute: generation, verifiers, model size, and inference budget (Section~\ref{sec:scaling_verification_with_weaver}). 
+We find that even as we increase the number of generations, many standard verification baselines (e.g. majority voting) quickly plateau (Figure \ref{fig:fp_and_pass@1}). 
+Naive ensembling saturates more slowly, but its gains are limited by sensitivity to the model choice and the number of verifiers. 
+
+Finally, to mitigate the compute costs of calling multiple weak verifiers for each response, we extend \weaver{} by training a 400M-parameter cross-encoder verifier using \weaver{}'s selected responses.
+We demonstrate that using a distilled \weaver{} cross-encoder as a verifier \textit{retains 98.7\% of the accuracy gains} from the learned verifier ensemble  while reducing compute costs by three orders of magnitude -- \textit{saving 99.97\% inference FLOPS} while still capturing an effective verification strategy (Section \ref{sec:weaver_distillation}). 
+Overall, our findings highlight that more reliable, scalable verification is possible even in the absence of ground-truth labels---paving the way for improved data filtering, model alignment, and inference-time decision-making. 
