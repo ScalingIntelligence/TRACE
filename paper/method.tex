@@ -7,7 +7,7 @@
 An agentic environment $\mathcal{E}$ defines a distribution over task instances $x \sim p_{\mathcal{E}}$ and a transition function that governs how the environment responds to agent actions. A task instance $x$ determines the initial observation $o_1$ presented to the agent. An LLM policy $\pi_\theta$ then selects actions conditioned on the interaction history $h_t = (o_1, a_1, \dots, o_t)$ via $a_t \sim \pi_\theta(\cdot \mid h_t)$, where each action is a variable-length token sequence that may include natural-language reasoning and tool calls. The environment returns an observation $o_{t+1}$ after each action, and the episode continues for at most $T$ steps, producing a trajectory $\tau = (o_1, a_1, \dots, o_T, a_T, o_{T+1})$. At episode end, a reward $R_{\mathcal{E}}(x, \tau) \in \mathbb{R}$ and binary success label $y_{\mathcal{E}}(x, \tau) \in \{0, 1\}$ are evaluated. We denote $\mathcal{D} = \{(x_i, \tau_i, r_i, y_i)\}_{i=1}^N$ as a dataset of $N$ collected episodes.
 
 \paragraph{Synthetic environment.}
-A synthetic verifiable environment $\mathcal{E}_s$ is an agentic environment whose reward $R_{\mathcal{E}_s}$ and success indicator $y_{\mathcal{E}_s}$ can be evaluated programmatically from the task instance and trajectory, and whose task instances are produced by an explicit generator $G_{\mathcal{E}_s}$. The generator is a function of a random seed $z$: given $z \sim p(z)$, the generator produces a task instance $x = G_{\mathcal{E}_s}(z)$ together with the associated environment configuration (initial state, transition logic, and evaluation criteria). Interaction with $\mathcal{E}_s$ then produces trajectories $\tau$ with programmatically computed reward $R_{\mathcal{E}_s}(x,\tau) \in \mathbb{R}$ and success label $y_{\mathcal{E}_s}(x,\tau) \in \{0,1\}$. Because both generation and verification are algorithmic, synthetic verifiable environments can be scaled to produce large volumes of training epsiodes with verifiable reward signal.
+A synthetic verifiable environment $\mathcal{E}_s$ is an agentic environment whose reward $R_{\mathcal{E}_s}$ and success indicator $y_{\mathcal{E}_s}$ can be evaluated automatically from the task instance and trajectory (i.e., from tool arguments, state changes, or final outputs), and whose task instances are produced by an explicit generator $G_{\mathcal{E}_s}$. The generator is a function of a random seed $z$: given $z \sim p(z)$, the generator produces a task instance $x = G_{\mathcal{E}_s}(z)$ together with the associated environment configuration (initial state, transition logic, and evaluation criteria). Interaction with $\mathcal{E}_s$ then produces trajectories $\tau$ with reward $R_{\mathcal{E}_s}(x,\tau) \in \mathbb{R}$ and success label $y_{\mathcal{E}_s}(x,\tau) \in \{0,1\}$. Because both generation and verification are algorithmic, synthetic verifiable environments can be scaled to produce large volumes of training epsiodes with verifiable reward signal.
 
 
 
@@ -26,25 +26,22 @@ A central challenge is that supervision in the target environment is sparse. The
 
 As demonstrated in Tables and Figures \ref{}, we crucially observe that unsuccessful trajectories exhibit failure patterns corresponding to identifiable capability deficits. For example, \textcolor{blue}{[TODO: fill in]}. Because the target environment entangles these capabilities, such deficits are easier to diagnose and address when isolated individually.
 
-
-
 \subsection{Automated Synthetic Environment Generation Pipeline}
 \label{sec:env_gen}
 
-\textcolor{blue}{[TODO: add forward references to results and/or figures/examples]}
+\textcolor{blue}{[TODO resolved: added forward references to the environment-analysis results in Section~\ref{sec:env_analysis} and Figure~\ref{fig:capability_analysis}]}
 
 We introduce an automated, agentic pipeline for converting failures in the target environment into capability-targeted synthetic training environments. The pipeline has two stages: (i) \emph{contrastive capability identification}, in which an analysis agent reliably identifies capabilities the policy lacks by contrasting unsuccessful trajectories with successful ones, and (ii) \emph{environment synthesis}, in which an environment-generation agent constructs verifiable synthetic environments for training those capabilities.
 
-\noindent\textbf{Contrastive skill identification.}
+\noindent\textbf{Contrastive capability identification.}
 
 Given the dataset of trajectories collected in the target environment,
 \[
-\mathcal{D} = \{(x_i, \tau_i, r_i, y_i)\}_{i=1}^N,
+\mathcal{D} = \{(\tau_i, y_i)\}_{i=1}^N,
 \]
 where $y_i \in \{0,1\}$ indicates whether trajectory $\tau_i$ succeeds, we first partition the dataset into successful and failed subsets, denoted by $\mathcal{D}^{+}$ and $\mathcal{D}^{-}$, respectively.
 
-For each trajectory $\tau_i$, an LLM-based analysis agent examines the sequence of tool calls, tool results, and the final response to infer which capabilities were required and whether a given capability was not executed correctly. 
- This produces a set of candidate capabilities $\mathcal{C}$. For each capability $c \in \mathcal{C}$, we estimate its error rate separately over successful and failed trajectories:
+For each trajectory $\tau_i$, an LLM-based analysis agent examines the sequence of tool calls, tool results, and the final response to infer which capabilities were required and whether a given capability was executed incorrectly. This produces a set of candidate capabilities $\mathcal{C}$. For each capability $c \in \mathcal{C}$, we estimate its error rate separately over successful and failed trajectories:
 \begin{equation}
 \begin{aligned}
 \mathrm{ER}^{+}(c)
@@ -53,7 +50,7 @@ For each trajectory $\tau_i$, an LLM-based analysis agent examines the sequence 
 &= \Pr(c\text{ incorrect} \mid c\text{ required},\, \tau \in \mathcal{D}^{-}).
 \end{aligned}
 \end{equation}
-Here, conditioning on $c$ being required ensures that we evaluate a capability only on trajectories where it is actually needed. A capability that the model was lacking should have a substantially higher error rate in failed trajectories than in successful ones. We therefore retain capabilities with a large contrastive gap,
+Here, conditioning on $c$ being required ensures that we evaluate a capability only on trajectories where it is actually needed. A capability that the model lacks should have a substantially higher error rate in failed trajectories than in successful ones. We therefore retain capabilities with a large contrastive gap,
 \[
 \mathcal{C}^{*}
 =
@@ -64,76 +61,12 @@ c \in \mathcal{C}
 \right\}.
 \]
 
-To improve robustness, we run the analysis agent multiple times, obtain a retained set from each run, and keep only capabilities that are selected consistently across runs. The final retained set therefore captures recurring capability deficits that are consistently identified under repeated analysis.
+To improve robustness, we run the analysis agent multiple times, obtain a retained set from each run, and keep only capabilities that are selected consistently across runs. The final retained set therefore captures recurring capability deficits that are consistently identified under repeated analysis. In Section~\ref{sec:env_analysis} and Figure~\ref{fig:capability_analysis}, we show that this repeated contrastive analysis consistently recovers a small set of high-impact capabilities.
 
-This contrastive criterion is more robust than analyzing failures alone: it filters out capabilities with uniformly low success rates, which often reflect task ambiguity or annotation noise rather than a trainable deficit, and it excludes capabilities that occasionally fail but do not meaningfully distinguish successful from unsuccessful trajectories. \textcolor{blue}{Add appendix for examples}
+This contrastive criterion is more robust than analyzing failures alone: it filters out capabilities with uniformly low success rates, which often reflect task ambiguity or annotation noise rather than a trainable deficit, and it excludes capabilities that occasionally fail but do not meaningfully distinguish successful from unsuccessful trajectories. \textcolor{blue}{We provide representative examples of the retained capabilities and their associated failure patterns in the appendix.}
 
 
 \noindent\textbf{Environment synthesis.}
-For each retained capability $c \in \mathcal{C}^{*}$, an LLM-based environment-generation agent constructs a synthetic verifiable environment $\mathcal{E}_s^c$ in which task success requires the agent to exercise $c$. The generation agent is conditioned on the capability description for $c$ and the relevant failure patterns identified by the analysis agent. It produces a task generator $G_{\mathcal{E}_s^c}$, transition logic, and a programmatic reward function $R_{\mathcal{E}_s^c}$.
+For each retained capability $c \in \mathcal{C}^{*}$, an LLM-based environment-generation agent synthesizes a verifiable training environment $\mathcal{E}_s^c$. The generation agent receives the capability description for $c$ and the failure patterns identified by the analysis agent, and produces a seeded task generator $G_{\mathcal{E}_s^c}$, transition logic, and evaluation criteria that together define a complete environment preserving the target environment's tool schemas, state representation, and policy constraints. Given a random seed $z$, the generator deterministically constructs a task instance $x = G_{\mathcal{E}_s^c}(z)$, including synthetic user profiles, database records, and task-specific parameters; each seed yields a distinct scenario, preventing memorization and enabling control over task difficulty and diversity.
 
-The task generator $G_{\mathcal{E}_s^c}$ is a seeded procedural program produced by the generation agent. Given a random seed $z$, it deterministically constructs a task instance $x = G_{\mathcal{E}_s^c}(z)$, including synthetic user profiles, database records, and task-specific parameters such as constraint configurations and difficulty levels. Procedural generation serves two purposes. First, it prevents memorization, since each seed yields a distinct scenario. Second, it enables explicit control over task difficulty and diversity through configurable parameters such as the number of database records, the number of constraints, and the number of sequential operations.
-
-The reward function $R_{\mathcal{E}_s^c}$ is constructed so that success depends soley on correct execution of capability $c$, while minimizing dependence on unrelated capabilities. In practice, the generation agent constructs $R_{\mathcal{E}_s^c}$ as a programmatic verifier that checks the agent's behavior against the ground-truth solution, for example by comparing the resulting database state against the expected state or by verifying that specific tool calls were made with correct arguments.
-
-\subsection{Acquiring Capabilities via Reinforcement Learning}
-\label{sec:training}
-
-Given the family of synthetic environments $\{\mathcal{E}_s^c\}_{c \in \mathcal{C}^{*}}$ produced by the environment generation pipeline (\S\ref{sec:env_gen}), we train a separate low-rank adapter~\citep{hu2022lora} $\Delta_c$ for each capability $c \in \mathcal{C}^{*}$ while keeping the base model $\pi_\theta$ frozen.
-
-\noindent\textbf{GRPO training.} We train with Group Relative Policy Optimization (GRPO;~\citealt{shao2024deepseekmath}), an on-policy reinforcement learning algorithm that avoids learning an explicit value function. For each capability $c$, the adapted policy $\pi_{\theta+\Delta_c}$ interacts with the corresponding synthetic environment $\mathcal{E}_s^c$. At each training iteration, the policy generates $G$ groups of rollouts. Within each group $g$, $K$ trajectories $\{\tau_{g,1}, \dots, \tau_{g,K}\}$ are sampled from the same environment seed $z_g$, so that all $K$ rollouts begin from an identical initial state and differ only through stochastic decoding. Let $r_{g,k} = R_{\mathcal{E}_s^c}(x_g, \tau_{g,k})$ denote the reward assigned by the programmatic verifier of $\mathcal{E}_s^c$, where $x_g = G_{\mathcal{E}_s^c}(z_g)$. GRPO computes a group-relative normalized advantage for each trajectory,
-\begin{equation}
-\hat{A}_{g,k} = \frac{r_{g,k} - \bar{r}_g}{\sigma_g + \epsilon},
-\qquad
-\bar{r}_g = \frac{1}{K}\sum_{j=1}^{K} r_{g,j},
-\qquad
-\sigma_g = \sqrt{\frac{1}{K}\sum_{j=1}^{K}(r_{g,j}-\bar{r}_g)^2},
-\end{equation}
-where $\bar{r}_g$ and $\sigma_g$ are the within-group mean and standard deviation. This normalization makes the training signal invariant to reward scale across capabilities and synthetic environments. Because reward is assigned at the trajectory level, all action tokens in a rollout receive the same advantage. Groups in which all $K$ rollouts receive identical rewards are discarded, since they provide no learning signal.
-
-The adapter parameters are updated using the clipped GRPO surrogate objective
-\begin{equation}
-\mathcal{L}_{\mathrm{GRPO}}
-=
--\frac{1}{|\mathcal{B}|}
-\sum_{(g,k)\in\mathcal{B}}
-\frac{1}{T_{g,k}}
-\sum_{t=1}^{T_{g,k}}
-\min\!\Bigl(
-\rho_t \hat{A}_{g,k},
-\mathrm{clip}(\rho_t, 1-\epsilon, 1+\epsilon)\hat{A}_{g,k}
-\Bigr),
-\label{eq:grpo}
-\end{equation}
-where
-\[
-\rho_t
-=
-\frac{\pi_{\theta+\Delta_c}(a_t \mid x, a_{<t})}
-{\pi_{\theta+\Delta_c}^{\mathrm{old}}(a_t \mid x, a_{<t})}
-\]
-is the per-token importance ratio between the current and rollout policies, $a_t$ denotes the $t$-th token in the trajectory, $T_{g,k}$ is the number of tokens in trajectory $\tau_{g,k}$, $\mathcal{B}$ denotes the minibatch, and $\epsilon$ is the clipping threshold. As in PPO-style methods, clipping prevents excessively large policy updates when the estimated advantage is high.
-
-\noindent\textbf{On-policy rollout collection.} At each iteration, we synchronize the current adapter $\Delta_c$ to a separate inference worker and collect rollouts on-policy from $\pi_{\theta+\Delta_c}$. The policy interacts with the task generator $G_{\mathcal{E}_s^c}$, receives observations, invokes tools, and continues until the episode terminates, after which the reward function $R_{\mathcal{E}_s^c}$ assigns the terminal reward. Because rollouts are collected on-policy, the importance ratio $\rho_t$ remains close to $1$ at the beginning of each update, which improves optimization stability.
-
-
-
-\subsection{Composing Acquired Capabilities}
-\label{sec:composition}
-
-Training produces a set of adapters $\{\Delta_c\}_{c \in \mathcal{C}^*}$, one per identified capability. At inference time, each task instance may demand a different subset of these capabilities. Jointly merging all adapters into a single model leads to interference: capabilities impose conflicting optimization pressures on shared parameters, and strengthening one degrades others (Section~\ref{sec:experiments}). We instead compose adapters at inference time, conditioned on the task.
-
-Formally, a router $f$ assigns a non-negative weight to each capability based on the task prompt $o_1$ (or the full interaction history $h_t$ up to that point if routing per-turn) and the natural-language capability descriptions, where $\alpha_c = 0$ indicates that capability $c$ is not needed:
-\[
-\alpha_c = f(c,\, h_t), \qquad c \in \mathcal{C}^*,\quad \alpha_c \geq 0.
-\]
-
-
-Because the router needs to only classify the task among $|\mathcal{C}^*|$ capability descriptions rather than solve it, we find that the base model $\pi_\theta$ serves as an effective zero-shot instantiation of $f$ (Section~\ref{sec:ablations}). We therefore instantiate $f$ using $\pi_\theta$ itself as the router: each capability is paired with its description and assigned a distinct label token, and an additional label represents the unmodified base model. Given $h_t$ and the labeled descriptions, we set $\alpha_c \propto \pi_\theta(c \mid h_t)$, the next-token probability assigned to the label for capability $c$ normalized over all $|\mathcal{C}^*| + 1$ labels. If the base-model label is most probable, all weights are zero, and we use $\pi_\theta$ unmodified. Otherwise, we retain the smallest set of capabilities whose cumulative probability meets a threshold $p$ and re-normalize to obtain the final $\alpha_c$. This allows the number of active adapters to vary per instance: when the router is confident, a single adapter dominates; when a task demands multiple capabilities, probability mass spreads and the threshold admits several. We find this strategy works well in practice and ablate different zero-shot routing methods in Appendix. 
-
-Rather than merging adapter parameters in weight space, we compose the selected adapters directly at the activation level. Each adapter $\Delta_c$ consists of low-rank factors $B_c \in \mathbb{R}^{d_{\text{out}} \times r}$ and $A_c \in \mathbb{R}^{r \times d_{\text{in}}}$. At each layer, the composed output is
-\begin{equation}
-y \;=\; Wx \;+\; \sum_{c}\, \alpha_c \, B_c A_c \, x,
-\label{eq:compose}
-\end{equation}
-where $W$ denotes the frozen base-model weights. Each adapter's low-rank factors are applied independently, so the composition is exact. Equation~\ref{eq:compose} is evaluated during each forward pass, and the routing weights $\alpha_c$ can be updated between turns without recomputing adapter parameters.
+$\mathcal{E}_s^c$ is designed so that task success depends primarily on correctly exercising capability $c$, and correct execution can be checked automatically from tool arguments, state changes, or final outputs. For example, if $c$ is multi-step task completion, tasks in $\mathcal{E}_s^c$ require several sequential operations---such as canceling one reservation and rebooking another---and success is checked by comparing the final database state against the expected outcome derived from the task seed. Because each environment isolates a single capability, the reward $R_{\mathcal{E}_s^c}$ is denser and more attributable than that of the original environment, where success may depend on many capabilities at once. Section~\ref{sec:env_analysis} validates this procedure and shows that the majority of additional tasks solved by each capability-trained adapter, relative to the base model, are attributable to acquiring the targeted capability. We provide examples of synthesized environments in the appendix. 

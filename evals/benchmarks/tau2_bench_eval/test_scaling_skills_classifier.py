@@ -59,6 +59,8 @@ def main():
     parser.add_argument("--task-ids", nargs="*", type=str, default=None,
                         help="Task IDs to test (default: all tasks covered by skills)")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--with-context", action="store_true",
+                        help="Inject domain policy and tool names into classifier prompt")
     args = parser.parse_args()
 
     # Load scaling skills
@@ -149,6 +151,30 @@ def main():
         orchestrator_config=orch_config,
         llm_args={},
     )
+
+    # Inject policy + tools into classifier prompt if requested
+    if args.with_context:
+        tool_names = [t.name for t in tools]
+        label_lines = []
+        for label in agent._classifier_labels:
+            skill_name = agent._label_to_skill[label]
+            desc = next(s.description for s in orch_config.skills if s.name == skill_name)
+            label_lines.append(f"{label}: {skill_name} - {desc}")
+
+        agent._classifier_system_prompt = (
+            "You are a routing classifier for a customer service agent system.\n"
+            "Given the domain policy, available tools, and conversation, select "
+            "the skill whose capability best matches what this task requires.\n\n"
+            "=== DOMAIN POLICY ===\n"
+            f"{policy}\n\n"
+            "=== AVAILABLE TOOLS ===\n"
+            f"{', '.join(tool_names)}\n\n"
+            "=== SKILLS ===\n"
+            + "\n".join(label_lines)
+            + "\n\nOnly output the label (e.g. A, B, C). Do not output anything else."
+        )
+        print(f"Injected context: policy={len(policy)} chars, tools={len(tool_names)}")
+        print()
 
     # Determine task IDs
     if args.task_ids:

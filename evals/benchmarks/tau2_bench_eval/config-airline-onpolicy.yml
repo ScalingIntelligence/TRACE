@@ -37,6 +37,6 @@ save_to: airline-taubench-target-20
 # vLLM server config — separate servers for deterministic user simulator
 vllm:
   agent_base_urls:
-    - http://localhost:8090/v1
+    - http://localhost:8080/v1
   user_base_urls:
-    - http://localhost:9002/v1
+    - http://localhost:9000/v1

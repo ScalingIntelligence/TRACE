@@ -88,7 +88,7 @@ class OrchestratorConfig(BaseModel):
     skip_routing: Optional[str] = None  # always use this skill (ablation)
     routing_context_window: Optional[int] = None  # None = use entire conversation
     routing_strategy: str = "per_turn"  # "per_turn" or "per_conversation"
-    routing_mode: str = "llm"  # "llm", "llm_multi", "classifier", or "embedding"
+    routing_mode: str = "llm"  # "llm", "llm_multi", "classifier", "embedding", or "rac"
     routing_topk: Optional[int] = None  # limit routing to top-k adapters; applies to classifier and embedding modes (None=all)
     routing_topp: Optional[float] = None  # top-p nucleus filtering: keep fewest adapters whose cumulative weight >= topp; applies to classifier and embedding
     classifier_temperature: float = 1.0  # temperature scaling applied to logprobs before softmax (>1 = softer, <1 = sharper)
@@ -98,6 +98,10 @@ class OrchestratorConfig(BaseModel):
     embedding_model: Optional[str] = None  # e.g. "Qwen/Qwen3-Embedding-8B"; required when routing_mode="embedding"
     embedding_gpu: Optional[str] = None  # device for the embedding model, e.g. "cuda:0" (default: "cpu")
     embedding_threshold: float = 0.5  # similarity threshold; skills above this are activated
+    # RAC (Retrieval-Augmented Classification) routing
+    rac_corpus_path: Optional[str] = None  # path to gold_trajectories JSON corpus
+    rac_topk: int = 5  # number of trajectories to retrieve per query
+    rac_threshold: float = 0.5  # minimum similarity to include a skill as candidate
 
 
 # ---------------------------------------------------------------------------
@@ -172,14 +176,25 @@ class OrchestratorAgentState(BaseModel):
 # Routing prompt
 # ---------------------------------------------------------------------------
 
-ROUTING_SYSTEM_PROMPT = """You are a routing classifier for a customer service agent system.
+_ROUTING_EXAMPLES_PATH = __import__("os").path.join(
+    __import__("os").path.dirname(__file__),
+    "..", "..", "..", "evals", "benchmarks", "tau2_bench_eval", "routing_examples.txt",
+)
+try:
+    with open(_ROUTING_EXAMPLES_PATH) as _f:
+        _ROUTING_EXAMPLES = _f.read()
+except FileNotFoundError:
+    _ROUTING_EXAMPLES = ""
 
-Given the current conversation, decide which skill should handle the agent's next response. Emotional tone does not affect routing. The number of actions does not determine routing — focus on the nature of the request.
+ROUTING_SYSTEM_PROMPT = """You are a routing expert. Given the conversation, select which skill the agent needs. Match the conversation to the most similar training example.
+
+""" + _ROUTING_EXAMPLES + """
 
 Available skills:
 {skill_descriptions}
 
-Output your answer as: SELECTED_SKILL: skill_name
+Based on the conversation, which training example pattern does this most closely match?
+Output: SELECTED_SKILL: skill_name
 """
 
 ROUTING_MULTI_SYSTEM_PROMPT = """You are a routing classifier for a customer service agent system.
@@ -295,6 +310,41 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
             logger.info(
                 f"[Embedding] Encoded {len(skill_desc_texts)} skill descriptions"
             )
+
+        # RAC (Retrieval-Augmented Classification) mode setup
+        if orchestrator_config.routing_mode == "rac":
+            import json as _json
+
+            # Load embedding model (reuse singleton)
+            emb_model_name = orchestrator_config.embedding_model or "Qwen/Qwen3-Embedding-8B"
+            emb_device = orchestrator_config.embedding_gpu or "cpu"
+            self._rac_embedding_model = _get_embedding_model(emb_model_name, emb_device)
+
+            # Load and embed corpus (one-time)
+            corpus_path = orchestrator_config.rac_corpus_path
+            if not corpus_path:
+                raise ValueError("rac_corpus_path is required when routing_mode='rac'")
+            with open(corpus_path) as f:
+                self._rac_corpus = _json.load(f)
+            corpus_texts = [t["text"] for t in self._rac_corpus]
+            self._rac_corpus_embeddings = self._rac_embedding_model.encode(corpus_texts)
+            logger.info(
+                f"[RAC] Loaded corpus: {len(self._rac_corpus)} trajectories from {corpus_path}"
+            )
+
+            # Store skill descriptions for the classifier prompt
+            self._rac_skill_descs = {
+                s.name: s.description.strip() for s in orchestrator_config.skills
+            }
+
+            # Build label-to-skill mapping (same as classifier mode)
+            self._label_to_skill = {}
+            self._skill_to_label = {}
+            for i, skill_config in enumerate(orchestrator_config.skills):
+                label = chr(ord("A") + i)
+                self._label_to_skill[label] = skill_config.name
+                self._skill_to_label[skill_config.name] = label
+            self._classifier_labels = list(self._label_to_skill.keys())
 
         # Validate skip_routing target(s) exist (supports comma-separated)
         if orchestrator_config.skip_routing:
@@ -470,6 +520,9 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
 
         if self.orchestrator_config.routing_mode == "embedding":
             return self._route_embedding(messages)
+
+        if self.orchestrator_config.routing_mode == "rac":
+            return self._route_rac(messages)
 
         return self._route_llm(messages)
 
@@ -826,6 +879,189 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
             skill_weights=skill_weights,
         )
 
+    def _route_rac(self, messages: list[Message]) -> SkillRoutingDecision:
+        """Route using Retrieval-Augmented Classification.
+
+        Stage 1: Embed user message → retrieve top-K similar trajectories from corpus
+        Stage 2: Deduplicate to unique candidate skills (best trajectory per skill)
+        Stage 3: Classifier picks from candidates using descriptions + retrieved examples
+
+        Returns SkillRoutingDecision with skill_weights from classifier logprobs.
+        """
+        from openai import OpenAI
+
+        orch_args = self.orchestrator_config.orchestrator_llm_args or {}
+        api_base = orch_args.get("api_base", "http://localhost:8080/v1")
+        api_key = orch_args.get("api_key", "EMPTY")
+        model_name = self.orchestrator_config.orchestrator_model
+        if model_name.startswith("openai/"):
+            model_name = model_name[len("openai/"):]
+
+        # --- Stage 1: Retrieve from corpus ---
+        # Extract the user message text for query embedding
+        window = self.orchestrator_config.routing_context_window
+        non_system = [m for m in messages if not isinstance(m, SystemMessage)]
+        recent = non_system[-window:] if window is not None else non_system
+        # Use the last user message as the retrieval query
+        query_text = ""
+        for m in reversed(recent):
+            if m.role == "user" and getattr(m, "content", None):
+                query_text = m.content
+                break
+        if not query_text:
+            logger.warning("[RAC] No user message found for retrieval, using fallback")
+            return self._fallback_decision()
+
+        query_emb = self._rac_embedding_model.encode(
+            [query_text],
+            prompt="Instruct: Given a customer service request, identify which skill category best handles it\nQuery: ",
+        )
+        similarities = self._rac_embedding_model.similarity(
+            query_emb, self._rac_corpus_embeddings
+        )[0]
+        top_indices = similarities.argsort(descending=True)[: self.orchestrator_config.rac_topk]
+
+        # --- Stage 2: Filter by threshold, deduplicate to best trajectory per skill ---
+        threshold = self.orchestrator_config.rac_threshold
+        candidates: dict[str, tuple[float, str]] = {}  # skill -> (score, text)
+        for idx in top_indices:
+            score = float(similarities[idx])
+            if score < threshold:
+                continue
+            skill = self._rac_corpus[idx]["skill"]
+            if skill not in candidates or score > candidates[skill][0]:
+                candidates[skill] = (score, self._rac_corpus[idx]["text"])
+
+        # Fallback: if nothing passes threshold, take the single best match
+        if not candidates:
+            best_idx = int(top_indices[0])
+            skill = self._rac_corpus[best_idx]["skill"]
+            candidates[skill] = (
+                float(similarities[best_idx]),
+                self._rac_corpus[best_idx]["text"],
+            )
+
+        cand_str = " ".join(f"{s}:{sc:.2f}" for s, (sc, _) in candidates.items())
+        logger.info(f"[RAC] Candidates: [{cand_str}]  n={len(candidates)}")
+
+        # --- Stage 3: Classify among candidates ---
+        if len(candidates) == 1:
+            skill_name = list(candidates.keys())[0]
+            print(
+                f"[RAC] single candidate: {skill_name} | {cand_str}",
+                flush=True,
+            )
+            return SkillRoutingDecision(
+                selected_skill=skill_name,
+                reasoning=f"rac single candidate ({cand_str})",
+                skill_weights={skill_name: 1.0},
+            )
+
+        # Build classifier prompt with score-sorted candidates (best = label A)
+        sorted_candidates = sorted(candidates.items(), key=lambda x: x[1][0], reverse=True)
+        label_to_skill: dict[str, str] = {}
+        prompt_lines = []
+        for i, (skill, (score, example)) in enumerate(sorted_candidates):
+            label = chr(ord("A") + i)
+            label_to_skill[label] = skill
+            desc = self._rac_skill_descs.get(skill, "")
+            prompt_lines.append(f"{label}: {skill} (relevance: {score:.2f}) — {desc}")
+            prompt_lines.append(f"   Similar scenario: {example}")
+
+        classifier_prompt = (
+            "You are a routing classifier. Select which skill best matches "
+            "the customer's request.\n\n"
+            + "\n".join(prompt_lines)
+            + "\n\nOnly output the label."
+        )
+
+        labels = list(label_to_skill.keys())
+
+        try:
+            client = OpenAI(base_url=api_base, api_key=api_key)
+            completion = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": classifier_prompt},
+                    {"role": "user", "content": query_text},
+                    {"role": "user", "content": "Which skill?"},
+                ],
+                extra_body={"structured_outputs": {"choice": labels}},
+                logprobs=True,
+                top_logprobs=max(len(labels) - 1, 1),
+                temperature=orch_args.get("temperature", 0.0),
+                max_tokens=1,
+                seed=orch_args.get("seed"),
+            )
+
+            chosen_label = completion.choices[0].message.content.strip()
+
+            # Extract logprobs for all candidate labels
+            label_logprobs: Dict[str, float] = {}
+            logprobs_data = completion.choices[0].logprobs
+            if logprobs_data and logprobs_data.content:
+                token_logprob = logprobs_data.content[0]
+                label_logprobs[token_logprob.token.strip()] = token_logprob.logprob
+                if token_logprob.top_logprobs:
+                    for alt in token_logprob.top_logprobs:
+                        label_logprobs[alt.token.strip()] = alt.logprob
+
+            # Compute raw primary probability for confidence gating
+            if label_logprobs:
+                raw_probs = {l: math.exp(lp) for l, lp in label_logprobs.items()}
+                raw_total = sum(raw_probs.values())
+                if raw_total > 0:
+                    raw_probs = {l: p / raw_total for l, p in raw_probs.items()}
+                self._last_primary_raw_prob = max(raw_probs.values()) if raw_probs else 1.0
+            else:
+                self._last_primary_raw_prob = 1.0
+
+            # Convert to skill weights via temperature-scaled softmax
+            cls_temp = getattr(self.orchestrator_config, "classifier_temperature", 1.0)
+            skill_weights: Dict[str, float] = {}
+            if label_logprobs:
+                exp_probs = {}
+                for label, lp in label_logprobs.items():
+                    if label in label_to_skill:
+                        exp_probs[label] = (
+                            math.exp(lp / cls_temp)
+                            if cls_temp > 0
+                            else (1.0 if lp == max(label_logprobs.values()) else 0.0)
+                        )
+                total = sum(exp_probs.values())
+                if total > 0:
+                    for label, prob in exp_probs.items():
+                        skill_weights[label_to_skill[label]] = prob / total
+
+            # Also include candidates that weren't in logprobs with zero weight
+            for skill in candidates:
+                if skill not in skill_weights:
+                    skill_weights[skill] = 0.0
+
+            weight_str = ", ".join(f"{s}:{w:.4f}" for s, w in sorted(skill_weights.items()))
+            logger.info(f"[RAC] label={chosen_label} weights=[{weight_str}]")
+            print(
+                f"[RAC] label={chosen_label} | {weight_str} | candidates=[{cand_str}]",
+                flush=True,
+            )
+
+        except Exception as e:
+            logger.error(f"RAC classifier call failed: {e}")
+            return self._fallback_decision()
+
+        if chosen_label in label_to_skill:
+            skill_name = label_to_skill[chosen_label]
+            return SkillRoutingDecision(
+                selected_skill=skill_name,
+                reasoning=f"rac label {chosen_label} ({cand_str})",
+                skill_weights=skill_weights,
+            )
+        else:
+            logger.warning(
+                f"[RAC] Unexpected label: '{chosen_label}'. Expected {labels}"
+            )
+            return self._fallback_decision()
+
     def _set_weighted_lora(
         self, skill_weights: Dict[str, float]
     ) -> str:
@@ -1108,12 +1344,12 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
                 f"{decision.selected_skill}"
             )
         else:
-            # Route fresh (always for per_turn, or first call for per_conversation)
+            # Route fresh (always for per_turn, or first call for per_conversation/triggered)
             decision = self._route(full_messages)
-            if strategy == "per_conversation":
+            if strategy in ("per_conversation", "per_turn_triggered"):
                 state.conversation_route = decision
                 logger.info(
-                    f"[Orchestrator] Locked per-conversation route: "
+                    f"[Orchestrator] Locked initial route: "
                     f"{decision.selected_skill}"
                 )
 

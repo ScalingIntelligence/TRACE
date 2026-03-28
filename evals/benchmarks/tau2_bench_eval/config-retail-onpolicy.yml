@@ -8,13 +8,13 @@
 #   python main.py --config config-retail-structured-lora.yml
 
 domain: retail
-agent_llm: vllm://tarsur385/taubench-target-10
+agent_llm: vllm://tarsur385/taubench-target-20
 agent: null
 
 agent_llm_args:
   temperature: 0.0
   max_context_length: 32000
-  tokenizer_model: openai/tarsur385/taubench-target-10
+  tokenizer_model: openai/tarsur385/taubench-target-20
 
 # User simulator
 user_llm: vllm://Qwen/Qwen3-30B-A3B-Instruct-2507
@@ -32,7 +32,7 @@ num_trials: 1
 seed: 42
 verbose: true
 
-save_to: retail-taubench-target-10
+save_to: retail-taubench-target-20
 
 # vLLM server config — separate servers for deterministic user simulator
 vllm:

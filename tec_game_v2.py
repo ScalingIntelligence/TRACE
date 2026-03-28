@@ -25,10 +25,20 @@ from dataclasses import dataclass, field
 # System prompt — EXACT match to ToolSandbox
 # =====================================================================
 
-SYSTEM_PROMPT = (
+SYSTEM_PROMPT_BASE = (
     "Don't make assumptions about what values to plug into functions. "
     "Ask for clarification if a user request is ambiguous."
 )
+
+SYSTEM_PROMPT_HINT = (
+    "Don't make assumptions about what values to plug into functions. "
+    "Ask for clarification if a user request is ambiguous.\n"
+    "If a tool returns a PermissionError, fix the underlying issue automatically "
+    "without asking the user, then retry the original action."
+)
+
+# Default for registration
+SYSTEM_PROMPT = SYSTEM_PROMPT_BASE
 
 
 # =====================================================================
@@ -290,9 +300,20 @@ def generate_scenario(seed: int) -> Tuple[Scenario, Dict]:
 
     elif roll < 0.80:
         # SKILL B: Error Recovery Chain
-        db["settings"]["low_battery_mode"] = True
+        # KEY TRICK: The seed picks the SCENARIO (which service to enable),
+        # but the per-rollout noise randomizes WHETHER low_battery blocks it.
+        # This gives GRPO variance: same user request, sometimes easy (no blocker),
+        # sometimes hard (blocked). The model learns: "when it fails, fix the prereq."
         target = rng.choice(["wifi", "cellular", "location"])
         db["settings"][target] = False
+
+        # LOW_BATTERY IS SET IN reset() VIA NOISE — NOT HERE
+        # This is critical: the seed determines the scenario type,
+        # but reset()'s noise_rng determines if low_battery is on or off.
+        # So within the same GRPO group (same seed), some rollouts have
+        # low_battery=True (hard, needs recovery) and some have
+        # low_battery=False (easy, direct success).
+        # DO NOT set low_battery_mode here — let reset() handle it.
 
         prompts = {
             "wifi": [
@@ -316,15 +337,13 @@ def generate_scenario(seed: int) -> Tuple[Scenario, Dict]:
         }
         msg = rng.choice(prompts[target])
         label = {"wifi": "WiFi", "cellular": "cellular service", "location": "location service"}[target]
-        # Success keywords: agent must confirm the service is now on
         return Scenario("recovery", msg, [label.split()[0].lower(), "on"],
-                        f"Recovery: enable {target} (low battery blocks it)"), db
+                        f"Recovery: enable {target}"), db
 
     else:
-        # COMBINED: Error recovery + must communicate result
-        db["settings"]["low_battery_mode"] = True
+        # COMBINED: Get location (may or may not need recovery)
+        # Same trick: low_battery randomized per rollout in reset()
         db["settings"]["location"] = False
-        # More complex: need location to answer a question
         prompts = [
             "What are my current GPS coordinates?",
             "Where am I right now?",
@@ -332,7 +351,7 @@ def generate_scenario(seed: int) -> Tuple[Scenario, Dict]:
         ]
         return Scenario("combined", rng.choice(prompts),
                         ["latitude", "longitude"],
-                        "Combined: fix settings + get location + communicate"), db
+                        "Combined: get location + communicate"), db
 
 
 # =====================================================================
@@ -355,10 +374,39 @@ class TECGameV2:
         self._tool_called = False
         self._tool_result = None
         self._all_tools = []
+        self._use_hint = False
         self.max_steps = 12
 
     def reset(self, seed: int) -> None:
         self._scenario, self._db = generate_scenario(seed)
+
+        # PER-ROLLOUT RANDOMIZATION — creates GRPO variance.
+        noise_rng = random.Random(seed * 1000003 + int(time.time() * 1000) % 1000000 + id(self))
+
+        if self._scenario.skill in ("recovery", "combined"):
+            # Always HARD (low_battery=True), randomly add hint ~40% of the time.
+            # HARD without hint → model reports error → r=0.55
+            # HARD with hint → model fixes blocker and retries → r=1.0
+            # Clean contrast: same scenario, same blocker, only the hint differs.
+            # GRPO reinforces the recovery action (set_low_battery_mode → retry).
+            self._db["settings"]["low_battery_mode"] = True
+            self._use_hint = noise_rng.random() < 0.40  # 40% get hint
+        else:
+            # Communicate scenarios: randomize settings for noise
+            self._db["settings"]["low_battery_mode"] = noise_rng.choice([True, False])
+            self._use_hint = False
+
+        # Shuffle contacts for extra noise
+        noise_rng.shuffle(self._db["contacts"][:-1])
+
+        # Add 0-2 noise contacts
+        for _ in range(noise_rng.randint(0, 2)):
+            self._db["contacts"].insert(-1, {
+                "person_id": _pid(), "name": noise_rng.choice(NAMES),
+                "phone_number": _phone(), "relationship": noise_rng.choice(RELATIONSHIPS),
+                "is_self": False,
+            })
+
         self._tools = ToolExecutor(copy.deepcopy(self._db))
         self._conversation = [{"role": "user", "content": self._scenario.user_message}]
         self._step_count = 0
@@ -371,7 +419,9 @@ class TECGameV2:
         self.invalid_player = None
 
     def get_system_prompt(self) -> str:
-        return SYSTEM_PROMPT
+        if getattr(self, '_use_hint', False):
+            return SYSTEM_PROMPT_HINT
+        return SYSTEM_PROMPT_BASE
 
     def get_tool_schemas(self) -> List[Dict]:
         return TOOL_SCHEMAS
@@ -435,18 +485,35 @@ class TECGameV2:
             self.rewards = {0: 0.5 * tool_score + 0.5 * comm_score}
 
         elif self._scenario.skill == "recovery":
-            # Skill B: Did agent complete the full recovery chain?
-            # Must have: tried the blocked action, diagnosed, fixed prereq, retried, communicated
-            has_set_low_battery = "set_low_battery_mode_status" in self._all_tools
-            has_retry = len([t for t in self._all_tools if t.startswith("set_")]) >= 2
+            # Skill B: Did the agent successfully enable the target service?
+            # Check if the service is actually on now in the DB
+            target_service = None
+            for svc in ["wifi", "cellular", "location"]:
+                if svc in self._scenario.user_message.lower() or \
+                   svc in self._scenario.description.lower():
+                    target_service = svc
+                    break
+            if "internet" in self._scenario.user_message.lower() or "wifi" in self._scenario.user_message.lower():
+                target_service = "wifi"
+            if "signal" in self._scenario.user_message.lower() or "cellular" in self._scenario.user_message.lower():
+                target_service = "cellular"
+            if "gps" in self._scenario.user_message.lower() or "location" in self._scenario.user_message.lower():
+                target_service = "location"
 
-            recovery_score = 0.0
-            if has_set_low_battery and has_retry:
-                recovery_score = 1.0  # completed the chain
-            elif has_set_low_battery:
-                recovery_score = 0.5  # diagnosed but didn't retry
-            elif self._tool_called:
-                recovery_score = 0.25  # tried something
+            # Did the service actually get turned on?
+            service_on = self._tools.db["settings"].get(target_service, False) if target_service else False
+
+            if service_on:
+                action_score = 1.0  # service is on — success regardless of how
+            else:
+                # Service still off — check if agent at least tried
+                has_set_low_battery = "set_low_battery_mode_status" in self._all_tools
+                if has_set_low_battery:
+                    action_score = 0.5  # diagnosed the blocker
+                elif self._tool_called:
+                    action_score = 0.25  # tried but didn't recover
+                else:
+                    action_score = 0.0
 
             if self._scenario.verify_keywords:
                 matched = sum(1 for kw in self._scenario.verify_keywords if kw.lower() in response_lower)
@@ -454,20 +521,21 @@ class TECGameV2:
             else:
                 comm_score = 1.0 if len(response.strip()) > 10 else 0.0
 
-            self.rewards = {0: 0.6 * recovery_score + 0.4 * comm_score}
+            self.rewards = {0: 0.6 * action_score + 0.4 * comm_score}
 
         elif self._scenario.skill == "combined":
-            # Must recover settings AND get location AND communicate
-            has_recovery = "set_low_battery_mode_status" in self._all_tools
-            has_location = "get_current_location" in self._all_tools
+            # Did agent get the location successfully?
+            location_on = self._tools.db["settings"].get("location", False)
+            has_location_call = "get_current_location" in self._all_tools
 
-            chain_score = 0.0
-            if has_recovery and has_location:
-                chain_score = 1.0
-            elif has_recovery:
-                chain_score = 0.5
-            elif has_location:
-                chain_score = 0.25
+            if location_on and has_location_call:
+                action_score = 1.0  # got location
+            elif has_location_call:
+                action_score = 0.25  # tried but location was off
+            elif "set_low_battery_mode_status" in self._all_tools:
+                action_score = 0.25  # started recovery but didn't finish
+            else:
+                action_score = 0.0
 
             if self._scenario.verify_keywords:
                 matched = sum(1 for kw in self._scenario.verify_keywords if kw.lower() in response_lower)
@@ -475,7 +543,7 @@ class TECGameV2:
             else:
                 comm_score = 1.0 if len(response.strip()) > 10 else 0.0
 
-            self.rewards = {0: 0.5 * chain_score + 0.5 * comm_score}
+            self.rewards = {0: 0.5 * action_score + 0.5 * comm_score}
 
         self.done = True
 
