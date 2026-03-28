@@ -165,15 +165,20 @@ def main():
 
     base_seed = config.get("seed", 42)
 
-    # ---- Top-p filtering helper (mirrors _set_weighted_lora logic) ----
+    # ---- Top-k / top-p filtering helper (mirrors _set_weighted_lora logic) ----
     routing_topp = orch_config.routing_topp
+    routing_topk = getattr(orch_config, 'routing_topk', None)
 
-    def apply_topp(skill_weights):
-        """Apply top-p filtering to skill_weights dict, return set of kept skill names."""
+    def apply_filtering(skill_weights):
+        """Apply top-k then top-p filtering to skill_weights dict, return set of kept skill names."""
         if not skill_weights:
             return set()
         # Sort by weight descending
         sorted_skills = sorted(skill_weights.items(), key=lambda x: x[1], reverse=True)
+        # Step 1: top-k filtering
+        if routing_topk and len(sorted_skills) > routing_topk:
+            sorted_skills = sorted_skills[:routing_topk]
+        # Step 2: top-p filtering
         if routing_topp and len(sorted_skills) > 1:
             cumsum = 0.0
             keep = []
@@ -183,7 +188,7 @@ def main():
                 if cumsum >= routing_topp:
                     break
             return set(keep)
-        return set(skill_weights.keys())
+        return set(s[0] for s in sorted_skills)
 
     # ---- Run classifier for each task ----
     results = []  # (tid, acceptable, selected_skill, predicted_set)
@@ -228,7 +233,7 @@ def main():
         decision = agent._route(full_messages)
 
         # Apply top-p to get predicted skill set
-        predicted_set = apply_topp(decision.skill_weights or {decision.selected_skill: 1.0})
+        predicted_set = apply_filtering(decision.skill_weights or {decision.selected_skill: 1.0})
 
         exp = expected_routing.get(tid)
         acceptable = (exp if isinstance(exp, list) else [exp]) if exp is not None else None
@@ -316,6 +321,7 @@ def main():
             by_skill[got].append(tid)
         for skill, tids in sorted(by_skill.items()):
             print(f"  {skill}: {', '.join(f'T{t}' for t in tids)}")
+
 
 
 if __name__ == "__main__":

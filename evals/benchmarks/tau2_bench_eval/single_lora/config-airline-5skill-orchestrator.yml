@@ -27,7 +27,7 @@ orchestrator:
   routing_topk: null
   classifier_temperature: 1.0
   is_weighted: true
-  routing_topp: 0.7
+  routing_topp: 0.8
   routing_context_window: 10
 
   skills:

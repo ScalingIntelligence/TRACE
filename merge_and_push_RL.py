@@ -83,9 +83,9 @@ MERGE_JOBS = [
     #     ]
     # ),
     (
-        "tarsur385/taubench-target-20",
+        "tarsur385/tsb-TEC-v2-30it",
         [
-            ("/home/ubuntu/.cache/huggingface/tau2_bench/grpo_ckpt_iter_20_20260327_065803", 1.0)
+            ("/home/ubuntu/.cache/huggingface/tec_v2/grpo_ckpt_iter_30_20260327_172752", 1.0)
         ]
     ),
 ]

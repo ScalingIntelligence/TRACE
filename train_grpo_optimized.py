@@ -105,6 +105,44 @@ except Exception:
 
 
 # ============================================================================
+# Hint-swap for TEC v2 training
+# ============================================================================
+
+# Import TEC v2 prompt constants (lazy — only needed if game is tec_v2)
+_TEC_HINT_PROMPT = None
+_TEC_BASE_PROMPT = None
+
+def _swap_hint_prompts(samples: List) -> None:
+    """Replace hint system prompts with base prompts in TEC v2 samples.
+
+    During rollout, recovery scenarios may get a hint in the system prompt
+    that causes the model to perform recovery. For training, we want the
+    gradient to reinforce recovery conditioned on the BASE prompt (used at
+    eval time), not the hint. This swaps the prompt in-place.
+    """
+    global _TEC_HINT_PROMPT, _TEC_BASE_PROMPT
+    if _TEC_HINT_PROMPT is None:
+        try:
+            from tec_game_v2 import SYSTEM_PROMPT_HINT, SYSTEM_PROMPT_BASE
+            _TEC_HINT_PROMPT = SYSTEM_PROMPT_HINT
+            _TEC_BASE_PROMPT = SYSTEM_PROMPT_BASE
+        except ImportError:
+            return  # Not using TEC v2
+
+    swapped = 0
+    for s in samples:
+        if s.game_name != "tec_v2":
+            continue
+        if (s.prompt_msgs
+                and s.prompt_msgs[0].get("role") == "system"
+                and s.prompt_msgs[0].get("content") == _TEC_HINT_PROMPT):
+            s.prompt_msgs[0]["content"] = _TEC_BASE_PROMPT
+            swapped += 1
+    if swapped > 0:
+        print(f"  [hint-swap] Replaced hint→base prompt in {swapped}/{len(samples)} samples")
+
+
+# ============================================================================
 # Optimization helpers
 # ============================================================================
 
@@ -449,6 +487,7 @@ def build_env_kwargs(game_spec: GameSpec, args) -> Dict[str, Any]:
         "adversarial_policy", "tau_tool_calling", "precondition_check",
         "structured_data_reasoning", "multistep_task",
         "tau2_bench", "tau2_bench_airline", "tau2_bench_retail",
+        "tau2_bench_synthetic", "tau2_bench_synthetic_airline", "tau2_bench_synthetic_retail",
         # Revised versions
         "tau_tool_calling_revised", "precondition_check_revised",
         "structured_data_reasoning_revised", "multistep_task_revised",
@@ -846,6 +885,14 @@ def main():
 
                 if not batch_samples:
                     break
+
+                # ---- Hint-swap for TEC v2: replace hint prompt with base prompt ----
+                # During rollout, some recovery scenarios get a hint in the system
+                # prompt that teaches the model to recover from PermissionError.
+                # For training, we swap ALL system prompts to the base version so
+                # the gradient reinforces recovery conditioned on the base prompt
+                # (the one used at eval time), not on the hint.
+                _swap_hint_prompts(batch_samples)
 
                 # Count informative groups in this batch (groups with reward variance)
                 batch_group_rewards: Dict[Tuple[int, int], set] = defaultdict(set)

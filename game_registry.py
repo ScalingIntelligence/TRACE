@@ -117,6 +117,15 @@ except ImportError:
     ToolSandboxMultiTurnGame = None
 
 try:
+    from datetime_game import (
+        DatetimeGame,
+        extract_action as extract_action_datetime,
+        SYSTEM_PROMPT as SYSTEM_PROMPT_DATETIME,
+    )
+except ImportError:
+    DatetimeGame = None
+
+try:
     from awm_game import (
         AWMGame,
         extract_action as extract_action_awm,
@@ -133,6 +142,15 @@ try:
     )
 except ImportError:
     Tau2BenchGame = None
+
+try:
+    from tau2_bench_synthetic_game import (
+        Tau2BenchSyntheticGame,
+        extract_action as extract_action_tau2_bench_synthetic,
+        SYSTEM_PROMPT as SYSTEM_PROMPT_TAU2_BENCH_SYNTHETIC,
+    )
+except ImportError:
+    Tau2BenchSyntheticGame = None
 
 
 class GameEnv(Protocol):
@@ -502,6 +520,55 @@ def _register_builtin_games() -> None:
         )
 
 
+    # Tau2-Bench Synthetic — same mechanics as tau2_bench but with per-episode
+    # synthetic DB + tasks for maximum training data diversity.
+    if Tau2BenchSyntheticGame is not None:
+        def make_tau2_bench_synthetic(user_client=None, domain=None) -> Tau2BenchSyntheticGame:
+            return Tau2BenchSyntheticGame(max_steps=30, user_client=user_client, domain=domain)
+
+        register_game(
+            GameSpec(
+                name="tau2_bench_synthetic",
+                make_env=make_tau2_bench_synthetic,
+                extract_action=extract_action_tau2_bench_synthetic,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_TAU2_BENCH_SYNTHETIC,
+                max_gen_tokens=1024,
+            )
+        )
+
+        def make_tau2_bench_synthetic_airline(user_client=None) -> Tau2BenchSyntheticGame:
+            return Tau2BenchSyntheticGame(max_steps=30, user_client=user_client, domain="airline")
+
+        register_game(
+            GameSpec(
+                name="tau2_bench_synthetic_airline",
+                make_env=make_tau2_bench_synthetic_airline,
+                extract_action=extract_action_tau2_bench_synthetic,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_TAU2_BENCH_SYNTHETIC,
+                max_gen_tokens=1024,
+            )
+        )
+
+        def make_tau2_bench_synthetic_retail(user_client=None) -> Tau2BenchSyntheticGame:
+            return Tau2BenchSyntheticGame(max_steps=30, user_client=user_client, domain="retail")
+
+        register_game(
+            GameSpec(
+                name="tau2_bench_synthetic_retail",
+                make_env=make_tau2_bench_synthetic_retail,
+                extract_action=extract_action_tau2_bench_synthetic,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_TAU2_BENCH_SYNTHETIC,
+                max_gen_tokens=1024,
+            )
+        )
+
+
     # Tool-Execute-Communicate v2 (TEC) — focused on two clean skills
     # Skill A: communicate after tool call, Skill B: error recovery chain
     if TECGameV2 is not None:
@@ -535,6 +602,24 @@ def _register_builtin_games() -> None:
                 action_space=[],
                 stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
                 system_prompt=SYSTEM_PROMPT_TS_MULTITURN,
+                max_gen_tokens=1024,
+            )
+        )
+
+    # Datetime Reasoning — teaches correct Unix timestamp handling
+    # Model must call timestamp_to_datetime_info instead of guessing the year
+    if DatetimeGame is not None:
+        def make_datetime() -> DatetimeGame:
+            return DatetimeGame()
+
+        register_game(
+            GameSpec(
+                name="datetime",
+                make_env=make_datetime,
+                extract_action=extract_action_datetime,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_DATETIME,
                 max_gen_tokens=1024,
             )
         )

@@ -16,7 +16,9 @@ Our key observation is that recurring failure modes can be reliably extracted fr
 
 (i)~\emph{Contrastive capability identification}: an LLM-based analysis agent contrasts successful and failed trajectories to identify lacking capabilities that consistently lead trajectories to fail.
 
-(ii)~\emph{Capability-targeted environment synthesis}: for each identified deficit, an LLM-based generation agent constructs a synthetic environment that isolates the missing behavior while preserving the target environment's format. Task instances are generated from seeds and evaluated by programmatic verifiers, converting sparse trajectory-level feedback into dense, capability-specific rewards.
+
+
+(ii) \emph{Capability-targeted environment synthesis}: for each identified deficit, an LLM-based generation agent constructs a synthetic environment that isolates the missing behavior while preserving the target environment’s interface—such as its tool schemas, interaction protocol, and output format—so that training remains aligned with the behaviors required at evaluation time. Task instances are procedurally generated from random seeds, and the environment is built so that correct execution of the target capability can be checked automatically from tool arguments, state changes, or final outputs. Each synthesized environment is constructed so that trajectory success depends primarily on the target capability, yielding more focused and attributable supervision than the original environment.
 
 (iii)~\emph{Training and inference-time composition}: a separate lightweight LoRA adapter is trained per capability via reinforcement learning, with the base model frozen. At inference time, the system identifies which capabilities a task requires from natural-language descriptions of each capability, and only the selected adapters are activated for generation. This modular design mitigates the interference that arises when learning all capabilities in a single model (Table~\ref{tab:main_tb_results}).   
 
@@ -30,7 +32,7 @@ Empirically, our framework achieves up to X percentage points improvement over t
 
     \item To circumvent the challenges of learning multiple capabilities into one model, we propose training a separate LoRA adapter per identified capability and selectively routing at inference time. This avoids the interference inherent in unified training and outperforms it by X\%.
 
-    \item On challenging benchmarks \tbench and \tsb, our framework achieves up to X\%  improvement over state-of-the-art synthetic data and environment generation methods for agents with significantly less training. Further, we demonstrate that accuracy scales with both the number of capabilities and training compute.
+    \item On challenging benchmarks $\tau^2$-Bench and \tsb, our framework achieves up to X\%  improvement over state-of-the-art synthetic data and environment generation methods for agents with significantly less training. Further, we demonstrate that accuracy scales with both the number of capabilities and training compute.
 \end{enumerate}
 
 \begin{figure*}[t]
