@@ -644,7 +644,6 @@ def main():
         r=args.lora_rank,
         target_modules=[
             "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
         ],
         lora_alpha=args.lora_alpha,
         use_gradient_checkpointing="unsloth",
