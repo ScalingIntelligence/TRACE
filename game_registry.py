@@ -143,6 +143,15 @@ try:
 except ImportError:
     Tau2BenchSyntheticGame = None
 
+try:
+    from toolsandbox_game import (
+        ToolSandboxGame,
+        extract_action as extract_action_toolsandbox,
+        SYSTEM_PROMPT as SYSTEM_PROMPT_TOOLSANDBOX,
+    )
+except ImportError:
+    ToolSandboxGame = None
+
 
 class GameEnv(Protocol):
     """Minimal interface expected by the PPO + self-play loop."""
@@ -609,6 +618,25 @@ def _register_builtin_games() -> None:
                 action_space=[],
                 stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
                 system_prompt=SYSTEM_PROMPT_TEC,
+                max_gen_tokens=1024,
+            )
+        )
+
+    # ToolSandbox — Apple's stateful, conversational tool-use benchmark
+    # 129 base scenarios across contacts, messaging, settings, reminders, search.
+    # Reward from milestone DAG matching + minefield checking.
+    if ToolSandboxGame is not None:
+        def make_toolsandbox(user_client=None) -> ToolSandboxGame:
+            return ToolSandboxGame(max_steps=30, user_client=user_client)
+
+        register_game(
+            GameSpec(
+                name="toolsandbox",
+                make_env=make_toolsandbox,
+                extract_action=extract_action_toolsandbox,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_TOOLSANDBOX,
                 max_gen_tokens=1024,
             )
         )
