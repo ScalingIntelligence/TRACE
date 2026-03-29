@@ -77,15 +77,15 @@ MERGE_JOBS = [
     #     {"method": "ties_dare"},
     # ),
     # (
-    #     "tarsur909/sft-distill-selfexpert-v1",
+    #     "tarsur385/tsb-TEC-v3-10it",
     #     [
-    #         ("/home/ubuntu/.cache/huggingface/default/sft/sft_ckpt_epoch_0_20260325_230506", 1.0)
+    #         ("/home/ubuntu/.cache/huggingface/tec_v2/grpo_ckpt_iter_10_20260328_054532", 1.0)
     #     ]
     # ),
     (
-        "tarsur385/tsb-TEC-v2-30it",
+        "tarsur385/tau2-synthetic-grpo30",
         [
-            ("/home/ubuntu/.cache/huggingface/tec_v2/grpo_ckpt_iter_30_20260327_172752", 1.0)
+            ("/home/ubuntu/.cache/huggingface/tau2_bench_synthetic/tau2_bench_synthetic-grpo-iter30", 1.0)
         ]
     ),
 ]
