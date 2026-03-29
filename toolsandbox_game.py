@@ -39,7 +39,7 @@ from tool_sandbox.common.execution_context import (
 )
 from tool_sandbox.common.message_conversion import Message
 from tool_sandbox.common.scenario import Scenario
-from toolsandbox_tool_conversion import convert_to_openai_tools
+from tool_sandbox.common.tool_conversion import convert_to_openai_tools
 from tool_sandbox.roles.execution_environment import ExecutionEnvironment
 
 # ---------------------------------------------------------------------------
