@@ -1,7 +1,6 @@
 import os
-os.environ["HF_HOME"] = "/home/ubuntu/.cache/huggingface"
-os.environ["TMPDIR"] = "/home/ubuntu/tmp"
-os.makedirs("/home/ubuntu/tmp", exist_ok=True)
+os.environ["HF_HOME"] = "/home_local/ubuntu/.cache/huggingface"
+os.environ["TMPDIR"] = "/tmp"
 
 from peft import PeftModel, PeftConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -511,7 +510,7 @@ def stack_via_peft(base_model_name, adapters):
     print(f"  Concatenated {len(adapters)} adapters -> rank {new_r} (from {len(adapters)} × {original_r})")
 
     # Save concatenated adapter to temp dir and load as single adapter
-    with tempfile.TemporaryDirectory(dir="/home/ubuntu/tmp") as tmp:
+    with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
         save_file(concatenated, os.path.join(tmp, "adapter_model.safetensors"))
         with open(os.path.join(tmp, "adapter_config.json"), "w") as f:
             json.dump(config, f)
@@ -564,7 +563,7 @@ for job_idx, job in enumerate(MERGE_JOBS):
     # Load tokenizer once
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
 
-    save_dir = f"/home/ubuntu/merged_upload/{target_repo.split('/')[-1]}"
+    save_dir = f"/tmp/merged_upload/{target_repo.split('/')[-1]}"
     os.makedirs(save_dir, exist_ok=True)
 
     if len(adapter_paths) == 1:
