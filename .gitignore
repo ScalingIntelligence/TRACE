@@ -75,3 +75,8 @@ data/
 evals/benchmarks/tau2_bench_eval/data/game_evals/environment_testing/results/
 gameplays/
 evals/benchmarks/tau2_bench_eval/data/simulations/
+
+# ToolSandbox (evaluation results and build artifacts — do not push)
+evals/benchmarks/ToolSandbox/data/
+evals/benchmarks/ToolSandbox/build/
+evals/benchmarks/ToolSandbox_data_backup.zip
