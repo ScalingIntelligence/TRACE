@@ -108,6 +108,15 @@ except ImportError:
     TECGameV2 = None
 
 try:
+    from toolsandbox_multiturn_game import (
+        ToolSandboxMultiTurnGame,
+        extract_action as extract_action_ts_multiturn,
+        SYSTEM_PROMPT as SYSTEM_PROMPT_TS_MULTITURN,
+    )
+except ImportError:
+    ToolSandboxMultiTurnGame = None
+
+try:
     from datetime_game import (
         DatetimeGame,
         extract_action as extract_action_datetime,
@@ -583,6 +592,25 @@ def _register_builtin_games() -> None:
                 action_space=[],
                 stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
                 system_prompt=SYSTEM_PROMPT_TEC_V2,
+                max_gen_tokens=1024,
+            )
+        )
+
+    # ToolSandbox Multi-Turn Clarification — targets MULTIPLE_USER_TURN failures
+    # Trains: (1) asking clarifying questions, (2) communicating after tools,
+    # (3) recognizing insufficient information. Matches ToolSandbox format exactly.
+    if ToolSandboxMultiTurnGame is not None:
+        def make_ts_multiturn() -> ToolSandboxMultiTurnGame:
+            return ToolSandboxMultiTurnGame()
+
+        register_game(
+            GameSpec(
+                name="toolsandbox_multiturn",
+                make_env=make_ts_multiturn,
+                extract_action=extract_action_ts_multiturn,
+                action_space=[],
+                stop_sequences=[] if Config.ENABLE_THINKING else ["}"],
+                system_prompt=SYSTEM_PROMPT_TS_MULTITURN,
                 max_gen_tokens=1024,
             )
         )
