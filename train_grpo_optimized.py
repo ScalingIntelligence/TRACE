@@ -488,6 +488,7 @@ def build_env_kwargs(game_spec: GameSpec, args) -> Dict[str, Any]:
         "structured_data_reasoning", "multistep_task",
         "tau2_bench", "tau2_bench_airline", "tau2_bench_retail",
         "tau2_bench_synthetic", "tau2_bench_synthetic_airline", "tau2_bench_synthetic_retail",
+        "toolsandbox",
         # Revised versions
         "tau_tool_calling_revised", "precondition_check_revised",
         "structured_data_reasoning_revised", "multistep_task_revised",

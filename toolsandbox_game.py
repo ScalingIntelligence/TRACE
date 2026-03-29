@@ -124,6 +124,12 @@ class ToolSandboxGame:
             user_client: UserLLMClient for the user simulator.
             include_augmentations: If True, include distraction/scrambled variants.
         """
+        if user_client is None:
+            raise ValueError(
+                "ToolSandboxGame requires a user_client (UserLLMClient). "
+                "ToolSandbox scenarios include MULTIPLE_USER_TURN tasks that "
+                "cannot be completed without a user simulator."
+            )
         self.max_steps = max_steps
         self._user_client = user_client
         self._include_augmentations = include_augmentations
@@ -149,6 +155,14 @@ class ToolSandboxGame:
         self._last_call_key: Optional[str] = None
         self._repeat_count: int = 0
         self._reason: str = ""
+
+    @property
+    def num_tasks(self) -> int:
+        """Number of scenarios in the current pool."""
+        _ensure_scenarios_loaded()
+        if self._include_augmentations:
+            return len(_all_scenario_names)
+        return len(_scenario_names)
 
     def reset(self, seed: int) -> None:
         """Reset with a new seed. Picks scenario deterministically."""
@@ -374,7 +388,12 @@ class ToolSandboxGame:
         """Process agent's action."""
         if self.done:
             return
+        try:
+            self._step_impl(action)
+        except Exception as e:
+            self._finalize(0.0, f"Step error: {e}")
 
+    def _step_impl(self, action: Optional[str]) -> None:
         self._step_count += 1
 
         # Ensure our context is the global one
@@ -462,17 +481,19 @@ class ToolSandboxGame:
                 "text": json.dumps(tool_call),
             })
 
-            # Add AGENT->EXEC_ENV message to sandbox DB
-            self._add_sandbox_message(
-                sender=RoleType.AGENT,
-                recipient=RoleType.EXECUTION_ENVIRONMENT,
-                content=python_code,
-                openai_tool_call_id=tc_id,
-                openai_function_name=tool_name,
-            )
-
-            # Execute via ToolSandbox's ExecutionEnvironment
+            # Add AGENT->EXEC_ENV message to sandbox DB and execute
+            # Save sys.stdout/sys.stderr because ToolSandbox's redirect_stderr
+            # can leave them pointing to a closed StringIO on certain error paths.
+            _saved_stdout = sys.stdout
+            _saved_stderr = sys.stderr
             try:
+                self._add_sandbox_message(
+                    sender=RoleType.AGENT,
+                    recipient=RoleType.EXECUTION_ENVIRONMENT,
+                    content=python_code,
+                    openai_tool_call_id=tc_id,
+                    openai_function_name=tool_name,
+                )
                 self._exec_env.respond()
             except Exception as e:
                 self._conversation.append({
@@ -481,6 +502,12 @@ class ToolSandboxGame:
                 })
                 self._finalize(0.0, f"Execution error: {e}")
                 return
+            finally:
+                # Always restore sys.stdout/sys.stderr to avoid closed-file crashes
+                if sys.stdout is not _saved_stdout:
+                    sys.stdout = _saved_stdout
+                if sys.stderr is not _saved_stderr:
+                    sys.stderr = _saved_stderr
 
             # Read tool result from sandbox DB (last message)
             sandbox_db = self._execution_context.get_database(
@@ -550,9 +577,6 @@ class ToolSandboxGame:
           USER->AGENT messages → role="assistant"
           tool_call/tool_result → skipped (invisible to user)
         """
-        if self._user_client is None:
-            return "###STOP###"
-
         flipped = []
         for msg in self._conversation:
             role = msg["role"]
