@@ -66,11 +66,15 @@ class LLMAgent(LocalAgent[LLMAgentState]):
         super().__init__(tools=tools, domain_policy=domain_policy)
         self.llm = llm
         self.llm_args = deepcopy(llm_args) if llm_args is not None else {}
+        self.extra_system_prompt = self.llm_args.pop("extra_system_prompt", None)
 
     @property
     def system_prompt(self) -> str:
+        instruction = AGENT_INSTRUCTION
+        if self.extra_system_prompt:
+            instruction = instruction + "\n\n" + self.extra_system_prompt
         return SYSTEM_PROMPT.format(
-            domain_policy=self.domain_policy, agent_instruction=AGENT_INSTRUCTION
+            domain_policy=self.domain_policy, agent_instruction=instruction
         )
 
     def get_init_state(

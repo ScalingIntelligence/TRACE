@@ -467,7 +467,7 @@ import transformers; print('transformers:', transformers.__version__)
 
 
   VLLM_AGENT_URL=http://localhost:9090/v1 \
-  VLLM_AGENT_MODEL=tarsur385/tsb-TEC-v2-30it \
+  VLLM_AGENT_MODEL=tarsur385/tsb-MTT-v1-20it \
   RAPID_API_KEY=0cee0dd4e6msh4ecca885437f64ap1943fajsn69a861b57791 \
   VLLM_USER_URL=http://localhost:5051/v1 \
   OPENAI_API_KEY=EMPTY \
@@ -476,7 +476,7 @@ import transformers; print('transformers:', transformers.__version__)
       --user VLLM \
       --scenarios $(python /tmp/get_scenarios.py) \
       --parallel 1 \
-      --output_dir data/TEC-v2-30it3
+      --output_dir data/MTT-v1-20it
 
 
 

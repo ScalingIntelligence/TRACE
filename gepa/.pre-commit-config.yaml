@@ -1,0 +1,27 @@
+default_language_version:
+  python: python3.11
+
+default_stages: [pre-commit]
+default_install_hook_types: [pre-commit]
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Pinned to the specific ruff version 0.12.10
+    rev: v0.12.10
+    hooks:
+      # Use the 'ruff-check' hook for linting
+      - id: ruff-check
+        args: [--fix, --fix-only, --exit-non-zero-on-fix]
+      # You can also add the formatter if desired
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+        args: ["--allow-multiple-documents", "--unsafe"]
+      - id: check-toml
+      - id: check-added-large-files
+        args: ["--maxkb=3000"]
+      - id: check-merge-conflict
+      - id: debug-statements

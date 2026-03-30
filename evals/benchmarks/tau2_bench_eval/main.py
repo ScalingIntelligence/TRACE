@@ -170,10 +170,29 @@ def build_tau2_command(config: Dict[str, Any], cli_overrides: Dict[str, Any]) ->
             merged["agent_llm"] = f"openai/{lora_adapter_name}"
             print(f"Using existing LoRA adapter as agent: {lora_adapter_name}")
 
+    # Load and concatenate extra agent prompt files
+    agent_prompt_files = merged.get("agent_prompt_files", [])
+    if agent_prompt_files:
+        parts = []
+        for fpath in agent_prompt_files:
+            p = Path(fpath)
+            if not p.exists():
+                print(f"Warning: agent_prompt_file not found, skipping: {fpath}")
+                continue
+            parts.append(p.read_text().strip())
+            print(f"Loaded agent prompt file: {fpath}")
+        extra_system_prompt = "\n\n".join(parts) if parts else None
+    else:
+        extra_system_prompt = None
+
     # Prepare llm_args for agent and user separately
     # This allows mixed model evaluation (e.g., vLLM agent + OpenAI user)
     agent_llm_args = {"temperature": 0.0, **merged.get("agent_llm_args", {})}
     user_llm_args = {"temperature": 0.0, **merged.get("user_llm_args", {})}
+
+    # Inject extra system prompt into agent_llm_args for passthrough to LLMAgent
+    if extra_system_prompt:
+        agent_llm_args["extra_system_prompt"] = extra_system_prompt
 
     # Orchestrator + skill LLMs configuration
     orchestrator_config = merged.get("orchestrator")
