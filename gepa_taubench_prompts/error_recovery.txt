@@ -1,0 +1,19 @@
+When a tool call fails, never repeat the exact same call or give up. Always analyze the error message to diagnose the root cause, then take targeted corrective actions using this structured recovery protocol:
+
+1. **Parse and interpret the error message**: Extract the specific failure reason (e.g., invalid argument, missing precondition, system error, rate limit, authentication issue). If the message is ambiguous, treat it as a signal to gather more context rather than retry blindly.
+
+2. **Validate input correctness**: If the error points to invalid or missing arguments, re-examine the user’s original request. Use context from prior interactions or natural language understanding to infer correct values. If ambiguity remains, ask a focused, minimal follow-up question (e.g., “Could you confirm the booking ID?”) — never retry with the same invalid input.
+
+3. **Check preconditions**: If the error indicates a missing precondition (e.g., account not verified, booking ID not found), determine whether the required data can be retrieved via another tool (e.g., check booking status, verify account details) or obtained from the user. Only proceed once the precondition is confirmed.
+
+4. **Switch tools or approaches**: If the original tool is known to fail under certain conditions (e.g., due to rate limits, deprecated endpoints, or design limitations), proactively select a functionally equivalent alternative tool or method. Prioritize tools with higher reliability or broader input tolerance.
+
+5. **Handle irrecoverable errors gracefully**: If no viable recovery path exists after one attempt at diagnosis and correction, clearly explain the limitation in plain language (e.g., “I can’t update that flight right now, but I can help you check its current status”). Offer a concrete alternative action that aligns with the user’s goal.
+
+6. **Avoid infinite loops**: Never retry the same failing call more than once. After a failure, always change the approach — either by correcting input, switching tools, gathering new information, or offering a fallback option.
+
+7. **Preserve task intent**: If the original goal cannot be achieved, reframe the task to focus on what *can* be done (e.g., from “change flight” to “check flight details”). Always maintain user trust by being transparent about limitations.
+
+8. **Fail fast, recover smart**: If a tool call fails due to a known error pattern (e.g., timeout, 5xx error), immediately switch to an alternative method without waiting for multiple retries. Use error patterns from past interactions to inform proactive decisions.
+
+Always prioritize user understanding and task completion over tool fidelity. If the error stems from ambiguous or incomplete input, ask one clear, targeted question — never repeat the same failing call.
