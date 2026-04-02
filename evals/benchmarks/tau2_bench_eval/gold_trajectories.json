@@ -1,0 +1,143 @@
+{
+  "tool_calling": [
+    {
+      "skill": "tool_calling",
+      "type": "multi_step",
+      "desc": "Cancel V3H91B + add bags to KCGVZ4",
+      "text": "Customer: Hi, I need to cancel reservation V3H91B and also add 1 bag(s) to reservation KCGVZ4.\n[Agent retrieves user and reservation data]\n[Agent executes: cancel_reservation({\"reservation_id\": \"V3H91B\"}); update_reservation_baggages({\"reservation_id\": \"KCGVZ4\", \"total_baggages\": 2, \"nonfree_baggages\": 1})]\nAgent: Done. Your request has been processed."
+    },
+    {
+      "skill": "tool_calling",
+      "type": "explicit",
+      "desc": "Cancel eligible reservation E7R9X4",
+      "text": "Customer: Hi, I need to cancel my reservation. I have a medical emergency.\n[Agent retrieves user and reservation data]\n[Agent executes: cancel_reservation({\"reservation_id\": \"E7R9X4\"})]\nAgent: Done. Your request has been processed."
+    },
+    {
+      "skill": "tool_calling",
+      "type": "selection",
+      "desc": "Change to cheapest flight LAX->SEA on 2024-05-30 for reservation 66ZFZ9",
+      "text": "Customer: Hi, I need to change my flight in reservation my reservation. I'm booked from LAX to SEA on 2024-05-27 but need to fly on 2024-05-30 instead. Can you find me the cheapest available flight from LAX to SEA on 2024-05-30?\n[Agent retrieves user and reservation data]\n[Agent executes: update_reservation_flights({\"reservation_id\": \"66ZFZ9\", \"cabin\": \"economy\"})]\nAgent: Done. Your request has been processed."
+    }
+  ],
+  "precondition": [
+    {
+      "skill": "precondition",
+      "type": "basic_economy_modify",
+      "desc": "Basic economy cabin upgrade allowed",
+      "is_refusal": false,
+      "text": "Customer: Hi there, I'm Blake Shaw, user ID blake_shaw_5012. I'd like to upgrade my reservation Q8BN2Q from basic economy to economy class. The flight is EWR to MCO.\n[Agent retrieves user details and reservation data]\n[Agent checks booking restrictions and eligibility: All reservations including basic economy CAN change cabin]\n[Policy verdict: ALLOW \u2014 conditions are met]\n[Reason: All reservations including basic economy CAN change cabin]\n[Agent proceeds with: update_reservation_flights({\"reservation_id\": \"Q8BN2Q\", \"cabin\": \"economy\"})]\nAgent: I've verified the policy allows this action. Proceeding."
+    },
+    {
+      "skill": "precondition",
+      "type": "cabin_change",
+      "desc": "Economy to business cabin upgrade allowed",
+      "is_refusal": false,
+      "text": "Customer: Hello, this is Teal James, user teal_james_8578. I want to upgrade reservation 31MDGH from economy to business class for my LAS to DFW flight.\n[Agent retrieves user details and reservation data]\n[Agent checks booking restrictions and eligibility: Economy can upgrade to business (no flights flown)]\n[Policy verdict: ALLOW \u2014 conditions are met]\n[Reason: Economy can upgrade to business (no flights flown)]\n[Agent proceeds with: update_reservation_flights({\"reservation_id\": \"31MDGH\", \"cabin\": \"business\"})]\nAgent: I've verified the policy allows this action. Proceeding."
+    },
+    {
+      "skill": "precondition",
+      "type": "cancel_eligibility",
+      "desc": "Cancel refused - no valid criteria met",
+      "is_refusal": true,
+      "text": "Customer: Hi, I'm Lane Brook, user ID lane_brook_4689. I need to cancel my reservation V01WYE. I've had a change of plans.\n[Agent retrieves user details and reservation data]\n[Agent checks booking restrictions and eligibility: Not business, >24h, no insurance, not airline-cancelled]\n[Policy verdict: REFUSE \u2014 the action is NOT permitted]\n[Reason: Not business, >24h, no insurance, not airline-cancelled]\nAgent: I've checked the policy and unfortunately this action cannot be performed. Not business, >24h, no insurance, not airline-cancelled."
+    },
+    {
+      "skill": "precondition",
+      "type": "cancel_eligibility",
+      "desc": "Cancel allowed - business class",
+      "is_refusal": false,
+      "text": "Customer: Hi, I'm Casey Snow, user ID casey_snow_4744. I need to cancel my business class reservation DBJU9X, the LAX to ORD flight. My plans have changed.\n[Agent retrieves user details and reservation data]\n[Agent checks booking restrictions and eligibility: Business class is always cancellable]\n[Policy verdict: ALLOW \u2014 conditions are met]\n[Reason: Business class is always cancellable]\n[Agent proceeds with: cancel_reservation({\"reservation_id\": \"DBJU9X\"})]\nAgent: I've verified the policy allows this action. Proceeding."
+    },
+    {
+      "skill": "precondition",
+      "type": "cabin_change",
+      "desc": "Cabin change refused - flight already flown",
+      "is_refusal": true,
+      "text": "Customer: Hi, I'm Vex Lane, user ID vex_lane_8927. I'd like to upgrade reservation MY4AC0 from economy to business class. It's my EWR to SFO trip.\n[Agent retrieves user details and reservation data]\n[Agent checks booking restrictions and eligibility: Cannot change cabin if any flight has already been flown]\n[Policy verdict: REFUSE \u2014 the action is NOT permitted]\n[Reason: Cannot change cabin if any flight has already been flown]\nAgent: I've checked the policy and unfortunately this action cannot be performed. Cannot change cabin if any flight has already been flown."
+    },
+    {
+      "skill": "precondition",
+      "type": "modification_constraint",
+      "desc": "Destination change refused",
+      "is_refusal": true,
+      "text": "Customer: Hi, I'm Jade Vale, user jade_vale_8913. For my reservation D74FX9, I'd like to change my destination from MIA to somewhere else. Same departure from BOS.\n[Agent retrieves user details and reservation data]\n[Agent checks booking restrictions and eligibility: Cannot change origin, destination, or trip type]\n[Policy verdict: REFUSE \u2014 the action is NOT permitted]\n[Reason: Cannot change origin, destination, or trip type]\nAgent: I've checked the policy and unfortunately this action cannot be performed. Cannot change origin, destination, or trip type."
+    },
+    {
+      "skill": "precondition",
+      "type": "compensation",
+      "desc": "Compensation refused - regular member, economy, no insurance",
+      "is_refusal": true,
+      "text": "Customer: Hi, I'm Lark Troy, user ID lark_troy_1316. My flight SYN360 in reservation 0BL9Z0 was delayed and it caused me a lot of inconvenience. I'd like to request compensation.\n[Agent retrieves user details and reservation data]\n[Agent checks booking restrictions and eligibility: Do not compensate regular member without insurance in economy]\n[Policy verdict: REFUSE \u2014 the action is NOT permitted]\n[Reason: Do not compensate regular member without insurance in economy]\nAgent: I've checked the policy and unfortunately this action cannot be performed. Do not compensate regular member without insurance in economy."
+    },
+    {
+      "skill": "precondition",
+      "type": "compensation",
+      "desc": "Compensation allowed - silver + delayed",
+      "is_refusal": false,
+      "text": "Customer: Hi, Pax Gray here, user ID pax_gray_1372. My flight SYN141 in reservation 7VLXM9 from ORD to IAH has been delayed. I'd like to request compensation for this.\n[Agent retrieves user details and reservation data]\n[Agent checks booking restrictions and eligibility: Silver member + delayed flight = eligible, $50 x 2 passengers = $100]\n[Policy verdict: ALLOW \u2014 conditions are met]\n[Reason: Silver member + delayed flight = eligible, $50 x 2 passengers = $100]\n[Agent proceeds with: send_certificate({})]\nAgent: I've verified the policy allows this action. Proceeding."
+    },
+    {
+      "skill": "precondition",
+      "type": "basic_economy_modify",
+      "desc": "Basic economy flight modification refused",
+      "is_refusal": true,
+      "text": "Customer: Hi, my user ID is kit_james_5351. I have reservation MK0CRA for a flight from MCO to DEN. I'd like to change it to a later flight on the same day. Can you help me with that?\n[Agent retrieves user details and reservation data]\n[Agent checks booking restrictions and eligibility: Basic economy flights cannot be modified]\n[Policy verdict: REFUSE \u2014 the action is NOT permitted]\n[Reason: Basic economy flights cannot be modified]\nAgent: I've checked the policy and unfortunately this action cannot be performed. Basic economy flights cannot be modified."
+    }
+  ],
+  "structured_data_reasoning": [
+    {
+      "skill": "structured_data_reasoning",
+      "type": "reservation_comparison",
+      "desc": "Reservation comparison: most_passengers",
+      "text": "Customer: Hi, my name is Wade Shaw. My user ID is wade_shaw_5012. Which of my reservations has the most passengers?\n[Agent retrieves user details and reservation data]\n[Agent retrieves multiple reservations and compares their details]\n[Agent computes result: SDR15695, 2]\nAgent: Based on my analysis of the data, here are the results."
+    },
+    {
+      "skill": "structured_data_reasoning",
+      "type": "book_flight",
+      "desc": "Book flight: cheapest business ATL->BOS May 23",
+      "text": "Customer: Hi, my name is Teal James. My user ID is teal_james_8578. I need to book the cheapest business flight from ATL to BOS on May 23. Please use my gift card for payment. There will be 1 passenger.\n[Agent retrieves user details and reservation data]\n[Agent searches for available flights and compares options to find the best match]\n[Agent computes result: SDR188]\n[Agent executes: book_reservation]\nAgent: Based on my analysis of the data, here are the results."
+    },
+    {
+      "skill": "structured_data_reasoning",
+      "type": "change_flight",
+      "desc": "Change flight: SDR72404 to cheapest economy",
+      "text": "Customer: Hi, my name is Lane Brook. My user ID is lane_brook_4689. I'd like to change the flight on reservation SDR72404 to the cheapest available economy flight on the same route. Please use my payment method on file.\n[Agent retrieves user details and reservation data]\n[Agent searches for available flights and compares options to find the best match]\n[Agent computes result: SDR543]\n[Agent executes: update_reservation_flights]\nAgent: Based on my analysis of the data, here are the results."
+    },
+    {
+      "skill": "structured_data_reasoning",
+      "type": "cost_computation",
+      "desc": "Cost computation: economy->business",
+      "text": "Customer: Hi, I'm Casey Snow. My user ID is casey_snow_4744. How much extra per passenger would it cost to upgrade reservation SDR62974 from economy to business?\n[Agent retrieves user details and reservation data]\n[Agent looks up cabin prices and computes cost difference between fare classes]\n[Agent computes result: 409]\nAgent: Based on my analysis of the data, here are the results."
+    },
+    {
+      "skill": "structured_data_reasoning",
+      "type": "send_compensation",
+      "desc": "Compensation: delayed flight, 2 pax, $100",
+      "text": "Customer: Hi, my name is Uma Nash. My user ID is uma_nash_5952. My flight SDR703 on reservation SDR65027 appears to be delayed. I'd like to request a travel certificate as compensation.\n[Agent retrieves user details and reservation data]\n[Agent checks flight status data and determines compensation eligibility]\n[Agent computes result: 100]\n[Agent executes: send_certificate]\nAgent: Based on my analysis of the data, here are the results."
+    },
+    {
+      "skill": "structured_data_reasoning",
+      "type": "conditional_flight_change",
+      "desc": "Conditional flight change: cheaper found SDR629",
+      "text": "Customer: Hi, my name is Vex Lane. My user ID is vex_lane_8927. I'd like to change my flight on reservation SDR21426 to the cheapest option on 2024-05-17. If nothing cheaper than my current flight is available, I'd rather cancel the reservation.\n[Agent retrieves user details and reservation data]\n[Agent searches for available flights and compares options to find the best match]\n[Agent computes result: SDR629]\n[Agent executes: update_reservation_flights]\nAgent: Based on my analysis of the data, here are the results."
+    },
+    {
+      "skill": "structured_data_reasoning",
+      "type": "flight_status_check",
+      "desc": "Flight status: SDR524 is delayed",
+      "text": "Customer: Hi, I'm Cedar Pace. My user ID is cedar_pace_5881. Can you check the status of my flight on reservation SDR44839? Is it on time?\n[Agent retrieves user details and reservation data]\n[Agent checks flight status data and determines compensation eligibility]\n[Agent computes result: delayed]\nAgent: Based on my analysis of the data, here are the results."
+    },
+    {
+      "skill": "structured_data_reasoning",
+      "type": "flight_selection",
+      "desc": "Flight selection: earliest economy TPA->EWR",
+      "text": "Customer: Hi, my name is Teal Lane. My user ID is teal_lane_2818. I need the earliest economy flight from TPA to EWR on May 19. Can you search and tell me which flight that is?\n[Agent retrieves user details and reservation data]\n[Agent searches for available flights and compares options to find the best match]\n[Agent computes result: SDR405, 06:00]\nAgent: Based on my analysis of the data, here are the results."
+    },
+    {
+      "skill": "structured_data_reasoning",
+      "type": "baggage_computation",
+      "desc": "Baggage computation: free_bags (silver/economy)",
+      "text": "Customer: Hi, I'm Parker Marsh. My user ID is parker_marsh_2885. How many free checked bags am I allowed per passenger on reservation SDR85060?\n[Agent retrieves user details and reservation data]\n[Agent checks membership tier and calculates baggage allowance from policy table]\n[Agent computes result: 2]\nAgent: Based on my analysis of the data, here are the results."
+    }
+  ]
+}

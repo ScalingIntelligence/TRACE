@@ -1,0 +1,48 @@
+Here are examples of when each skill is needed, from training scenarios:
+
+=== tool_calling ===
+Use when the agent needs to execute a clear action with correct arguments.
+
+Example 1: "I need to cancel reservation V3H91B and also add 1 bag to reservation KCGVZ4."
+→ tool_calling: The actions are clear (cancel + add bag). The challenge is getting the reservation IDs and baggage counts right in the API calls.
+
+Example 2: "I need to change my flight from LGA to CLT. I'd like to switch to flight SYN727 on 2024-05-27. Charge any difference to my credit card ending in 2001."
+→ tool_calling: The user specified exactly what to do. The challenge is constructing the update call with correct flight number and payment method.
+
+Example 3: "I need to change my flight in reservation CAK3X3. If that's not possible because of my fare class, please cancel and book me a new one on flight SYN689."
+→ tool_calling: Conditional execution — try modify, if blocked by fare class then cancel+rebook. The challenge is handling the conditional and getting both API calls right.
+
+=== structured_data_reasoning ===
+Use when the agent needs to compare options, compute costs, or select from data.
+
+Example 1: "Which of my reservations has the most passengers?"
+→ structured_data_reasoning: Must retrieve multiple reservations, compare passenger counts, and report the answer.
+
+Example 2: "How much extra per passenger would it cost to upgrade reservation SDR62974 from economy to business?"
+→ structured_data_reasoning: Must look up current and target cabin prices and compute the difference.
+
+Example 3: "I'd like to change the flight on reservation SDR72404 to the cheapest available economy flight on the same route."
+→ structured_data_reasoning: Must search available flights, compare prices, and select the cheapest option before making the change.
+
+=== precondition ===
+Use when the agent must check policy rules before acting. The action might need to be refused.
+
+Example 1: "I need to cancel my reservation V01WYE. I've had a change of plans."
+→ precondition: Must check cancellation eligibility — is it business class? Booked within 24h? Has insurance? If none apply, must REFUSE.
+
+Example 2: "I'd like to upgrade my reservation Q8BN2Q from basic economy to economy class."
+→ precondition: Must verify that basic economy CAN be upgraded to economy (policy allows cabin upgrades even for basic economy, but not other modifications).
+
+Example 3: "I just booked reservation GAS6AW but I need to cancel it."
+→ precondition: Must verify the booking was made within 24 hours (which allows cancellation regardless of fare class).
+
+Example 4: "I'd like to make a reservation for my friend. It should be exactly the same as my current reservation."
+→ precondition: Must verify the existing booking details and check if replication is feasible — correct passengers, payment, and flight availability.
+
+=== multistep_task ===
+Use ONLY when the customer explicitly lists many separate independent tasks in a single request.
+
+Example 1: "I need to change my outbound flight to a nonstop option, adjust my return flight by one day, upgrade to business class, and add two checked bags."
+→ multistep_task: Four independent operations on the SAME reservation that must all complete.
+
+NOTE: A request with 2-3 actions (like "cancel two reservations and upgrade a third") is NOT multistep — route based on the HARDEST action instead (e.g. the upgrade needs structured_data_reasoning to find the right flight).

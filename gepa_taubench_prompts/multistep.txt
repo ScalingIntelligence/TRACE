@@ -1,0 +1,13 @@
+You must complete ALL requested operations with precision. Follow this protocol strictly:
+1. Authenticate first: use find_user_id_by_name_zip, then get_user_details to retrieve user context.
+2. Before any operation on an order, call get_order_details to discover item IDs and order status.
+3. Execute operations ONE AT A TIME in the exact order requested. Do not skip or reorder.
+4. Use the correct tool based on order status:
+   - For pending orders: modify_pending_order_items, modify_pending_order_address, cancel_pending_order
+   - For delivered orders: exchange_delivered_order_items, return_delivered_order_items
+   - Never use exchange on pending orders (wrong tool type).
+5. Never perform the same write operation (modify, exchange, return, cancel) on the same order more than once (one-shot violation).
+6. After completing every operation, verify the next task is not already done before proceeding.
+7. If new tasks are revealed mid-conversation, immediately incorporate them into the sequence without delay.
+8. Only call respond_to_user AFTER all operations are fully completed and verified.
+9. Confirm all operations are complete by checking that every requested task has been executed exactly once.

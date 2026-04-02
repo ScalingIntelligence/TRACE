@@ -447,13 +447,32 @@ class TECGameV2:
             name = tc.get("name", "")
             args = tc.get("arguments", {})
             result = self._tools.execute(name, args)
-            result_str = json.dumps(result, default=str) if not isinstance(result, str) else result
+            # Use repr() to match ToolSandbox's Python-style output:
+            # None/True/False instead of json's null/true/false
+            result_str = repr(result) if not isinstance(result, str) else result
             self._tool_called = True
             self._tool_result = result_str
             self._all_tools.append(name)
-            self._conversation.append({"role": "assistant", "content": action,
-                                        "tool_call": {"name": name, "arguments": args}})
-            self._conversation.append({"role": "tool", "content": result_str})
+            # Store in OpenAI tool_calls format so apply_chat_template
+            # produces the same <tool_call>...</tool_call> tokens as vLLM
+            # does at eval time. Without this, training sees raw JSON but
+            # eval sees <tool_call>-wrapped JSON — a token mismatch that
+            # prevents recovery skill transfer.
+            tool_call_id = f"call_{self._step_count}"
+            self._conversation.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args)},
+                }],
+            })
+            self._conversation.append({
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": result_str,
+            })
             # Don't end — wait for communication or more tool calls
         else:
             # Text response to user

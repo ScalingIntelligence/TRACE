@@ -86,6 +86,12 @@ class OpenAIAPIAgent(BaseRole):
         # Convert to OpenAI messages.
         current_context = get_current_context()
         openai_messages, _ = to_openai_messages(messages)
+        # Append extra system prompt if TSB_EXTRA_SYSTEM_PROMPT is set
+        if hasattr(self, '_extra_system_prompt') and self._extra_system_prompt:
+            for msg in openai_messages:
+                if msg.get("role") == "system":
+                    msg["content"] = msg["content"] + "\n\n" + self._extra_system_prompt
+                    break
         # Call model
         response = self.model_inference(
             openai_messages=openai_messages, openai_tools=openai_tools
@@ -184,3 +190,9 @@ class VLLMAgent(OpenAIAPIAgent):
         base_url = os.environ.get("VLLM_AGENT_URL", os.environ.get("VLLM_BASE_URL", os.environ.get("OPENAI_BASE_URL", "http://localhost:8080/v1")))
         api_key = os.environ.get("OPENAI_API_KEY", "EMPTY")
         self.openai_client = OpenAI(base_url=base_url, api_key=api_key)
+        # Optional: append extra instructions to system prompt
+        extra_prompt_path = os.environ.get("TSB_EXTRA_SYSTEM_PROMPT", "")
+        self._extra_system_prompt = ""
+        if extra_prompt_path and os.path.isfile(extra_prompt_path):
+            with open(extra_prompt_path) as f:
+                self._extra_system_prompt = f.read().strip()

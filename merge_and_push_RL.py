@@ -1,5 +1,5 @@
 import os
-os.environ["HF_HOME"] = "/home_local/ubuntu/.cache/huggingface"
+os.environ["HF_HOME"] = "/home/ubuntu/.cache/huggingface"
 os.environ["TMPDIR"] = "/tmp"
 
 from peft import PeftModel, PeftConfig
@@ -75,18 +75,32 @@ MERGE_JOBS = [
     #     ],
     #     {"method": "ties_dare"},
     # ),
+    (
+        "tarsur385/tsb-TEC-v3-30it",
+        [("tarsur385/TEC-v3-30it-lora", 1.0)]
+    ),
+    (
+        "tarsur385/tsb-TEC-v3-25it",
+        [("tarsur385/TEC-v3-25it-lora", 1.0)]
+    ),
+    (
+        "tarsur385/tsb-TEC-v3-20it",
+        [("tarsur385/TEC-v3-20it-lora", 1.0)]
+    ),
+    (
+        "tarsur385/tsb-TEC-v3-15it",
+        [("tarsur385/TEC-v3-15it-lora", 1.0)]
+    ),
+    (
+        "tarsur385/tsb-TEC-v3-10it",
+        [("tarsur385/TEC-v3-10it-lora", 1.0)]
+    ),
     # (
-    #     "tarsur385/tsb-TEC-v3-10it",
+    #     "tarsur385/tau2-synthetic-grpo30",
     #     [
-    #         ("/home/ubuntu/.cache/huggingface/tec_v2/grpo_ckpt_iter_10_20260328_054532", 1.0)
+    #         ("/home/ubuntu/.cache/huggingface/tau2_bench_synthetic/tau2_bench_synthetic-grpo-iter30", 1.0)
     #     ]
     # ),
-    (
-        "tarsur385/tau2-synthetic-grpo30",
-        [
-            ("/home/ubuntu/.cache/huggingface/tau2_bench_synthetic/tau2_bench_synthetic-grpo-iter30", 1.0)
-        ]
-    ),
 ]
 
 

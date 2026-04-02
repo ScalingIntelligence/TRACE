@@ -62,6 +62,13 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             self.max_loras, max_num_batched_tokens, device=device
         )
 
+        # Pre-allocated blending weights for graph-compatible weighted LoRA.
+        # Populated in _load_weighted_lora_config (before compile region).
+        # Shape [max_loras] — inactive slots have weight 0.
+        self._wlora_weights = torch.zeros(
+            self.max_loras, dtype=torch.float32, device=device
+        )
+
     def update_metadata(
         self,
         mapping: LoRAMapping,
@@ -290,14 +297,19 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             config_lora_ids = {lid for lid, _ in raw_config}
             if active_lora_id is not None and active_lora_id in config_lora_ids:
                 resolved = []
+                self._wlora_weights.zero_()
                 for lora_int_id, weight in raw_config:
                     if lora_int_id in id_to_slot:
-                        resolved.append((id_to_slot[lora_int_id], weight))
+                        slot = id_to_slot[lora_int_id]
+                        resolved.append((slot, weight))
+                        self._wlora_weights[slot] = weight
                 self.weighted_lora_config = resolved if resolved else None
             else:
                 self.weighted_lora_config = None
+                self._wlora_weights.zero_()
         else:
             self.weighted_lora_config = None
+            self._wlora_weights.zero_()
 
     def _read_weighted_cfg_cached(self) -> list | None:
         """Read weighted LoRA config file. Always re-reads (no mtime cache).
@@ -324,37 +336,43 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         lora_b_stacked: tuple[torch.Tensor, ...],
         output_slices: tuple[int, ...],
     ) -> None:
-        """Deterministic LoRA: y += sum_i w_i * B_i @ A_i @ x.
+        """Graph-compatible weighted LoRA: y += sum_k w_k * B_k @ A_k @ x.
 
-        Uses plain torch.matmul with float32 intermediates — no Triton
-        kernels, fully deterministic.  Float32 intermediates match the
-        precision used by the stock Triton lora_shrink/lora_expand path.
+        Unrolls over max_loras slots using sequential 2D torch.matmul
+        (same cuBLAS GEMM as the base model). Inactive slots have zeroed
+        adapter weights AND zero blending weight, contributing zero delta.
+        No Python loop over runtime data, no torch.bmm — safe for
+        torch.compile and uses the same deterministic matmul as base model.
         """
-        # weighted_lora_config is set in update_metadata (before compile).
-        # None means no LoRA for this request.
         if not self.weighted_lora_config:
             return
 
-        rank = lora_a_stacked[0].shape[-2]  # max_lora_rank dim
+        rank = lora_a_stacked[0].shape[-2]
+        x_fp32 = x.float()
 
-        for slot_idx, weight in self.weighted_lora_config:
-            if weight == 0:
-                continue
-            for s in range(len(lora_a_stacked)):
-                # Extract this slot's A and B: [1, rank, dim] -> [rank, dim]
-                A = lora_a_stacked[s][slot_idx, 0, :rank, :]  # [r, in_dim]
-                B = lora_b_stacked[s][slot_idx, 0, :, :rank]  # [out_dim, r]
-                # Compute in float32 for determinism, matching Triton path
-                hidden = x.float() @ A.T.float()     # [tokens, r] fp32
-                delta = hidden @ B.T.float()          # [tokens, out_dim] fp32
-                # Accumulate into correct output slice
-                if len(output_slices) == 1:
-                    y.add_(delta.to(y.dtype), alpha=weight)
-                else:
-                    offset = sum(output_slices[:s])
-                    y[:, offset:offset + output_slices[s]].add_(
-                        delta.to(y.dtype), alpha=weight
-                    )
+        for s in range(len(lora_a_stacked)):  # n_slices — compile-time constant
+            # Unroll over slots with sequential 2D matmul.
+            # max_loras is set at __init__ (compile-time constant).
+            # Inactive slots: adapter weights are zero (reset_lora) AND
+            # _wlora_weights[slot]=0, so delta*0=0 — no contribution.
+            out_dim = lora_b_stacked[s].shape[2]  # compile-time constant
+            summed = torch.zeros(
+                x_fp32.shape[0], out_dim, dtype=torch.float32, device=x.device
+            )
+            for slot in range(self.max_loras):
+                A = lora_a_stacked[s][slot, 0, :rank, :]  # [r, D]
+                B = lora_b_stacked[s][slot, 0, :, :rank]  # [O, r]
+                hidden = x_fp32 @ A.T.float()              # [T, r]
+                delta = hidden @ B.T.float()               # [T, O]
+                summed = summed + delta * self._wlora_weights[slot]
+
+            if len(output_slices) == 1:
+                y.add_(summed.to(y.dtype))
+            else:
+                offset = sum(output_slices[:s])
+                y[:, offset:offset + output_slices[s]].add_(
+                    summed.to(y.dtype)
+                )
 
     def add_weighted_lora_logits(
         self,
@@ -364,28 +382,30 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         lora_b_stacked: torch.Tensor,
         scale: float,
     ) -> None:
-        """Deterministic LoRA for LogitsProcessorWithLoRA.
+        """Graph-compatible weighted LoRA for logits.
 
-        Replaces the Triton lora_shrink+lora_expand path (which uses
-        SPLIT_K>1 atomic_add and is nondeterministic) with plain
-        torch.matmul in float32.
-
-        Semantics: y += scale * sum_i w_i * (x @ A_i^T) @ B_i^T
+        Semantics: y += scale * sum_k w_k * (x @ A_k^T) @ B_k^T
+        Uses sequential 2D matmul (same cuBLAS path as base model).
         """
         if not self.weighted_lora_config:
             return
 
-        rank = lora_a_stacked.shape[-2]  # max_lora_rank dim
+        rank = lora_a_stacked.shape[-2]
+        x_fp32 = x.float()
+        out_dim = lora_b_stacked.shape[2]  # vocab size — compile-time constant
+        summed = torch.zeros(
+            x_fp32.shape[0], out_dim, dtype=torch.float32, device=x.device
+        )
 
-        for slot_idx, weight in self.weighted_lora_config:
-            if weight == 0:
-                continue
-            A = lora_a_stacked[slot_idx, 0, :rank, :]  # [r, hidden]
-            B = lora_b_stacked[slot_idx, 0, :, :rank]  # [vocab, r]
-            hidden = x.float() @ A.T.float()            # [tokens, r] fp32
+        for slot in range(self.max_loras):
+            A = lora_a_stacked[slot, 0, :rank, :]   # [r, hidden]
+            B = lora_b_stacked[slot, 0, :, :rank]   # [vocab, r]
+            hidden = x_fp32 @ A.T.float()            # [T, r]
             hidden = hidden * scale
-            delta = hidden @ B.T.float()                 # [tokens, vocab] fp32
-            y.add_(delta.to(y.dtype), alpha=weight)
+            delta = hidden @ B.T.float()             # [T, vocab]
+            summed = summed + delta * self._wlora_weights[slot]
+
+        y.add_(summed.to(y.dtype))
 
     def add_lora_logits(
         self,

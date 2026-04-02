@@ -1,0 +1,72 @@
+[
+  {
+    "skill": "S2",
+    "description": "The user wants a specific product variant \u2014 particular color, size, material, or model. The challenge is finding and using the exactly correct variant ID.",
+    "text": "Customer: Exchange my water bottle for a larger size and my desk lamp for a brighter one. Or: Swap my keyboard for clicky switches with RGB. Or: I bought earbuds with IPX7 \u2014 swap for ones without water resistance. Or: Change thermostat to Google Home compatible.\n[Agent finds exact variant_id matching each requested attribute]\nAgent: Exchanges complete with exact matching variants."
+  },
+  {
+    "skill": "S3",
+    "description": "The user needs several operations done AND wants a combined result \u2014 cancel orders then return items then report the total, or look up options then choose one. ALL steps must finish.",
+    "text": "Customer: Cancel my pending orders AND return a delivered item \u2014 tell me the total refund. Or: How many t-shirt options in small? Help me pick one. Or: Upgrade all items to the most expensive using my gift card. Or: I'm back in the office \u2014 cancel some orders and return what I don't need, tell me the total.\n[Agent must complete ALL steps without stopping early]\nAgent: All operations finished \u2014 here's the combined total."
+  },
+  {
+    "skill": "S4",
+    "description": "The action may be REFUSED \u2014 order already delivered so can't cancel, return window expired, refund to wrong payment method, exchange not allowed for pending orders. Check eligibility.",
+    "text": "Customer: Return two orders and refund each to the other's payment method. Or: Can I still modify this pending order? Or: Exchange my laptop for one with an i9 CPU. Or: I only need one tablet \u2014 can I return the other?\n[Agent checks order status, return window, refund method rules]\nAgent: After checking, here's what the policy allows."
+  },
+  {
+    "skill": "S5",
+    "description": "The user asserts something \u2014 'I think my order number is...' \u2014 verify against tool data first.",
+    "text": "Customer: I'd like to return a camera \u2014 I think the order number might be #W8855135, but I'm not sure.\n[Agent verifies the claimed order number using tools]\nAgent: Let me look that up to confirm."
+  },
+  {
+    "skill": "S6",
+    "description": "Policy edge case \u2014 payment splitting, cross-category exchanges, refund method restrictions not covered by the general rule.",
+    "text": "Customer: My card doesn't have enough \u2014 can we split the payment? Or: Exchange my luggage for a coat instead. Or: Can I change to a completely different product?\n[Agent reads the full policy for this specific edge case]\nAgent: Per our specific policy, here's what applies."
+  },
+  {
+    "skill": "S8",
+    "description": "Compute a price difference, refund total, or exchange cost \u2014 use the calculator tool.",
+    "text": "Customer: What's the price difference if I switch to the cheapest desk lamp? How much goes to my gift card? Or: Exchange my vacuum for a canister model \u2014 what will it cost?\n[Agent uses calculator for exact arithmetic]\nAgent: The price difference is exactly $X.XX."
+  },
+  {
+    "skill": "S9",
+    "description": "The user lists several independent actions \u2014 exchange shoes AND use gift card, OR return headphones AND exchange keyboard, OR exchange helmet AND swap luggage AND update grill. Handle each separately.",
+    "text": "Customer: Exchange a pair of shoes and use my gift card for the difference. Or: Return headphones AND exchange keyboard for wireless. Or: Exchange helmet for medium red AND swap luggage AND update the grill order.\n[Agent handles each operation one at a time]\nAgent: All handled individually."
+  },
+  {
+    "skill": "S10",
+    "description": "The user sounds uncertain \u2014 'I think', 'I'm not sure', 'maybe' \u2014 confirm before executing.",
+    "text": "Customer: Cancel an order \u2014 I think it was for a grill? I'm not 100% sure.\n[Agent confirms before acting]\nAgent: Just to confirm \u2014 you want to cancel order #W1234 for the grill. Shall I proceed?"
+  },
+  {
+    "skill": "S11",
+    "description": "Unusual situation \u2014 damaged/worn products, wrong order received, defective items, unclear sizing. Escalate to a specialist.",
+    "text": "Customer: These hiking boots look worn \u2014 scuff marks! Or: I received someone else's order. Or: I want to exchange a t-shirt but not sure if the size exists. Or: Cancel everything except keyboard and mouse \u2014 I'm frustrated and this is complicated.\n[Agent escalates rather than guessing]\nAgent: Let me transfer you to a specialist."
+  },
+  {
+    "skill": "S12",
+    "description": "Simple request resolved \u2014 end cleanly without filler.",
+    "text": "Customer: I just need the tracking number for my order.\n[Agent provides answer and stops]\nAgent: Your tracking number is TRK-12345. Anything else?"
+  },
+  {
+    "skill": "S13",
+    "description": "The action will hit an error \u2014 return rejected because order status is wrong, address update fails, item not eligible. Must read the error and try an alternative approach.",
+    "text": "Customer: Return my air purifier and vacuum \u2014 refund ASAP within three days. Or: Cancel my order. Or: I've been trying to change my address but reconsidering.\n[Agent tries but tool returns error \u2014 wrong status, constraint violated]\n[Agent reads error and finds alternative]\nAgent: That didn't work, so I tried a different approach."
+  },
+  {
+    "skill": "S14",
+    "description": "After an action, report the exact refund amount, item count, or price \u2014 not just 'done'.",
+    "text": "Customer: Return these items \u2014 how much will I get back? Or: How many items are in my order?\n[Agent extracts specific numeric values]\nAgent: Your refund will be exactly $47.99."
+  },
+  {
+    "skill": "S15",
+    "description": "The user doesn't provide specific order/item IDs \u2014 'I just created my account', 'my New York address', 'the order with two watches', 'I don't remember the order number', 'shipped to my old address'. Must look up records to figure out what they mean.",
+    "text": "Customer: I just created my user ID and placed an order \u2014 I'm not sure about the details. Or: I ordered a puzzle but not sure which order. Or: Change shipping to my New York address, not here. Or: Sent to my son's address in Washington \u2014 fix it.\n[Agent looks up all records to resolve vague references \u2014 does NOT ask user for IDs]\nAgent: I found what you're referring to."
+  },
+  {
+    "skill": "S16",
+    "description": "The user goes off-topic with stories, jokes, flattery mid-request. Acknowledge briefly, redirect.",
+    "text": "Customer: I received a damaged tablet and I'm upset. But first \u2014 worst week ever. Anyway, I need the tracking number. Or: You're so helpful \u2014 reminds me of my daughter!\n[Agent redirects to the task]\nAgent: Sorry about your week. Here's your tracking number."
+  }
+]

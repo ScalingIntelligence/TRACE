@@ -1,6 +1,7 @@
-# Retail — Solo precondition LoRA (iter40)
+# retail — Solo precondition LoRA (iter40)
 #
-# Runs precondition adapter alone on all 114 tasks.
+# Runs precondition adapter alone on all 50 tasks.
+# Weight-merge mode: server runs WITHOUT --enable-lora.
 #
 # Usage:
 #   python main.py --config single_lora/config-retail-solo-precondition.yml
@@ -17,7 +18,7 @@ orchestrator:
   orchestrator_model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
   orchestrator_llm_args:
     temperature: 0.0
-    api_base: http://localhost:9090/v1
+    api_base: http://localhost:9003/v1
     api_key: EMPTY
 
   routing_strategy: per_conversation
@@ -28,11 +29,15 @@ orchestrator:
   skills:
     - name: precondition
       description: >
-        Handle all retail customer service requests.
+        Policy rule enforcement. Use when the action may need
+        to be refused: fare class modification restrictions,
+        refund eligibility from insurance or booking timing,
+        prior agent commitment verification, or booking
+        replication feasibility.
       adapter_name: precondition-grpo-iter40
       adapter_path: /home/ubuntu/.cache/huggingface/precondition/grpo_ckpt_iter_40_20260319_035848
       llm_args:
-        api_base: http://localhost:9090/v1
+        api_base: http://localhost:9001/v1
         api_key: EMPTY
         temperature: 0.0
         max_context_length: 32000
@@ -53,7 +58,11 @@ num_trials: 1
 seed: 42
 verbose: true
 
-save_to: single_lora/results/retail-solo-precondition
+save_to: retail-solo-precondition-detf
 
 vllm:
-  base_url: http://localhost:9090/v1
+  base_url: http://localhost:9001/v1
+  agent_base_urls:
+    - http://localhost:9001/v1
+  user_base_urls:
+    - http://localhost:9003/v1

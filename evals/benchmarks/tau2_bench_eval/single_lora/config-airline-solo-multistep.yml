@@ -17,7 +17,7 @@ orchestrator:
   orchestrator_model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
   orchestrator_llm_args:
     temperature: 0.0
-    api_base: http://localhost:9001/v1
+    api_base: http://localhost:9000/v1
     api_key: EMPTY
 
   routing_strategy: per_conversation
@@ -33,7 +33,7 @@ orchestrator:
       adapter_name: multistep-grpo-iter10
       adapter_path: /home/ubuntu/.cache/huggingface/multistep_task/grpo_ckpt_iter_10_20260318_110546
       llm_args:
-        api_base: http://localhost:9001/v1
+        api_base: http://localhost:8080/v1
         api_key: EMPTY
         temperature: 0.0
         max_context_length: 32000
@@ -54,7 +54,11 @@ num_trials: 1
 seed: 42
 verbose: true
 
-save_to: single_lora/results/airline-solo-multistep
+save_to: airline-solo-multistep-detf
 
 vllm:
-  base_url: http://localhost:9001/v1
+  base_url: http://localhost:8080/v1
+  agent_base_urls:
+    - http://localhost:8080/v1
+  user_base_urls:
+    - http://localhost:9000/v1

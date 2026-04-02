@@ -1,0 +1,46 @@
+# Base model + GEPA prompts (8 skills) — airline
+#
+# First 8 skills from scaling_skills.json (excluding structured data reasoning):
+# S2: Precise tool calling, S3: Multi-step task completion,
+# S4: Precondition verification, S5: Ground every claim in tool output,
+# S6: Read the full policy before acting, S7: Refuse clearly when policy prohibits,
+# S8: Use the calculator for arithmetic, S9: Handle one request at a time
+#
+# Usage:
+#   python main.py --config config-gepa-airline-8.yml
+
+domain: airline
+agent_llm: vllm://Qwen/Qwen3-30B-A3B-Instruct-2507
+agent: null
+
+agent_llm_args:
+  temperature: 0.0
+  max_context_length: 32000
+  tokenizer_model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
+
+agent_prompt_files:
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/tool_calling.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/multistep.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/precondition.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/ground_claims.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/policy_reading.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/policy_refusal.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/calculator_use.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/sequential_requests.txt
+
+user_llm: vllm://Qwen/Qwen3-30B-A3B-Instruct-2507
+user_llm_args:
+  temperature: 0.0
+  max_context_length: 32000
+  tokenizer_model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
+
+user: null
+num_trials: 1
+max_steps: 50
+max_concurrency: 1
+seed: 42
+verbose: true
+save_to: gepa-airline-8
+
+vllm:
+  base_url: http://localhost:8080/v1

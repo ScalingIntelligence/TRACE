@@ -26,7 +26,7 @@ max_steps: 50
 max_concurrency: 1
 seed: 42
 verbose: true
-save_to: base-airline-det-rern3
+save_to: base-airline-det-rern4
 
 vllm:
-  base_url: http://localhost:9002/v1
+  base_url: http://localhost:8080/v1

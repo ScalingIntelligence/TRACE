@@ -183,9 +183,20 @@ class OpenAIServingModels:
             if error_check_ret is not None:
                 return error_check_ret
 
-            # Safe to delete now since we hold the lock
+            # Remove from engine first (free GPU slot + deactivate adapter)
+            lora_int_id = self.lora_requests[lora_name].lora_int_id
+            try:
+                await self.engine_client.remove_lora(lora_int_id)
+            except Exception as e:
+                logger.warning(
+                    "Failed to remove LoRA %d from engine: %s", lora_int_id, e
+                )
+
             del self.lora_requests[lora_name]
-            logger.info("Removed LoRA adapter: name '%s'", lora_name)
+            logger.info(
+                "Removed LoRA adapter: name '%s', int_id %d",
+                lora_name, lora_int_id,
+            )
             return f"Success: LoRA adapter '{lora_name}' removed successfully."
 
     async def _check_load_lora_adapter_request(
@@ -290,6 +301,38 @@ class OpenAIServingModels:
             f"Success: Weighted LoRA config set with "
             f"{len(weighted_config)} adapters."
         )
+
+    async def merge_lora_into_base(self, adapter_spec) -> ErrorResponse | str:
+        """Merge LoRA adapter(s) into base model parameters.
+
+        adapter_spec: either a single adapter_path (str) or a list of
+        {"adapter_path": str, "weight": float} for multi-adapter merge.
+        """
+        try:
+            results = await self.engine_client.collective_rpc(
+                "merge_lora_into_base", args=(adapter_spec,)
+            )
+            return results[0] if results else "No workers responded"
+        except Exception as e:
+            return create_error_response(
+                message=f"merge_lora_into_base failed: {e}",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    async def restore_base_weights(self) -> ErrorResponse | str:
+        """Restore original base model weights (undo any LoRA merge)."""
+        try:
+            results = await self.engine_client.collective_rpc(
+                "restore_base_weights"
+            )
+            return results[0] if results else "No workers responded"
+        except Exception as e:
+            return create_error_response(
+                message=f"restore_base_weights failed: {e}",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
 
     async def resolve_lora(self, lora_name: str) -> LoRARequest | ErrorResponse:
         """Attempt to resolve a LoRA adapter using available resolvers.

@@ -1,13 +1,13 @@
           
 ```bash
 conda activate games
-export HF_HOME=/dev/vda1/.cache/huggingface
+export HF_HOME=/workspace/.cache/huggingface
 export VLLM_RPC_TIMEOUT=2000
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=6
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
 vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507 \
   --host 0.0.0.0 \
-  --port 2020 \
+  --port 5051 \
   --dtype bfloat16 \
   --max-model-len 32000 \
   --enable-lora \
@@ -18,22 +18,11 @@ vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507 \
   --tensor-parallel-size 1 
 ```
 conda activate games
-
-export HF_HOME=/lambda/nfs/lambda-stanford/tarun/.cache/huggingface                            
+export HF_HOME=/workspace/.cache/huggingface
 export VLLM_RPC_TIMEOUT=2000
-export CUDA_VISIBLE_DEVICES=4
+export CUDA_VISIBLE_DEVICES=2
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
-vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 8090   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes 
-
-
-export HF_HOME=/lambda/nfs/lambda-stanford/tarun/.cache/huggingface                            
-export VLLM_RPC_TIMEOUT=2000
-export CUDA_VISIBLE_DEVICES=5
-export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
-vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 9090   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes 
-
-
---no-enable-prefix-caching --max-num-seqs 1
+vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 9000   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
 
 
 conda activate games
@@ -49,15 +38,12 @@ vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 8080   --d
 conda activate games
 export HF_HOME=/workspace/.cache/huggingface
 export VLLM_RPC_TIMEOUT=2000
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
-export VLLM_WEIGHTED_LORA_PIN_SLOT0=1
-export VLLM_WEIGHTED_LORA_PORT=9000
-vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 9000   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
-
+vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507   --host 0.0.0.0   --port 8080   --dtype bfloat16   --max-model-len 32000   --enable-lora   --max-loras 2   --gpu-memory-utilization 0.9   --enable-auto-tool-choice   --tool-call-parser hermes 
 
 export VLLM_WEIGHTED_LORA_PIN_SLOT0=1
-export VLLM_WEIGHTED_LORA_PORT=9000
+export VLLM_WEIGHTED_LORA_PORT=5051
 
 
 conda activate games
@@ -251,6 +237,25 @@ CUDA_VISIBLE_DEVICES=2,3,6,7 \
       --save-every 5 --user-llm-url http://localhost:9004/v1 --user-llm-model "Qwen/Qwen3-30B-A3B-Instruct-2507"
 
 
+CUDA_VISIBLE_DEVICES=0 VLLM_ALLOW_RUNTIME_LORA_UPDATING=True VLLM_RPC_TIMEOUT=2000 vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507 --host 0.0.0.0 --port 8080 --dtype bfloat16 --max-model-len 32000 --gpu-memory-utilization 0.9 --enable-auto-tool-choice --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
+
+CUDA_VISIBLE_DEVICES=1 VLLM_ALLOW_RUNTIME_LORA_UPDATING=True VLLM_RPC_TIMEOUT=2000 vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507 --host 0.0.0.0 --port 9000 --dtype bfloat16 --max-model-len 32000 --gpu-memory-utilization 0.9 --enable-auto-tool-choice --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
+
+
+CUDA_VISIBLE_DEVICES=2 VLLM_ALLOW_RUNTIME_LORA_UPDATING=True VLLM_RPC_TIMEOUT=2000 vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507 --host 0.0.0.0 --port 9001 --dtype bfloat16 --max-model-len 32000 --gpu-memory-utilization 0.9 --enable-auto-tool-choice --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
+
+
+
+CUDA_VISIBLE_DEVICES=3 VLLM_ALLOW_RUNTIME_LORA_UPDATING=True VLLM_RPC_TIMEOUT=2000 vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507 --host 0.0.0.0 --port 9003 --dtype bfloat16 --max-model-len 32000 --gpu-memory-utilization 0.9 --enable-auto-tool-choice --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
+
+
+CUDA_VISIBLE_DEVICES=4 VLLM_ALLOW_RUNTIME_LORA_UPDATING=True VLLM_RPC_TIMEOUT=2000 vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507 --host 0.0.0.0 --port 9004 --dtype bfloat16 --max-model-len 32000 --gpu-memory-utilization 0.9 --enable-auto-tool-choice --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
+
+
+CUDA_VISIBLE_DEVICES=6 VLLM_ALLOW_RUNTIME_LORA_UPDATING=True VLLM_RPC_TIMEOUT=2000 vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507 --host 0.0.0.0 --port 9006 --dtype bfloat16 --max-model-len 32000 --gpu-memory-utilization 0.9 --enable-auto-tool-choice --tool-call-parser hermes --no-enable-prefix-caching --max-num-seqs 1
+
+
+  
 CUDA_VISIBLE_DEVICES=1,2,3 \
   NCCL_P2P_DISABLE=1 \
   WANDB_API_KEY=f4ef099e7073d103963e5c986e4f818f5a526ee8 \
@@ -375,7 +380,7 @@ CUDA_VISIBLE_DEVICES=6 NCCL_P2P_DISABLE=1 WANDB_API_KEY=f4ef099e7073d103963e5c98
       --no-step-rewards
 
 ################################################
-  CUDA_VISIBLE_DEVICES=0,1,4,5,6 \
+  CUDA_VISIBLE_DEVICES=0,3,4,6 \
   NCCL_P2P_DISABLE=1 \
   WANDB_API_KEY=f4ef099e7073d103963e5c986e4f818f5a526ee8 \
   WANDB_PROJECT=games \
@@ -384,7 +389,7 @@ CUDA_VISIBLE_DEVICES=6 NCCL_P2P_DISABLE=1 WANDB_API_KEY=f4ef099e7073d103963e5c98
   VLLM_TIMEOUT_S=2000 \
   VLLM_ALLOW_RUNTIME_LORA_UPDATING=True \
   PYTHONUNBUFFERED=1 \
-  torchrun --nproc_per_node=5 --master-port 29501 train_grpo_optimized.py \
+  torchrun --nproc_per_node=4 --master-port 29501 train_grpo_optimized.py \
       --game tec_v2 \
       --model Qwen/Qwen3-30B-A3B-Instruct-2507 \
       --compact-tools \
@@ -397,6 +402,25 @@ CUDA_VISIBLE_DEVICES=6 NCCL_P2P_DISABLE=1 WANDB_API_KEY=f4ef099e7073d103963e5c98
       --sft-coef 0 \
       --no-step-rewards \
       --dynamic-sampling-max-batches 1
+
+
+
+  CUDA_VISIBLE_DEVICES=0,4,6,7 \
+  NCCL_P2P_DISABLE=1 \
+  WANDB_API_KEY=f4ef099e7073d103963e5c986e4f818f5a526ee8 \
+  WANDB_PROJECT=games \
+  VLLM_BASE_URLS=http://localhost:5051 \
+  VLLM_MODEL=tarsur385/tsb-MTT-v1-20it \
+  VLLM_TIMEOUT_S=2000 \
+  VLLM_ALLOW_RUNTIME_LORA_UPDATING=True \
+  PYTHONUNBUFFERED=1 \
+  torchrun --nproc_per_node=4 --master-port 29501 train_grpo_optimized.py \
+      --game tec_v2 \
+      --model tarsur385/tsb-MTT-v1-20it \
+      --groups-per-batch 16 --mini-batch-size 8 --stats-chunk-size 8 \
+      --lr 5e-6 --save-every 5 \
+      --dynamic-sampling-max-batches 1 \
+      --sft-coef 0 --no-step-rewards
 
 
 

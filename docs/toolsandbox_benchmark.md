@@ -466,8 +466,11 @@ import transformers; print('transformers:', transformers.__version__)
   "
 
 
-  VLLM_AGENT_URL=http://localhost:9090/v1 \
-  VLLM_AGENT_MODEL=tarsur385/tsb-MTT-v1-20it \
+
+########################################
+TSB_EXTRA_SYSTEM_PROMPT=/home/ubuntu/hangook/games/combined_gepa/tec_only_2k.txt \
+  VLLM_AGENT_URL=http://localhost:5051/v1 \
+  VLLM_AGENT_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507 \
   RAPID_API_KEY=0cee0dd4e6msh4ecca885437f64ap1943fajsn69a861b57791 \
   VLLM_USER_URL=http://localhost:5051/v1 \
   OPENAI_API_KEY=EMPTY \
@@ -476,7 +479,47 @@ import transformers; print('transformers:', transformers.__version__)
       --user VLLM \
       --scenarios $(python /tmp/get_scenarios.py) \
       --parallel 1 \
-      --output_dir data/MTT-v1-20it
+      --output_dir data/tsb-gepa-2k
+
+
+Qwen/Qwen3-30B-A3B-Instruct-2507
+
+
+ORCHESTRATOR_CONFIG=/home/ubuntu/hangook/games/evals/benchmarks/ToolSandbox/configs/orchestrator-solo-tec.yml \
+  RAPID_API_KEY=0cee0dd4e6msh4ecca885437f64ap1943fajsn69a861b57791 \
+  VLLM_USER_URL=http://localhost:9001/v1 \
+  OPENAI_API_KEY=EMPTY \
+  tool_sandbox \
+      --agent Orchestrator \
+      --user VLLM \
+      --scenarios $(python /tmp/get_scenarios.py) \
+      --parallel 1 \
+      --output_dir data/Rout-solo-TEC
+
+
+
+  vllm serve Emperorizzis/ASTRA-14B-Thinking-v1 \
+    --host 0.0.0.0 --port 9090 \
+    --dtype bfloat16 --max-model-len 32000 \
+    --enable-auto-tool-choice --tool-call-parser hermes \
+    --override-chat-template-kwargs '{"enable_thinking": false}'
+
+  VLLM_AGENT_URL=http://localhost:9090/v1 \
+  VLLM_AGENT_MODEL=Emperorizzis/ASTRA-14B-Thinking-v1 \
+  RAPID_API_KEY=0cee0dd4e6msh4ecca885437f64ap1943fajsn69a861b57791 \
+  VLLM_USER_URL=http://localhost:5051/v1 \
+  OPENAI_API_KEY=EMPTY \
+  tool_sandbox \
+      --agent VLLM \
+      --user VLLM \
+      --scenarios $(python /tmp/get_scenarios.py) \
+      --parallel 1 \
+      --output_dir data/ASTRA-14b
+
+
+cat ts_tec_gepa_prompts/best_prompt_at_1005.txt > /tmp/gepa_combined_1005.txt
+  echo "" >> /tmp/gepa_combined_1005.txt
+  cat ts_multiturn_gepa_prompts/best_prompt_at_1005.txt >> /tmp/gepa_combined_1005.txt
 
 
 

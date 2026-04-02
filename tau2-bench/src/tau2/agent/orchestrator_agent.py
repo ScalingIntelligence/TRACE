@@ -92,8 +92,6 @@ class OrchestratorConfig(BaseModel):
     routing_topk: Optional[int] = None  # limit routing to top-k adapters; applies to classifier and embedding modes (None=all)
     routing_topp: Optional[float] = None  # top-p nucleus filtering: keep fewest adapters whose cumulative weight >= topp; applies to classifier and embedding
     classifier_temperature: float = 1.0  # temperature scaling applied to logprobs before softmax (>1 = softer, <1 = sharper)
-    min_blend_confidence: Optional[float] = None  # only blend when primary's raw (pre-temp) probability < this; else hard-route
-    is_weighted: bool = False  # True: use classifier logprob weights; False: weight=1.0 for all selected adapters
     # Embedding-based routing
     embedding_model: Optional[str] = None  # e.g. "Qwen/Qwen3-Embedding-8B"; required when routing_mode="embedding"
     embedding_gpu: Optional[str] = None  # device for the embedding model, e.g. "cuda:0" (default: "cpu")
@@ -130,16 +128,18 @@ class SkillBackend:
         config: SkillConfig,
         tools: List[Tool],
         domain_policy: str,
+        base_model_name: Optional[str] = None,
     ):
         self.config = config
         self.tools = tools
         self.domain_policy = domain_policy
 
-        # Resolve model name
-        if config.model:
+        # Resolve model name: adapter-backed skills use the base model name
+        # because adapters are merged into base weights via /v1/merge_lora_into_base.
+        if config.adapter_name and base_model_name:
+            self.model = base_model_name
+        elif config.model:
             self.model = config.model
-        elif config.adapter_name:
-            self.model = f"openai/{config.adapter_name}"
         else:
             raise ValueError(
                 f"Skill '{config.name}' must have either 'model' or 'adapter_name'"
@@ -237,6 +237,10 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
     simulation orchestrator treats it identically.
     """
 
+    # Class-level: persists across instances (new agent created per task).
+    # Tracks which adapter is currently merged into base weights on the server.
+    _merge_active_adapter: Optional[str] = None
+
     def __init__(
         self,
         tools: List[Tool],
@@ -255,6 +259,7 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
                 config=skill_config,
                 tools=tools,
                 domain_policy=domain_policy,
+                base_model_name=orchestrator_config.orchestrator_model,
             )
 
         if not self.skill_backends:
@@ -356,6 +361,7 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
                         f"not found. Available: {list(self.skill_backends.keys())}"
                     )
 
+
     @property
     def system_prompt(self) -> str:
         """System prompt for skill LLMs (same as standard LLMAgent)."""
@@ -369,8 +375,6 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
     ) -> OrchestratorAgentState:
         if message_history is None:
             message_history = []
-        # Clear weighted LoRA config at the start of each conversation
-        self._clear_weighted_lora()
         return OrchestratorAgentState(
             system_messages=[
                 SystemMessage(role="system", content=self.system_prompt)
@@ -378,121 +382,102 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
             messages=message_history,
         )
 
-    def _clear_weighted_lora(self):
-        """Clear the weighted LoRA config file to disable weighted mode.
 
-        Deletes the per-port config file(s) so that the engine's reader
-        sees an OSError and falls back to single-adapter mode.
-        """
-        import os, tempfile
-        from urllib.parse import urlparse
+    def _weight_merge_adapter(self, skill_name: str, skill_weights: Optional[Dict[str, float]] = None):
+        """Merge LoRA adapter(s) into base model weights.
 
-        # Collect unique ports from skill api_base URLs
-        ports: set[str] = set()
-        for skill_config in self.orchestrator_config.skills:
-            api_base = (skill_config.llm_args or {}).get("api_base", "")
-            if api_base:
-                parsed = urlparse(api_base)
-                if parsed.port:
-                    ports.add(str(parsed.port))
-        orchestrator_api_base = (
-            self.orchestrator_config.orchestrator_llm_args or {}
-        ).get("api_base", "")
-        if orchestrator_api_base:
-            parsed = urlparse(orchestrator_api_base)
-            if parsed.port:
-                ports.add(str(parsed.port))
+        Single adapter: merges the named skill's adapter with weight 1.0.
+        Multi adapter (skill_weights provided): merges all adapter-backed
+        skills with their classifier weights, sorted by path for determinism.
 
-        # Fall back to "default" if no ports found
-        if not ports:
-            ports = {"default"}
-
-        for port_tag in ports:
-            config_path = os.path.join(
-                tempfile.gettempdir(),
-                f"vllm_weighted_lora_config_{port_tag}.json",
-            )
-            try:
-                os.remove(config_path)
-            except OSError:
-                pass
-
-    def _hot_swap_adapter(self, skill_name: str):
-        """Unload all LoRA adapters then reload only the selected one.
-
-        This ensures the adapter occupies slot 0 on a clean slate,
-        producing identical results to single-adapter serving.  Avoids
-        non_blocking copy races and stale-slot padding that arise when
-        max_loras < number of registered adapters.
+        Uses /v1/merge_lora_into_base endpoint. For base-model skills
+        (no adapter), restores original weights.
         """
         import requests as http_requests
 
-        selected_config = None
-        for sc in self.orchestrator_config.skills:
-            if sc.name == skill_name and sc.adapter_name:
-                selected_config = sc
-                break
-        if selected_config is None:
-            return  # base model skill, nothing to swap
+        # Build skill→config lookup
+        skill_map = {s.name: s for s in self.orchestrator_config.skills}
 
-        # Resolve the vLLM server URL
-        api_base = (selected_config.llm_args or {}).get("api_base")
+        # Determine api_base
+        api_base = None
+        for s in self.orchestrator_config.skills:
+            if s.llm_args and s.llm_args.get("api_base"):
+                api_base = s.llm_args["api_base"]
+                break
         if not api_base:
             api_base = (self.orchestrator_config.orchestrator_llm_args or {}).get(
                 "api_base", "http://localhost:8080/v1"
             )
         server_url = api_base.rstrip("/").replace("/v1", "")
 
-        # 1. Unload every adapter that is NOT the selected one
-        try:
-            resp = http_requests.get(f"{server_url}/v1/models", timeout=10)
-            models = resp.json().get("data", [])
-        except Exception as e:
-            logger.warning(f"[HotSwap] Failed to list models: {e}")
+        # Build adapter list
+        if skill_weights and len(skill_weights) > 1:
+            # Multi-adapter merge: include all adapter-backed skills with weight > 0
+            adapters = []
+            for sname, weight in skill_weights.items():
+                sc = skill_map.get(sname)
+                if sc and sc.adapter_path and sc.adapter_name and weight > 0:
+                    adapters.append({"adapter_path": sc.adapter_path, "weight": weight})
+            if not adapters:
+                # All weight on base-model skill → restore
+                self._do_restore(server_url)
+                return
+            merge_key = str(sorted((a["adapter_path"], a["weight"]) for a in adapters))
+        else:
+            # Single adapter merge
+            sc = skill_map.get(skill_name)
+            if sc is None:
+                logger.warning(f"[WeightMerge] Skill '{skill_name}' not found")
+                return
+            if not sc.adapter_path or not sc.adapter_name:
+                self._do_restore(server_url)
+                return
+            adapters = None  # use single-path format
+            merge_key = sc.adapter_path
+
+        # Skip if same merge is already active
+        if merge_key == self._merge_active_adapter:
+            logger.info(f"[WeightMerge] Already merged, skipping")
             return
 
-        for m in models:
-            mid = m["id"]
-            # Skip base model and the adapter we want
-            if m.get("parent") is None:
-                continue  # base model
-            if mid == selected_config.adapter_name:
-                continue  # keep this one
-            try:
-                http_requests.post(
-                    f"{server_url}/v1/unload_lora_adapter",
-                    json={"lora_name": mid},
-                    timeout=10,
-                )
-                logger.info(f"[HotSwap] Unloaded adapter '{mid}'")
-            except Exception as e:
-                logger.warning(f"[HotSwap] Failed to unload '{mid}': {e}")
+        # Call merge endpoint
+        if adapters:
+            payload = {"adapters": adapters}
+        else:
+            payload = {"adapter_path": skill_map[skill_name].adapter_path}
 
-        # 2. Unload the selected adapter too, then reload it fresh into slot 0
+        logger.info(f"[WeightMerge] Merging: {payload}")
         try:
-            http_requests.post(
-                f"{server_url}/v1/unload_lora_adapter",
-                json={"lora_name": selected_config.adapter_name},
-                timeout=10,
+            resp = http_requests.post(
+                f"{server_url}/v1/merge_lora_into_base",
+                json=payload,
+                timeout=600,
             )
-        except Exception:
-            pass  # may already be unloaded
+            if resp.status_code == 200:
+                logger.info(f"[WeightMerge] {resp.text[:120]}")
+                print(f"[WEIGHT_MERGE] {resp.text[:120]}")
+            else:
+                logger.error(f"[WeightMerge] Failed: {resp.status_code} {resp.text[:200]}")
+                return
+        except http_requests.exceptions.RequestException as e:
+            logger.error(f"[WeightMerge] Request failed: {e}")
+            return
 
+        OrchestratorAgent._merge_active_adapter = merge_key
+
+    def _do_restore(self, server_url: str):
+        """Restore base weights (helper for _weight_merge_adapter)."""
+        import requests as http_requests
+        logger.info("[WeightMerge] Restoring base weights")
         try:
-            http_requests.post(
-                f"{server_url}/v1/load_lora_adapter",
-                json={
-                    "lora_name": selected_config.adapter_name,
-                    "lora_path": selected_config.adapter_path,
-                },
-                timeout=30,
-            )
-            logger.info(
-                f"[HotSwap] Loaded adapter '{selected_config.adapter_name}' "
-                f"as sole adapter (slot 0)"
-            )
-        except Exception as e:
-            logger.error(f"[HotSwap] Failed to reload adapter: {e}")
+            resp = http_requests.post(f"{server_url}/v1/restore_base_weights", timeout=300)
+            if resp.status_code == 200:
+                print(f"[WEIGHT_MERGE] Restored base weights")
+            else:
+                logger.error(f"[WeightMerge] Restore failed: {resp.status_code}")
+        except http_requests.exceptions.RequestException as e:
+            logger.error(f"[WeightMerge] Restore failed: {e}")
+        OrchestratorAgent._merge_active_adapter = None
 
     # ------------------------------------------------------------------
     # Routing
@@ -1051,6 +1036,16 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
 
         if chosen_label in label_to_skill:
             skill_name = label_to_skill[chosen_label]
+            # Apply routing_topk: when topk=1, use hard routing (single adapter)
+            topk = self.orchestrator_config.routing_topk
+            if topk is not None and topk == 1:
+                skill_weights = {skill_name: 1.0}
+            elif topk is not None and topk < len(skill_weights):
+                sorted_sw = sorted(skill_weights.items(), key=lambda x: x[1], reverse=True)
+                kept = dict(sorted_sw[:topk])
+                total = sum(kept.values())
+                if total > 0:
+                    skill_weights = {s: w / total for s, w in kept.items()}
             return SkillRoutingDecision(
                 selected_skill=skill_name,
                 reasoning=f"rac label {chosen_label} ({cand_str})",
@@ -1061,132 +1056,6 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
                 f"[RAC] Unexpected label: '{chosen_label}'. Expected {labels}"
             )
             return self._fallback_decision()
-
-    def _set_weighted_lora(
-        self, skill_weights: Dict[str, float]
-    ) -> str:
-        """Call vLLM /v1/create_weighted_lora to set weighted config.
-
-        Only includes skills that have LoRA adapters (base model skills are
-        the zero expert with Δ=0, excluded from the weighted set).
-
-        Returns the model name to use for inference (first adapter with
-        nonzero weight — triggers the LoRA code path in vLLM).
-        """
-        import requests as http_requests
-
-        # Collect adapters with LoRA (exclude base model skills)
-        lora_adapters = []
-        first_adapter_model = None
-        for skill_config in self.orchestrator_config.skills:
-            if skill_config.adapter_name and skill_config.name in skill_weights:
-                weight = skill_weights[skill_config.name]
-                if weight > 0:
-                    lora_adapters.append({
-                        "name": skill_config.adapter_name,
-                        "weight": weight,
-                    })
-                    if first_adapter_model is None:
-                        first_adapter_model = f"openai/{skill_config.adapter_name}"
-
-        # Confidence gating: if primary adapter's raw probability exceeds threshold, hard-route
-        min_blend = getattr(self.orchestrator_config, 'min_blend_confidence', None)
-        if min_blend and len(lora_adapters) > 1:
-            sorted_adapters = sorted(lora_adapters, key=lambda a: a["weight"], reverse=True)
-            # Compute raw (pre-temperature) probability of primary
-            raw_total = sum(math.exp(lp) for lp in label_logprobs_raw.values()) if hasattr(self, '_last_label_logprobs_raw') else 0
-            primary_raw = sorted_adapters[0]["weight"]  # Use the weight as proxy
-            # Actually, we need the raw logprobs. Store them from _route_classifier.
-            if hasattr(self, '_last_primary_raw_prob') and self._last_primary_raw_prob >= min_blend:
-                lora_adapters = [sorted_adapters[0]]
-                first_adapter_model = f"openai/{lora_adapters[0]['name']}"
-                logger.info(
-                    f"[ConfGate] Primary raw prob {self._last_primary_raw_prob:.4f} >= {min_blend}, hard-routing"
-                )
-
-        # Apply top-k filtering if configured
-        routing_topk = getattr(self.orchestrator_config, 'routing_topk', None)
-        if routing_topk and len(lora_adapters) > routing_topk:
-            lora_adapters.sort(key=lambda a: a["weight"], reverse=True)
-            lora_adapters = lora_adapters[:routing_topk]
-            first_adapter_model = f"openai/{lora_adapters[0]['name']}"
-
-        # Apply top-p (nucleus) filtering if configured (not used for embedding mode)
-        routing_topp = getattr(self.orchestrator_config, 'routing_topp', None)
-        if routing_topp and len(lora_adapters) > 1 and self.orchestrator_config.routing_mode != "embedding":
-            lora_adapters.sort(key=lambda a: a["weight"], reverse=True)
-            cumsum = 0.0
-            keep = []
-            for a in lora_adapters:
-                keep.append(a)
-                cumsum += a["weight"]
-                if cumsum >= routing_topp:
-                    break
-            lora_adapters = keep
-            first_adapter_model = f"openai/{lora_adapters[0]['name']}"
-            adapter_strs = [f"{a['name']}:{a['weight']:.3f}" for a in lora_adapters]
-            logger.info(
-                f"[TopP] Kept {len(lora_adapters)} adapters "
-                f"(cumsum={cumsum:.3f}, topp={routing_topp}): {adapter_strs}"
-            )
-
-        # When is_weighted=False, set all selected adapters to equal 1/N
-        # (classifier ranking was only used for topk selection above).
-        # Equal weighting preserves the same total LoRA magnitude as a
-        # single adapter: y += sum_i (1/N) * B_i @ A_i @ x
-        if not self.orchestrator_config.is_weighted and lora_adapters:
-            equal_w = 1.0 / len(lora_adapters)
-            for a in lora_adapters:
-                a["weight"] = equal_w
-        elif lora_adapters:
-            # Renormalize weights (is_weighted=True)
-            total_w = sum(a["weight"] for a in lora_adapters)
-            if total_w > 0:
-                for a in lora_adapters:
-                    a["weight"] /= total_w
-
-        if not lora_adapters:
-            # All weight on base model skill -> use base model directly.
-            # Clear any stale config file so the engine doesn't pick up
-            # weighted LoRA from a prior routing decision.
-            self._clear_weighted_lora()
-            first_skill = self.orchestrator_config.skills[0]
-            if first_skill.model:
-                return first_skill.model
-            return self.orchestrator_config.orchestrator_model
-
-        # Get api_base
-        api_base = None
-        for skill_config in self.orchestrator_config.skills:
-            if skill_config.llm_args and skill_config.llm_args.get("api_base"):
-                api_base = skill_config.llm_args["api_base"]
-                break
-        if not api_base:
-            api_base = (self.orchestrator_config.orchestrator_llm_args or {}).get(
-                "api_base", "http://localhost:8080/v1"
-            )
-
-        # Call the weighted lora endpoint to set config
-        server_url = api_base.rstrip("/").replace("/v1", "")
-        merge_url = f"{server_url}/v1/create_weighted_lora"
-
-        payload = {"adapters": lora_adapters}
-
-        try:
-            response = http_requests.post(merge_url, json=payload, timeout=30)
-            if response.status_code == 200:
-                logger.info(f"[WeightedLoRA] Config set: {lora_adapters}")
-            else:
-                logger.error(
-                    f"[WeightedLoRA] Failed: {response.status_code} - {response.text}"
-                )
-                return None
-        except http_requests.exceptions.RequestException as e:
-            logger.error(f"[WeightedLoRA] Request failed: {e}")
-            return None
-
-        # Return first adapter as model name — triggers LoRA code path
-        return first_adapter_model
 
     def _parse_routing_response(
         self, response: AssistantMessage
@@ -1268,54 +1137,6 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
         backend = self.skill_backends[skill_name]
         return backend.generate(messages)
 
-    def _weighted_generate(
-        self, skill_weights: Dict[str, float], messages: list[Message],
-        selected_skill: Optional[str] = None,
-    ) -> AssistantMessage:
-        """Generate using a weighted LoRA merge of multiple skills.
-
-        Sets weighted LoRA config, then generates through the appropriate
-        skill backend. Falls back to hard selection if config fails.
-
-        If `selected_skill` is a base-model skill (no LoRA adapter),
-        bypasses the weighted LoRA path entirely and generates directly
-        with the base model to avoid residual adapter weights from the
-        soft classifier distribution.
-        """
-        # If the selected skill is a base-model skill (no adapter),
-        # generate directly without weighted LoRA.
-        if selected_skill:
-            is_base_model_skill = not any(
-                s.adapter_name for s in self.orchestrator_config.skills
-                if s.name == selected_skill
-            )
-            if is_base_model_skill:
-                self._clear_weighted_lora()
-                return self._single_skill_generate(selected_skill, messages)
-
-        merged_model = self._set_weighted_lora(skill_weights)
-
-        if merged_model is None:
-            # All weight on base model skill or merge failed
-            top_skill = max(skill_weights, key=skill_weights.get)
-            return self._single_skill_generate(top_skill, messages)
-
-        # Find the skill backend for the top LoRA adapter
-        top_skill = max(
-            ((name, w) for name, w in skill_weights.items()
-             if any(s.adapter_name for s in self.orchestrator_config.skills
-                    if s.name == name)),
-            key=lambda x: x[1],
-            default=(None, 0),
-        )[0]
-
-        if top_skill and top_skill in self.skill_backends:
-            return self.skill_backends[top_skill].generate(messages)
-
-        # Fallback: use first skill with llm_args
-        top_skill = max(skill_weights, key=skill_weights.get)
-        return self._single_skill_generate(top_skill, messages)
-
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
@@ -1360,63 +1181,15 @@ class OrchestratorAgent(LocalAgent["OrchestratorAgentState"]):
         )
         print(f"[ROUTING] Task routing -> {decision.selected_skill} (reason: {decision.reasoning})")
 
-        # Step 2: For per_conversation, hot-swap so only the selected
-        # adapter is loaded (once, on first routing decision) when the
-        # effective number of adapters is 1.  This ensures the adapter
-        # always occupies slot 0 on a clean slate, matching single-adapter
-        # serving behavior exactly.
-        topk = self.orchestrator_config.routing_topk
-        effective_single = topk == 1
-        if not effective_single and len(state.routing_history) == 1:
-            # Check if topp filtering would leave only 1 adapter (not used for embedding)
-            routing_topp = getattr(self.orchestrator_config, 'routing_topp', None)
-            skill_weights = decision.skill_weights or {}
-            if routing_topp and skill_weights and self.orchestrator_config.routing_mode != "embedding":
-                adapter_weights = sorted(
-                    (w for name, w in skill_weights.items()
-                     if any(s.adapter_name for s in self.orchestrator_config.skills
-                            if s.name == name) and w > 0),
-                    reverse=True,
-                )
-                if adapter_weights:
-                    cumsum = 0.0
-                    n_kept = 0
-                    for w in adapter_weights:
-                        cumsum += w
-                        n_kept += 1
-                        if cumsum >= routing_topp:
-                            break
-                    effective_single = n_kept == 1
-
-        # For embedding mode, single-skill selection → same path as topk=1
-        if not effective_single and self.orchestrator_config.routing_mode == "embedding":
-            if decision.skill_weights and len(decision.skill_weights) == 1:
-                effective_single = True
-
-        if (
-            strategy == "per_conversation"
-            and effective_single
-            and len(state.routing_history) == 1  # first turn only
-        ):
-            self._hot_swap_adapter(decision.selected_skill)
-
-        # Step 3: Generate using weighted LoRA (deterministic torch.matmul path).
-        # Always prefer _weighted_generate for determinism — the standard Triton
-        # lora_shrink uses SPLIT_K>1 atomic_add which is nondeterministic.
-        # Construct skill_weights if missing (e.g. from fallback/skip_routing).
-        # When effective_single, use {skill: 1.0} to match solo config path exactly.
-        weights = decision.skill_weights
-        if not weights or effective_single:
-            weights = {decision.selected_skill: 1.0}
-
-        # When is_weighted=False, keep classifier ranking for topk filtering
-        # but set final weights to equal (1.0) for all selected adapters.
-        # _set_weighted_lora does topk filtering using the weights, so we
-        # pass them through for filtering, then equalize in _set_weighted_lora.
-        # We signal this by storing the flag on the config (already there).
-
-        assistant_message = self._weighted_generate(
-            weights, full_messages, selected_skill=decision.selected_skill
+        # Step 2 + 3: Merge adapter(s) into base model weights, then generate.
+        # Merge is per-conversation (first turn only) or per-turn.
+        if len(state.routing_history) == 1 or strategy == "per_turn":
+            self._weight_merge_adapter(
+                decision.selected_skill,
+                skill_weights=decision.skill_weights,
+            )
+        assistant_message = self._single_skill_generate(
+            decision.selected_skill, full_messages
         )
 
         state.messages.append(assistant_message)

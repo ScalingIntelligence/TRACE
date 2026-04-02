@@ -681,6 +681,270 @@ class Worker(WorkerBase):
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
 
+    # ------------------------------------------------------------------
+    # Weight-merge LoRA: merge adapter deltas directly into base weights.
+    # Bypasses vLLM's LoRA runtime entirely → same compiled/graphed path
+    # as base model → deterministic.
+    # ------------------------------------------------------------------
+
+    _base_weight_cache: dict[str, torch.Tensor] = {}
+    _lora_pairs_cache: dict[str, tuple[dict, float]] = {}  # path → (pairs, scaling)
+    _merged_adapter_path: str | None = None
+
+    def merge_lora_into_base(self, adapter_spec) -> str:
+        """Merge one or more LoRA adapters into base model parameters.
+
+        Args:
+            adapter_spec: Either a single adapter path (str) for weight=1.0,
+                or a list of {"adapter_path": str, "weight": float} dicts
+                for multi-adapter blending.
+
+        Adapters are applied in sorted order (by path) for determinism.
+        First call caches original weights on CPU (pinned).
+        """
+        import re
+        import time
+        from safetensors import safe_open
+        from peft import PeftConfig
+
+        t0 = time.perf_counter()
+
+        # Normalize input: single path → list of (path, weight)
+        if isinstance(adapter_spec, str):
+            adapters = [(adapter_spec, 1.0)]
+        elif isinstance(adapter_spec, list):
+            adapters = [
+                (a["adapter_path"], a.get("weight", 1.0))
+                for a in adapter_spec
+            ]
+        else:
+            return f"Invalid adapter_spec type: {type(adapter_spec)}"
+
+        # Sort by path for deterministic application order
+        adapters.sort(key=lambda x: x[0])
+
+        model = self.model_runner.model
+        device = next(model.parameters()).device
+
+        # --- One-time: cache original weights on CPU (pinned) ---
+        if not self._base_weight_cache:
+            for name, param in model.named_parameters():
+                self._base_weight_cache[name] = param.data.cpu().pin_memory()
+            torch.cuda.synchronize()
+
+        # --- Restore originals from CPU ---
+        for name, param in model.named_parameters():
+            if name in self._base_weight_cache:
+                param.data.copy_(self._base_weight_cache[name], non_blocking=True)
+        torch.cuda.synchronize()
+        t_restored = time.perf_counter()
+
+        params = dict(model.named_parameters())
+        total_merged = 0
+
+        # --- Apply each adapter's deltas in sorted order ---
+        for adapter_path, blend_weight in adapters:
+            if blend_weight == 0:
+                continue
+
+            # Load LoRA pairs (cached after first load)
+            if adapter_path in self._lora_pairs_cache:
+                pairs, scaling = self._lora_pairs_cache[adapter_path]
+            else:
+                config = PeftConfig.from_pretrained(adapter_path)
+                rank = config.r
+                scaling = config.lora_alpha / rank
+
+                sf_path = os.path.join(adapter_path, "adapter_model.safetensors")
+                lora_tensors = {}
+                with safe_open(sf_path, framework="pt", device="cpu") as f:
+                    for key in f.keys():
+                        lora_tensors[key] = f.get_tensor(key)
+
+                pairs = {}
+                for key, tensor in lora_tensors.items():
+                    parts = key.split(".")
+                    if "lora_A" in parts:
+                        idx = parts.index("lora_A")
+                        base = ".".join(parts[:idx])
+                        pairs.setdefault(base, {})["A"] = tensor
+                    elif "lora_B" in parts:
+                        idx = parts.index("lora_B")
+                        base = ".".join(parts[:idx])
+                        pairs.setdefault(base, {})["B"] = tensor
+
+                self._lora_pairs_cache[adapter_path] = (pairs, scaling)
+
+            # Effective scaling = LoRA scaling * blend weight
+            effective_scaling = scaling * blend_weight
+
+            # Separate attention from expert pairs
+            attn_pairs = {}
+            expert_groups = {}
+
+            for peft_base, ab in pairs.items():
+                if "A" not in ab or "B" not in ab:
+                    continue
+                if ".mlp.experts." in peft_base:
+                    m = re.match(
+                        r".*\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)",
+                        peft_base,
+                    )
+                    if m:
+                        layer_idx = int(m.group(1))
+                        expert_id = int(m.group(2))
+                        proj = m.group(3)
+                        expert_groups.setdefault((layer_idx, proj), {})[expert_id] = ab
+                else:
+                    attn_pairs[peft_base] = ab
+
+            # Attention: individual matmuls
+            for peft_base, ab in attn_pairs.items():
+                A = ab["A"].to(device).float()
+                B = ab["B"].to(device).float()
+                delta = (B @ A * effective_scaling)
+
+                vllm_name, slc = self._map_peft_to_vllm(peft_base, params)
+                if vllm_name is None:
+                    continue
+
+                param = params[vllm_name]
+                delta_cast = delta.to(param.data.dtype)
+                if slc is not None:
+                    param.data[slc].add_(delta_cast)
+                else:
+                    param.data.add_(delta_cast)
+                total_merged += 1
+                del A, B, delta, delta_cast
+
+            # Experts: batched bmm per (layer, proj)
+            for (layer_idx, proj), experts in expert_groups.items():
+                num_experts = max(experts.keys()) + 1
+                sample = next(iter(experts.values()))
+                a_shape = sample["A"].shape
+                b_shape = sample["B"].shape
+
+                A_batch = torch.zeros(num_experts, *a_shape, device=device, dtype=torch.float32)
+                B_batch = torch.zeros(num_experts, *b_shape, device=device, dtype=torch.float32)
+                for eid, ab in experts.items():
+                    A_batch[eid] = ab["A"].float()
+                    B_batch[eid] = ab["B"].float()
+
+                delta_batch = torch.bmm(B_batch, A_batch) * effective_scaling
+                del A_batch, B_batch
+
+                vllm_prefix = f"model.layers.{layer_idx}.mlp.experts"
+                if proj in ("gate_proj", "up_proj"):
+                    vllm_name = vllm_prefix + ".w13_weight"
+                    if vllm_name in params:
+                        inter = params[vllm_name].shape[1] // 2
+                        delta_cast = delta_batch.to(params[vllm_name].data.dtype)
+                        if proj == "gate_proj":
+                            params[vllm_name].data[:num_experts, :inter, :].add_(delta_cast)
+                        else:
+                            params[vllm_name].data[:num_experts, inter:, :].add_(delta_cast)
+                        del delta_cast
+                elif proj == "down_proj":
+                    vllm_name = vllm_prefix + ".w2_weight"
+                    if vllm_name in params:
+                        delta_cast = delta_batch.to(params[vllm_name].data.dtype)
+                        params[vllm_name].data[:num_experts, :, :].add_(delta_cast)
+                        del delta_cast
+                del delta_batch
+                total_merged += num_experts
+
+        torch.cuda.synchronize()
+        self._merged_adapter_path = str(adapters)
+        total = time.perf_counter() - t0
+        restore_t = t_restored - t0
+        merge_t = total - restore_t
+
+        adapter_desc = ", ".join(
+            f"{os.path.basename(p)}*{w:.2f}" for p, w in adapters
+        )
+        return (
+            f"Merged {len(adapters)} adapters ({total_merged} modules) in {total:.1f}s "
+            f"(restore={restore_t:.1f}s apply={merge_t:.1f}s) [{adapter_desc}]"
+        )
+
+    def restore_base_weights(self) -> str:
+        """Restore original base model weights from CPU cache."""
+        import time
+        if not self._base_weight_cache:
+            return "No cached weights to restore"
+        t0 = time.perf_counter()
+        model = self.model_runner.model
+        for name, param in model.named_parameters():
+            if name in self._base_weight_cache:
+                param.data.copy_(self._base_weight_cache[name], non_blocking=True)
+        torch.cuda.synchronize()
+        self._merged_adapter_path = None
+        elapsed = time.perf_counter() - t0
+        return f"Restored base weights in {elapsed:.2f}s"
+
+    def _map_peft_to_vllm(
+        self, peft_base: str, params: dict[str, torch.nn.Parameter]
+    ) -> tuple[str | None, tuple | None]:
+        """Map a PEFT module path to vLLM parameter name + optional slice."""
+        import re
+
+        path = peft_base
+        for prefix in ["base_model.model.", "base_model."]:
+            if path.startswith(prefix):
+                path = path[len(prefix):]
+                break
+
+        if ".self_attn.q_proj" in path:
+            vllm_name = path.replace(".self_attn.q_proj", ".self_attn.qkv_proj") + ".weight"
+            if vllm_name in params:
+                q_size = self.model_runner.model_config.get_head_size() * \
+                    self.model_runner.model_config.get_num_attention_heads(self.model_runner.parallel_config)
+                return vllm_name, (slice(0, q_size), slice(None))
+        elif ".self_attn.k_proj" in path:
+            vllm_name = path.replace(".self_attn.k_proj", ".self_attn.qkv_proj") + ".weight"
+            if vllm_name in params:
+                q_size = self.model_runner.model_config.get_head_size() * \
+                    self.model_runner.model_config.get_num_attention_heads(self.model_runner.parallel_config)
+                kv_size = self.model_runner.model_config.get_head_size() * \
+                    self.model_runner.model_config.get_num_kv_heads(self.model_runner.parallel_config)
+                return vllm_name, (slice(q_size, q_size + kv_size), slice(None))
+        elif ".self_attn.v_proj" in path:
+            vllm_name = path.replace(".self_attn.v_proj", ".self_attn.qkv_proj") + ".weight"
+            if vllm_name in params:
+                q_size = self.model_runner.model_config.get_head_size() * \
+                    self.model_runner.model_config.get_num_attention_heads(self.model_runner.parallel_config)
+                kv_size = self.model_runner.model_config.get_head_size() * \
+                    self.model_runner.model_config.get_num_kv_heads(self.model_runner.parallel_config)
+                return vllm_name, (slice(q_size + kv_size, q_size + 2 * kv_size), slice(None))
+        elif ".self_attn.o_proj" in path:
+            vllm_name = path.replace(".self_attn.o_proj", ".self_attn.o_proj") + ".weight"
+            if vllm_name in params:
+                return vllm_name, None
+
+        if ".mlp.experts." in path:
+            m = re.match(r"(.+\.mlp\.experts)\.(\d+)\.(gate_proj|up_proj|down_proj)", path)
+            if m:
+                experts_prefix = m.group(1)
+                expert_id = int(m.group(2))
+                proj = m.group(3)
+                if proj in ("gate_proj", "up_proj"):
+                    vllm_name = experts_prefix + ".w13_weight"
+                    if vllm_name in params:
+                        inter = params[vllm_name].shape[1] // 2
+                        if proj == "gate_proj":
+                            return vllm_name, (expert_id, slice(0, inter), slice(None))
+                        else:
+                            return vllm_name, (expert_id, slice(inter, 2 * inter), slice(None))
+                elif proj == "down_proj":
+                    vllm_name = experts_prefix + ".w2_weight"
+                    if vllm_name in params:
+                        return vllm_name, (expert_id, slice(None), slice(None))
+
+        direct = path + ".weight"
+        if direct in params:
+            return direct, None
+        return None, None
+
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return

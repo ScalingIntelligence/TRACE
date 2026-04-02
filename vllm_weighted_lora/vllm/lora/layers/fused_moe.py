@@ -584,11 +584,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def _weighted_w13_lora(
         self, y, hidden_states, topk_ids, topk_weights, expert_map, top_k,
     ):
-        """Deterministic LoRA for w13 (gate_proj + up_proj).
+        """Graph-compatible weighted LoRA for w13 (gate_proj + up_proj).
 
-        y:              [num_tokens * top_k, intermediate_size * n_slices]
-        hidden_states:  [num_tokens, hidden_size]
-        Uses torch.bmm with float32 intermediates — fully deterministic.
+        Unrolls over max_loras with fixed indices. Uses per-token matmul
+        via bmm with expert-gathered A/B. No Python loop over runtime data.
         """
         config = self._get_lora_config()
         if not config:
@@ -596,6 +595,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         rank = self.w13_lora_a_stacked[0].shape[2]
         N = hidden_states.size(0) * top_k
+        wlora = self.punica_wrapper._wlora_weights
 
         # Resolve expert IDs → flat [N]
         flat_eids = topk_ids.reshape(-1)
@@ -607,42 +607,39 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             -1, top_k, -1
         ).reshape(N, -1)
 
-        for slot_idx, weight in config:
-            if weight == 0:
-                continue
-            for s in range(len(self.w13_lora_a_stacked)):
-                A_all = self.w13_lora_a_stacked[s][slot_idx]  # [E, r, hidden]
-                B_all = self.w13_lora_b_stacked[s][slot_idx]  # [E, inter, r]
-                slice_size = B_all.shape[1]
-                col_start = s * slice_size
+        for s in range(len(self.w13_lora_a_stacked)):  # n_slices — compile-time
+            slice_size = self.w13_lora_b_stacked[s].shape[2]
+            col_start = s * slice_size
+            accum = torch.zeros(N, slice_size, dtype=torch.float32, device=y.device)
 
-                # Gather A and B for each token's assigned expert
+            for slot in range(self.punica_wrapper.max_loras):  # compile-time constant
+                A_all = self.w13_lora_a_stacked[s][slot]  # [E, r, hidden]
+                B_all = self.w13_lora_b_stacked[s][slot]  # [E, inter, r]
+
                 A_gathered = A_all[flat_eids, :rank]   # [N, r, hidden]
                 B_gathered = B_all[flat_eids, :, :rank] # [N, inter, r]
 
-                # Compute in float32 for determinism
                 hidden = torch.bmm(
                     x_flat.unsqueeze(1).float(),
                     A_gathered.transpose(1, 2).float()
-                ).squeeze(1)  # [N, r] fp32
+                ).squeeze(1)  # [N, r]
 
                 delta = torch.bmm(
                     hidden.unsqueeze(1),
                     B_gathered.transpose(1, 2).float()
-                ).squeeze(1)  # [N, inter] fp32
+                ).squeeze(1)  # [N, inter]
 
-                y[:, col_start:col_start + slice_size].add_(
-                    delta.to(y.dtype), alpha=weight
-                )
+                accum = accum + delta * wlora[slot]
+
+            y[:, col_start:col_start + slice_size].add_(accum.to(y.dtype))
 
     def _weighted_w2_lora(
         self, y, x, topk_ids, topk_weights, expert_map, top_k,
     ):
-        """Deterministic LoRA for w2 (down_proj).
+        """Graph-compatible weighted LoRA for w2 (down_proj).
 
-        y:  [num_tokens, top_k, hidden_size] or [num_tokens, hidden_size]
-        x:  [num_tokens * top_k, intermediate_size]
-        Uses torch.bmm with float32 intermediates — fully deterministic.
+        Unrolls over max_loras with fixed indices. No Python loop over
+        runtime data.
         """
         config = self._get_lora_config()
         if not config:
@@ -651,35 +648,36 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         rank = self.w2_lora_a_stacked[0].shape[2]
         N = x.size(0)  # num_tokens * top_k
         num_tokens = topk_ids.size(0)
+        hidden_size = self.w2_lora_b_stacked[0].shape[2]
+        wlora = self.punica_wrapper._wlora_weights
 
         # Resolve expert IDs → flat [N]
         flat_eids = topk_ids.reshape(-1)
         if expert_map is not None:
             flat_eids = expert_map[flat_eids]
 
-        for slot_idx, weight in config:
-            if weight == 0:
-                continue
-            A_all = self.w2_lora_a_stacked[0][slot_idx]  # [E, r, inter]
-            B_all = self.w2_lora_b_stacked[0][slot_idx]  # [E, hidden, r]
+        accum = torch.zeros(N, hidden_size, dtype=torch.float32, device=y.device)
 
-            # Gather A/B for each token's expert
+        for slot in range(self.punica_wrapper.max_loras):  # compile-time constant
+            A_all = self.w2_lora_a_stacked[0][slot]  # [E, r, inter]
+            B_all = self.w2_lora_b_stacked[0][slot]  # [E, hidden, r]
+
             A_gathered = A_all[flat_eids, :rank]    # [N, r, inter]
             B_gathered = B_all[flat_eids, :, :rank] # [N, hidden, r]
 
-            # Compute in float32 for determinism
             hidden = torch.bmm(
                 x.unsqueeze(1).float(),
                 A_gathered.transpose(1, 2).float()
-            ).squeeze(1)  # [N, r] fp32
+            ).squeeze(1)  # [N, r]
 
             delta = torch.bmm(
                 hidden.unsqueeze(1),
                 B_gathered.transpose(1, 2).float()
-            ).squeeze(1)  # [N, hidden] fp32
+            ).squeeze(1)  # [N, hidden]
 
-            # y: [tokens, top_k, hidden] — moe_sum reduces over top_k after
-            y.add_(delta.to(y.dtype).view(num_tokens, top_k, -1), alpha=weight)
+            accum = accum + delta * wlora[slot]
+
+        y.add_(accum.to(y.dtype).view(num_tokens, top_k, -1))
 
     def forward(self, *args, **kwargs):
         return self.base_layer.forward(*args, **kwargs)

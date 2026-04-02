@@ -6,6 +6,7 @@ env/
 ENV/
 game_rollouts/
 structured_data_rollouts/
+tsb_lora/
 
 # Python
 __pycache__/
@@ -80,3 +81,20 @@ evals/benchmarks/tau2_bench_eval/data/simulations/
 evals/benchmarks/ToolSandbox/data/
 evals/benchmarks/ToolSandbox/build/
 evals/benchmarks/ToolSandbox_data_backup.zip
+
+# GEPA — caches, builds, experiment runs, large files
+gepa/__pycache__/
+gepa/.venv/
+gepa/.env
+gepa/build/
+gepa/dist/
+gepa/*.egg-info/
+gepa/.mypy_cache/
+gepa/.pytest_cache/
+gepa/.ruff_cache/
+gepa/.pytype/
+gepa/runs/
+gepa/gepa_terminus/
+gepa/uv.lock
+gepa/site/
+gepa/.git/

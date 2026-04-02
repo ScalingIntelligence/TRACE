@@ -34,6 +34,7 @@ from tool_sandbox.roles.openai_api_agent import (
     GPT_4_o_2024_05_13_Agent,
     VLLMAgent,
 )
+from tool_sandbox.roles.orchestrator_agent import OrchestratorVLLMAgent
 from tool_sandbox.roles.openai_api_user import (
     GPT_3_5_0125_User,
     GPT_4_0125_User,
@@ -63,6 +64,7 @@ class RoleImplType(StrEnum):
     Cohere_Command_R_Plus = auto()
     Unhelpful = auto()
     VLLM = auto()
+    Orchestrator = auto()
 
 
 AGENT_TYPE_TO_FACTORY: dict[RoleImplType, Callable[..., BaseRole]] = {
@@ -95,6 +97,7 @@ AGENT_TYPE_TO_FACTORY: dict[RoleImplType, Callable[..., BaseRole]] = {
     ),
     RoleImplType.Unhelpful: UnhelpfulAgent,
     RoleImplType.VLLM: lambda: VLLMAgent(),
+    RoleImplType.Orchestrator: lambda: OrchestratorVLLMAgent(),
 }
 
 USER_TYPE_TO_FACTORY: dict[RoleImplType, Callable[..., BaseRole]] = {

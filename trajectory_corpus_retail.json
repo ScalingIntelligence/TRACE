@@ -1,0 +1,117 @@
+[
+  {
+    "skill": "tool_calling",
+    "type": "multi_step",
+    "text": "Hi, I need to make two changes to my pending order #W1805106: change the Desk Lamp to the variant with color: white, brightness: low, style: classic, and update the shipping address to 123 Oak Street, New York, NY 10001."
+  },
+  {
+    "skill": "tool_calling",
+    "type": "explicit",
+    "text": "Hi, I'd like to return the Coffee Mug from my order my recent order. Please refund to my original payment method."
+  },
+  {
+    "skill": "tool_calling",
+    "type": "selection",
+    "text": "Hi, I'd like to exchange the Phone Case in my order my recent order for the cheapest available option of the same product."
+  },
+  {
+    "skill": "precondition",
+    "type": "refund_payment_True",
+    "text": "Hi, I'm Blake Shaw, user ID blake_shaw_5012. I want to return item 3585650756 from order #W8078673, but I'd like the refund to go to my other payment method paypal_2458591 instead of the original."
+  },
+  {
+    "skill": "precondition",
+    "type": "once_per_order_True",
+    "text": "Hello, user ID sage_james_8578. I previously exchanged an item in order #W7247410, but I'd like to exchange another item now."
+  },
+  {
+    "skill": "precondition",
+    "type": "cancel_eligibility_True",
+    "text": "Hello, user ID ari_knox_5221. I need to cancel order #W6218355."
+  },
+  {
+    "skill": "precondition",
+    "type": "return_eligibility_True",
+    "text": "Hi, I'm Zion Cole, user ID zion_cole_4744. I'd like to return items from order #W6370121."
+  },
+  {
+    "skill": "precondition",
+    "type": "refund_payment_False",
+    "text": "Hello, Ellis Ellis here, user ID ellis_ellis_8432. I'd like to return item 9155019145 from order #W1396946. Can you refund it to my gift card gift_card_7485351?"
+  },
+  {
+    "skill": "precondition",
+    "type": "cancel_eligibility_False",
+    "text": "Hello, I'm Wren Dunn, user ID wren_dunn_2810. I'd like to cancel order #W5629295. I no longer need these items."
+  },
+  {
+    "skill": "precondition",
+    "type": "modify_eligibility_True",
+    "text": "Hi, my user ID is reese_stone_4972. I need to change the shipping address for order #W3572241. Can you update it?"
+  },
+  {
+    "skill": "precondition",
+    "type": "modify_eligibility_False",
+    "text": "Hello, Glen Pace here, user ID glen_pace_3653. I need to update the shipping address for order #W9782990 to my current address on file."
+  },
+  {
+    "skill": "precondition",
+    "type": "exchange_eligibility_True",
+    "text": "Hi, my user ID is cedar_pace_5881. I'd like to exchange item 3567052825 in order #W4356098 for a different size."
+  },
+  {
+    "skill": "precondition",
+    "type": "exchange_eligibility_False",
+    "text": "Hello, I'm Morgan James, user ID morgan_james_5959. I received order #W8918214 and I'd like to exchange item 9385301729 for variant 4031213235."
+  },
+  {
+    "skill": "precondition",
+    "type": "return_eligibility_False",
+    "text": "Hello, Xen Snow here, user ID xen_snow_1316. I'd like to return item 6918377290 from order #W7341350. Please refund to the original payment method."
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "execute_return",
+    "text": "Hi, my name is Shea Nash. My zip code is 23219. I received a Sunglasses (polarized, plastic, black) recently and I'd like to return it. Can you find the order and process the return? Please refund to my payment method on file."
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "execute_exchange",
+    "text": "Hi, my name is Blake Lane. My zip code is 23219. I have a T-Shirt (XL, red, polyester, v-neck) that was delivered. I'd like to exchange it for the variant with size: L, color: red, material: cotton, style: crew neck. Can you find the order and process the exchange?"
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "execute_modify",
+    "text": "Hi, my name is Alex Grant. My zip code is 37201. I have a pending order with a Notebook (pocket, softcover, 300). I'd like to change it to the variant with size: A5, cover: hardcover, pages: 100. Can you find the order and update it?"
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "conditional_exchange",
+    "text": "Hi, my name is Casey Banks. My zip code is 93721. I want to exchange my Water Bottle from order #W2558963 to the variant with capacity: 750ml, material: glass, color: blue. If that's not available, I'd be fine with capacity: 1000ml, material: stainless steel, color: green."
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "cross_entity_exchange",
+    "text": "Hi, my name is Kai Dunn. My zip code is 93721. I'd like to exchange my Sunglasses from order #W6569487 to the same color as the Backpack in my order #W9084226. Can you find the right variant and process the exchange?"
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "order_status_check",
+    "text": "Hi, my name is Val Ford. My zip code is 97201. How many items are in my order #W7302415?"
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "price_comparison",
+    "text": "Hi, my name is Jade Dunn. My zip code is 97201. Across all my orders, which single item is the most expensive? Tell me the item name, price, and which order it's in."
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "variant_selection",
+    "text": "Hi, my name is Lane North. My zip code is 27601. I'd like to exchange the Phone Case (item 6275698313) from order #W5683754 for a different variant. I want the one with color: red, material: leather, type: rugged. Can you find the right item ID for that variant?"
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "execute_cancel",
+    "text": "Hi, my name is Nash Price. My zip code is 94612. I have a pending order with Headphones and T-Shirt that I need to cancel. The reason is: no longer needed. Can you find it and cancel it?"
+  }
+]

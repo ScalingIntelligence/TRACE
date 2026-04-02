@@ -55,7 +55,7 @@ class Scenario:
     # Max number of total messages in roll out
     max_messages: int = 30
     # Hard cap on total iterations (failsafe for infinite loops)
-    max_iterations: int = 40
+    max_iterations: int = 30
     # Category tags
     categories: List[ScenarioCategories] = Factory(list)
 

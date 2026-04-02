@@ -1,0 +1,44 @@
+# ToolSandbox orchestrator config
+#
+# Same schema as tau2-bench single_lora configs.
+# Agent skills run on port 9000 (adapter-merge server).
+# Classifier runs on port 9001 (base model, no adapter swapping).
+#
+# Usage:
+#   ORCHESTRATOR_CONFIG=configs/orchestrator-toolsandbox.yml \
+#   VLLM_USER_URL=http://localhost:9001/v1 \
+#   OPENAI_API_KEY=EMPTY \
+#   tool_sandbox --agent Orchestrator --user VLLM \
+#       --scenarios $(python /tmp/get_scenarios.py) \
+#       --parallel 1 --output_dir data/orchestrator
+
+orchestrator:
+  orchestrator_model: Qwen/Qwen3-30B-A3B-Instruct-2507
+  orchestrator_llm_args:
+    temperature: 0.0
+    api_base: http://localhost:9001/v1
+    api_key: EMPTY
+
+  routing_strategy: per_conversation
+  routing_mode: classifier
+  routing_topk: 1
+  classifier_temperature: 1.0
+  routing_context_window: 10
+
+  # To force a single skill (bypass routing), uncomment:
+  # skip_routing: tool_calling
+
+  skills:
+    - name: TEC
+      description: >
+        Use the TEC-trained model for tasks involving: 
+        (1) adding reminders with relative time expressions, 
+        (2) multi-step tasks requiring distance/location calculations with service recovery, 
+        (3) tasks where the correct response is to decline due to missing tools, 
+        (4) reminder modification by recency. 
+        Use the base model for: simple contact/message lookups, temperature control.
+      adapter_name: TEC-v3-iter30
+      adapter_path: /home/ubuntu/hangook/games/tsb_lora/MTT-v3-30it-lora
+      llm_args:
+        api_base: http://localhost:8080/v1
+        api_key: EMPTY

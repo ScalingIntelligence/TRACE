@@ -1,0 +1,21 @@
+Training produces a set of adapters $\{\Delta_c\}_{c \in \mathcal{C}^*}$, one per identified capability. Jointly merging all adapters into a single set of weights leads to parameter interference: capabilities impose conflicting optimization pressures on shared parameters, and strengthening one degrades others---a well-documented challenge in multi-task learning~\citep{yu2020gradient, fifty2021efficiently} and continual fine-tuning~\citep{kirkpatrick2017overcoming, french1999catastrophic}. We instead compose adapters at inference time, selecting and weighting them based on the demands of each task instance.
+
+\paragraph{Retrieval-augmented routing.}
+We construct a corpus of interaction trajectories from each capability's training environment, where each trajectory demonstrates how a capability was correctly applied to solve a task instance. At inference time, we embed the initial task prompt $o_1$ with an embedding model and retrieve the top-$k$ most similar trajectories from the corpus via cosine similarity. The capabilities whose trajectories appear among these top-$k$ form the candidate set for classification. This reduces the number of options the classifier must distinguish among, which becomes important as the total number of capabilities grows.
+
+We then use the base model $\pi_\theta$ itself as a zero-shot classifier over the candidates. Each candidate is assigned a distinct label token (\texttt{A}, \texttt{B}, \texttt{C}, \ldots) and presented with its natural-language description and the retrieved trajectory showing its correct application in a similar scenario. An additional label represents the unmodified base model. From this prompt, $\pi_\theta$ produces next-token probabilities over the label set. Because routing requires only coarse discrimination among the filtered candidates---not solving the underlying task---the base model serves as an effective zero-shot classifier without additional training (Section~\ref{sec:ablations}).
+
+\paragraph{Adapter selection.}
+The router's label probabilities define the adapter weights:
+\[
+\alpha_c \;\propto\; \pi_\theta(c \mid o_1), \qquad c \in \mathcal{C}^*,\quad \alpha_c \geq 0.
+\]
+If the base-model label receives the highest probability, all adapter weights are zero and inference proceeds with $\pi_\theta$ unmodified. Otherwise, we apply nucleus (top-$p$) filtering: capabilities are sorted by descending $\alpha_c$, and we retain the smallest set whose cumulative probability exceeds a threshold $p$, zeroing the rest and re-normalizing. This allows the number of active adapters to vary per instance: when the router is confident, a single adapter dominates; when the task spans multiple capabilities, multiple adapters are retained.
+
+\paragraph{Adapter composition.}
+Given the routing weights $\alpha_c$, we merge the selected adapters directly into the base model parameters before inference. Each adapter $\Delta_c$ consists of low-rank factors $B_c \in \mathbb{R}^{d_{\text{out}} \times r}$ and $A_c \in \mathbb{R}^{r \times d_{\text{in}}}$. For each layer, we precompute the weighted sum of adapter deltas and add it to the base weights:
+\begin{equation}
+W' \;=\; W \;+\; \sum_{c}\, \alpha_c \, B_c A_c,
+\label{eq:compose}
+\end{equation}
+where $W$ denotes the original base-model weights. Since each adapter contributes an additive low-rank term, precomputing $W'$ is mathematically equivalent to applying the adapters independently during the forward pass---no approximation is introduced. Inference then runs on $W'$ through the standard forward pass with no per-token overhead from adapter composition. The first merge incurs a one-time cost to cache the original weights $W$ in CPU memory. Each subsequent swap restores $W$ from this cache via a bulk transfer and applies the new adapter deltas, requiring only one rank-$r$ multiplication per adapted layer per active adapter. The weights $\alpha_c$ are determined once from the initial task prompt and held fixed throughout the interaction, so this merge is performed once per task instance.

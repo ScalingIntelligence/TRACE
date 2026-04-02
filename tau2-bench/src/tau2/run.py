@@ -452,54 +452,9 @@ def run_tasks(
 
 
 def _ensure_skill_adapters(orch_config: OrchestratorConfig) -> None:
-    """Pre-load LoRA adapters for skills that specify adapter_path + adapter_name."""
-    import requests
-
-    for skill in orch_config.skills:
-        if skill.adapter_path and skill.adapter_name:
-            api_base = (skill.llm_args or {}).get("api_base")
-            if not api_base:
-                continue
-            # Check if adapter already loaded
-            server_url = api_base.rstrip("/").replace("/v1", "")
-            try:
-                r = requests.get(f"{server_url}/v1/models", timeout=10)
-                if r.status_code == 200:
-                    model_ids = [m["id"] for m in r.json().get("data", [])]
-                    if skill.adapter_name in model_ids:
-                        logger.info(
-                            f"Skill adapter '{skill.adapter_name}' already loaded"
-                        )
-                        continue
-            except Exception:
-                pass
-            # Load the adapter
-            try:
-                r = requests.post(
-                    f"{server_url}/v1/load_lora_adapter",
-                    json={
-                        "lora_name": skill.adapter_name,
-                        "lora_path": skill.adapter_path,
-                    },
-                    timeout=60,
-                )
-                if r.status_code == 200:
-                    logger.info(
-                        f"Loaded skill adapter '{skill.adapter_name}' from {skill.adapter_path}"
-                    )
-                elif "already exists" in r.text.lower():
-                    logger.info(
-                        f"Skill adapter '{skill.adapter_name}' already loaded"
-                    )
-                else:
-                    logger.warning(
-                        f"Failed to load skill adapter '{skill.adapter_name}': "
-                        f"{r.status_code} - {r.text}"
-                    )
-            except Exception as e:
-                logger.warning(
-                    f"Error loading skill adapter '{skill.adapter_name}': {e}"
-                )
+    """No-op: adapters are merged into base weights at runtime via
+    /v1/merge_lora_into_base. Server runs WITHOUT --enable-lora."""
+    pass
 
 
 def run_task(

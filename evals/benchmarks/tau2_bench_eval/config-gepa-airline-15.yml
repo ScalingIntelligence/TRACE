@@ -1,0 +1,50 @@
+# Base model + GEPA prompts (15 skills) — airline
+#
+# All 15 skills from scaling_skills.json (excluding structured data reasoning):
+# S2-S16
+#
+# Usage:
+#   python main.py --config config-gepa-airline-15.yml
+
+domain: airline
+agent_llm: vllm://Qwen/Qwen3-30B-A3B-Instruct-2507
+agent: null
+
+agent_llm_args:
+  temperature: 0.0
+  max_context_length: 32000
+  tokenizer_model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
+
+agent_prompt_files:
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/tool_calling.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/multistep.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/precondition.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/ground_claims.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/policy_reading.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/policy_refusal.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/calculator_use.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/sequential_requests.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/confirm_plan.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/escalation.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/know_when_to_stop.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/error_recovery.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/communicate_values.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/resolve_ambiguity.txt
+  - /home/ubuntu/hangook/games/gepa_taubench_prompts/maintain_focus.txt
+
+user_llm: vllm://Qwen/Qwen3-30B-A3B-Instruct-2507
+user_llm_args:
+  temperature: 0.0
+  max_context_length: 32000
+  tokenizer_model: openai/Qwen/Qwen3-30B-A3B-Instruct-2507
+
+user: null
+num_trials: 1
+max_steps: 50
+max_concurrency: 1
+seed: 42
+verbose: true
+save_to: gepa-airline-15
+
+vllm:
+  base_url: http://localhost:9000/v1

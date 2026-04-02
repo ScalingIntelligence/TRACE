@@ -70,5 +70,39 @@ def attach_router(app: FastAPI):
 
         return Response(status_code=200, content=response)
 
+    @router.post("/v1/merge_lora_into_base", dependencies=[Depends(validate_json_request)])
+    async def merge_lora_into_base(raw_request: Request):
+        body = await raw_request.json()
+        # Support two formats:
+        # 1. Single adapter: {"adapter_path": "/path/to/adapter"}
+        # 2. Multi-adapter:  {"adapters": [{"adapter_path": "...", "weight": 0.7}, ...]}
+        adapters = body.get("adapters")
+        adapter_path = body.get("adapter_path")
+        if adapters:
+            adapter_spec = adapters  # list of dicts
+        elif adapter_path:
+            adapter_spec = adapter_path  # single string
+        else:
+            return JSONResponse(
+                content={"error": "adapter_path or adapters is required"}, status_code=400
+            )
+        handler: OpenAIServingModels = models(raw_request)
+        response = await handler.merge_lora_into_base(adapter_spec)
+        if isinstance(response, ErrorResponse):
+            return JSONResponse(
+                content=response.model_dump(), status_code=response.error.code
+            )
+        return Response(status_code=200, content=response)
+
+    @router.post("/v1/restore_base_weights")
+    async def restore_base_weights(raw_request: Request):
+        handler: OpenAIServingModels = models(raw_request)
+        response = await handler.restore_base_weights()
+        if isinstance(response, ErrorResponse):
+            return JSONResponse(
+                content=response.model_dump(), status_code=response.error.code
+            )
+        return Response(status_code=200, content=response)
+
     # register the router
     app.include_router(router)

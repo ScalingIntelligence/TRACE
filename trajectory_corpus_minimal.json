@@ -1,0 +1,107 @@
+[
+  {
+    "skill": "tool_calling",
+    "type": "multi_step",
+    "text": "Hi, I need to cancel reservation V3H91B and also add 1 bag(s) to reservation KCGVZ4."
+  },
+  {
+    "skill": "tool_calling",
+    "type": "explicit",
+    "text": "Hi, I need to cancel my reservation. I have a medical emergency."
+  },
+  {
+    "skill": "tool_calling",
+    "type": "selection",
+    "text": "Hi, I need to change my flight in reservation my reservation. I'm booked from LAX to SEA on 2024-05-27 but need to fly on 2024-05-30 instead. Can you find me the cheapest available flight from LAX to SEA on 2024-05-30?"
+  },
+  {
+    "skill": "precondition",
+    "type": "basic_economy_modify_False",
+    "text": "Hi there, I'm Blake Shaw, user ID blake_shaw_5012. I'd like to upgrade my reservation Q8BN2Q from basic economy to economy class. The flight is EWR to MCO."
+  },
+  {
+    "skill": "precondition",
+    "type": "cabin_change_False",
+    "text": "Hello, this is Teal James, user teal_james_8578. I want to upgrade reservation 31MDGH from economy to business class for my LAS to DFW flight."
+  },
+  {
+    "skill": "precondition",
+    "type": "cancel_eligibility_True",
+    "text": "Hi, I'm Lane Brook, user ID lane_brook_4689. I need to cancel my reservation V01WYE. I've had a change of plans."
+  },
+  {
+    "skill": "precondition",
+    "type": "cancel_eligibility_False",
+    "text": "Hi, I'm Casey Snow, user ID casey_snow_4744. I need to cancel my business class reservation DBJU9X, the LAX to ORD flight. My plans have changed."
+  },
+  {
+    "skill": "precondition",
+    "type": "cabin_change_True",
+    "text": "Hi, I'm Vex Lane, user ID vex_lane_8927. I'd like to upgrade reservation MY4AC0 from economy to business class. It's my EWR to SFO trip."
+  },
+  {
+    "skill": "precondition",
+    "type": "modification_constraint_True",
+    "text": "Hi, I'm Jade Vale, user jade_vale_8913. For my reservation D74FX9, I'd like to change my destination from MIA to somewhere else. Same departure from BOS."
+  },
+  {
+    "skill": "precondition",
+    "type": "compensation_True",
+    "text": "Hi, I'm Lark Troy, user ID lark_troy_1316. My flight SYN360 in reservation 0BL9Z0 was delayed and it caused me a lot of inconvenience. I'd like to request compensation."
+  },
+  {
+    "skill": "precondition",
+    "type": "compensation_False",
+    "text": "Hi, Pax Gray here, user ID pax_gray_1372. My flight SYN141 in reservation 7VLXM9 from ORD to IAH has been delayed. I'd like to request compensation for this."
+  },
+  {
+    "skill": "precondition",
+    "type": "basic_economy_modify_True",
+    "text": "Hi, my user ID is kit_james_5351. I have reservation MK0CRA for a flight from MCO to DEN. I'd like to change it to a later flight on the same day. Can you help me with that?"
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "reservation_comparison",
+    "text": "Hi, my name is Wade Shaw. My user ID is wade_shaw_5012. Which of my reservations has the most passengers?"
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "book_flight",
+    "text": "Hi, my name is Teal James. My user ID is teal_james_8578. I need to book the cheapest business flight from ATL to BOS on May 23. Please use my gift card for payment. There will be 1 passenger."
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "change_flight",
+    "text": "Hi, my name is Lane Brook. My user ID is lane_brook_4689. I'd like to change the flight on reservation SDR72404 to the cheapest available economy flight on the same route. Please use my payment method on file."
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "cost_computation",
+    "text": "Hi, I'm Casey Snow. My user ID is casey_snow_4744. How much extra per passenger would it cost to upgrade reservation SDR62974 from economy to business?"
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "send_compensation",
+    "text": "Hi, my name is Uma Nash. My user ID is uma_nash_5952. My flight SDR703 on reservation SDR65027 appears to be delayed. I'd like to request a travel certificate as compensation."
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "conditional_flight_change",
+    "text": "Hi, my name is Vex Lane. My user ID is vex_lane_8927. I'd like to change my flight on reservation SDR21426 to the cheapest option on 2024-05-17. If nothing cheaper than my current flight is available, I'd rather cancel the reservation."
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "flight_status_check",
+    "text": "Hi, I'm Cedar Pace. My user ID is cedar_pace_5881. Can you check the status of my flight on reservation SDR44839? Is it on time?"
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "flight_selection",
+    "text": "Hi, my name is Teal Lane. My user ID is teal_lane_2818. I need the earliest economy flight from TPA to EWR on May 19. Can you search and tell me which flight that is?"
+  },
+  {
+    "skill": "structured_data_reasoning",
+    "type": "baggage_computation",
+    "text": "Hi, I'm Parker Marsh. My user ID is parker_marsh_2885. How many free checked bags am I allowed per passenger on reservation SDR85060?"
+  }
+]

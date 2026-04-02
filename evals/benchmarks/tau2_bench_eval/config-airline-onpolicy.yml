@@ -8,13 +8,13 @@
 #   python main.py --config config-airline-structured-lora.yml
 
 domain: airline
-agent_llm: vllm://tarsur385/taubench-target-20
+agent_llm: vllm://tarsur385/tau2-synthetic-grpo30
 agent: null
 
 agent_llm_args:
   temperature: 0.0
   max_context_length: 32000
-  tokenizer_model: openai/tarsur385/taubench-target-20
+  tokenizer_model: openai/tarsur385/tau2-synthetic-grpo30
 
 # User simulator
 user_llm: vllm://Qwen/Qwen3-30B-A3B-Instruct-2507
@@ -32,11 +32,11 @@ num_trials: 1
 seed: 42
 verbose: true
 
-save_to: airline-taubench-target-20
+save_to: airline-tau2-synthetic-grpo30
 
 # vLLM server config — separate servers for deterministic user simulator
 vllm:
   agent_base_urls:
-    - http://localhost:8080/v1
+    - http://localhost:9002/v1
   user_base_urls:
-    - http://localhost:9000/v1
+    - http://localhost:9001/v1
