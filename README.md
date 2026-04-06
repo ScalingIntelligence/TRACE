@@ -5,7 +5,7 @@
 
 This repository contains the official implementation for **TRACE (Turning Recurrent Agent failures into Capability-targeted training Environments)**. TRACE is an end-to-end system for environment-specific agent self-improvement. 
 
-Large Language Models (LLMs) deployed in complex agentic environments often fail because they lack specific, underlying capabilities. Existing approaches typically rely on generic synthetic data or direct reinforcement learning (RL) on the target environment, which forces the model to learn these capabilities implicitly and inefficiently. TRACE solves this by automatically identifying the exact capabilities an agent lacks, synthesizing targeted micro-environments to isolate and train those capabilities, and routing to the appropriate adapter at inference time.
+Large Language Models (LLMs) deployed in complex agentic environments often fail because they lack specific, underlying capabilities. Existing approaches typically rely on generic synthetic data or direct reinforcement learning (RL) on the target environment, which forces the model to learn these capabilities implicitly and inefficiently. TRACE solves this by automatically identifying the exact capabilities an agent lacks, synthesizing targeted training environments to isolate and train those capabilities, and routing to the appropriate adapter at inference time.
 
 ## 🚀 How TRACE Works
 
@@ -14,7 +14,7 @@ The TRACE pipeline consists of four automated steps:
 1. **Capability Selection:** An analysis agent contrasts successful and failed trajectories from the base model in the target environment. It identifies and ranks the specific capabilities that meaningfully distinguish successes from failures.
 2. **Synthetic Environment Generation:** For each identified deficit, a generation agent constructs a capability-targeted synthetic training environment. This environment preserves the target environment's interface (tool schemas, interaction protocols) while isolating the missing capability for verifiable training.
 3. **GRPO Training:** We train a separate Low-Rank Adaptation (LoRA) module for each capability-specific synthetic environment using Group Relative Policy Optimization (GRPO).
-4. **Select & Adapt:** At inference, a lightweight router uses the base model to classify the task and activate only the single, most relevant LoRA adapter for generation. 
+4. **Select & Adapt:** At inference, the base model identifies the most relevant capability for the task given natural language descriptions of each capability, and the corresponding LoRA adapter is activated for generation. 
 
 ## 📊 Key Results
 
@@ -25,10 +25,10 @@ TRACE demonstrates significant improvements and generalization across different 
 
 ## ⏳ Code Release Status
 
-The codebase is currently undergoing final cleanup and formatting for public release. We will be publishing the complete TRACE pipeline soon, which will include:
+We will be publishing the complete TRACE pipeline soon, which will include:
 
 * The prompt templates and agentic pipeline for **Contrastive Capability Identification**.
-* The **Synthetic Environment Generator** to create isolated micro-environments.
+* The **Synthetic Environment Generator** to create capability-targeted training environments.
 * The **GRPO Training Scripts** for optimizing capability-specific LoRA adapters.
 * The **Inference Router** for dynamic adapter selection during evaluation.
 
