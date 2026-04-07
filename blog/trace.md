@@ -74,7 +74,7 @@ We evaluate TRACE using Qwen3-30B-A3B on two benchmarks: **&tau;<sup>2</sup>-Ben
 <tr><td style="text-align: left;">GRPO on Target</td><td>32.0</td><td>40.4</td><td>37.8</td></tr>
 <tr><td style="text-align: left;">AWM</td><td>32.0</td><td>41.2</td><td>38.4</td></tr>
 <tr><td style="text-align: left;">GEPA</td><td>38.0</td><td>40.4</td><td>39.6</td></tr>
-<tr><td style="text-align: left;">Single Capability GRPO (Ours)</td><td>34.0</td><td>43.0</td><td>40.3</td></tr>
+<tr><td style="text-align: left;">Single Capability (Ours)</td><td>34.0</td><td>43.0</td><td>40.3</td></tr>
 <tr style="font-weight: bold;"><td style="text-align: left;">TRACE (Ours)</td><td>44.0</td><td>48.2</td><td>47.0</td></tr>
 </tbody>
 </table>
@@ -95,7 +95,7 @@ We evaluate TRACE using Qwen3-30B-A3B on two benchmarks: **&tau;<sup>2</sup>-Ben
 <tr><td style="text-align: left;">AWM</td><td>20/129</td><td>0.504</td></tr>
 <tr><td style="text-align: left;">GRPO on Target</td><td>22/129</td><td>0.519</td></tr>
 <tr><td style="text-align: left;">GEPA</td><td>22/129</td><td>0.520</td></tr>
-<tr><td style="text-align: left;">Single Capability GRPO (Ours)</td><td>22/129</td><td>0.514</td></tr>
+<tr><td style="text-align: left;">Single Capability (Ours)</td><td>22/129</td><td>0.514</td></tr>
 <tr style="font-weight: bold;"><td style="text-align: left;">TRACE (Ours)</td><td>26/129</td><td>0.552</td></tr>
 </tbody>
 </table>
