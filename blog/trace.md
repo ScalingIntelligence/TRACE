@@ -13,8 +13,8 @@ tags:
   - Self-improving AI
 venue: none
 year: 2025
-date: 2025-07-07
-teaser: "TRACE automatically identifies capability deficits in LLM agents and synthesizes targeted training environments to fix them."
+date: 2026-04-07
+teaser: "TRACE is an end-to-end system for environment-specific agent self-improvement that automatically identifies the capabilities an agent lacks for that environment and synthesizes targeted training environments to teach them."
 materials:
   - name: Codebase
     url: https://github.com/ScalingIntelligence/TRACE
@@ -90,7 +90,7 @@ We evaluate TRACE using Qwen3-30B-A3B on two benchmarks: **&tau;<sup>2</sup>-Ben
 </tr>
 </thead>
 <tbody>
-<tr><td style="text-align: left;">Base (Qwen3-30B-A3B)</td><td>19/129</td><td>0.411</td></tr>
+<tr><td style="text-align: left;">Base Model</td><td>19/129</td><td>0.411</td></tr>
 <tr><td style="text-align: left;">ADP</td><td>19/129</td><td>0.422</td></tr>
 <tr><td style="text-align: left;">AWM</td><td>20/129</td><td>0.504</td></tr>
 <tr><td style="text-align: left;">GRPO on Target</td><td>22/129</td><td>0.519</td></tr>
@@ -127,15 +127,21 @@ TRACE continues to improve as more capability-specific adapters are added, reach
 
 ---
 
+## Acknowledgements
+
+We thank the Scaling Intelligence Lab and others for their constructive feedback, especially Debangshu Banerjee, Tanvir Bhathal, Alex Bloom, Andy Dimnaku, Simon Guo, Sid Jha, Hermann Kumbong, Jacky Kwok, Andrew Shi, and Shayan Talaei. We also thank Prime Intellect, Lambda Labs, Google, and IBM for providing compute resources.
+
+---
+
 ## Citation
 
 If you find TRACE useful, please use the following citation:
 
 ```bibtex
-@misc{kang2025trace,
+@article{kang2026trace,
   title={TRACE: Capability-Targeted Agentic Training},
-  author={Hangoo Kang and Tarun Suresh and Jon Saad-Falcon and Azalia Mirhoseini},
-  year={2025},
-  howpublished={\url{https://github.com/ScalingIntelligence/TRACE}}
+  author={Kang, Hangoo and Suresh, Tarun and Saad-Falcon, Jon and Mirhoseini, Azalia},
+  journal={arXiv preprint},
+  year={2026}
 }
 ```
