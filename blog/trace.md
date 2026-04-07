@@ -26,7 +26,7 @@ materials:
 
 # TL;DR
 
-LLM agents fail in complex environments because they lack specific capabilities — but standard RL training doesn't tell the model *which* ones are missing. **TRACE** (Turning Recurrent Agent failures into Capability-targeted training Environments) automatically identifies an agent's capability deficits, synthesizes targeted training environments for each, and trains lightweight LoRA adapters via RL. TRACE improves over the base agent by **+14.1 points** on &tau;<sup>2</sup>-Bench and **+7 perfect scores** on ToolSandBox, outperforming the strongest baseline by **+7.4 points** and **+4 perfect scores**.
+LLM agents fail in complex environments because they lack specific capabilities — but when training with RL directly on the target environment, the reward signal doesn't reveal which underlying capabilities the agent lacks. **TRACE** (Turning Recurrent Agent failures into Capability-targeted training Environments) is an end-to-end system for environment-specific agent self-improvement that automatically identifies an agent's capability deficits, synthesizes targeted training environments for each, and trains lightweight LoRA adapters via RL. TRACE improves over the base agent by **+14.1 points** on &tau;<sup>2</sup>-Bench and **+7 perfect scores** on ToolSandBox, outperforming the strongest baseline by **+7.4 points** and **+4 perfect scores**.
 
 ---
 
@@ -41,7 +41,7 @@ LLM agents fail in complex environments because they lack specific capabilities 
 
 ## Overview
 
-LLM agents in environments like customer service or tool use must exercise multiple capabilities across different tasks. Training directly on the target environment forces the model to learn these capabilities implicitly — making learning sparse and sample-inefficient. TRACE decomposes the problem into four steps:
+LLM agents in environments like customer service or tool use must exercise multiple capabilities across different tasks. A natural approach is to train the agent directly on the target environment via RL — but the reward signal doesn't reveal which underlying capabilities the agent lacks, making learning sparse and sample-inefficient. TRACE decomposes the problem into four steps:
 
 1. **Capability Selection.** Roll out the base agent, then contrast successful and failed trajectories to identify the specific capabilities the agent lacks.
 2. **Synthetic Environment Generation.** For each identified capability deficit, synthesize a targeted training environment that isolates and rewards exercising that capability.
@@ -102,7 +102,7 @@ We evaluate TRACE using Qwen3-30B-A3B on two benchmarks: **&tau;<sup>2</sup>-Ben
 
 <br>
 
-Even a **single adapter** trained on one synthesized capability environment surpasses large-scale general-purpose methods like AWM and ADP — while using only a quarter of the optimization steps. Combining multiple capability-specific adapters with routing, TRACE achieves the strongest results on both benchmarks.
+On **&tau;<sup>2</sup>-Bench**, even a **single adapter** trained on one synthesized capability environment surpasses direct GRPO on the target environment, GEPA (evolutionary prompt optimization), and methods that curate general-purpose synthetic agentic data and environments (ADP and AWM). Combining multiple capability-specific adapters with routing, TRACE achieves the strongest results on both benchmarks.
 
 ---
 
@@ -116,11 +116,11 @@ TRACE scales more efficiently with training rollouts than both GRPO (direct RL o
   <img src="../figures/scale_rollouts_taubench.png" alt="Pass rate scaling with number of rollouts on tau2-Bench" style="max-width: 49%; height: auto; display: block;">
   <img src="../figures/scale_rollouts_toolsandbox.png" alt="Mean similarity scaling with number of rollouts on ToolSandBox" style="max-width: 49%; height: auto; display: block;">
 </div>
-<p style="text-align: center;"><i>Performance scaling with number of rollouts on &tau;<sup>2</sup>-Bench (left) and ToolSandBox (right). TRACE scales consistently while baselines plateau or become unstable.</i></p>
+<p style="text-align: center;"><i>Performance scaling with number of rollouts on &tau;<sup>2</sup>-Bench (left) and ToolSandBox (right). TRACE scales consistently while baselines plateau.</i></p>
 
 ### Scaling with Number of Capabilities
 
-TRACE continues to improve as more capability-specific adapters are added, reaching **47.0%** with 4 capabilities. In contrast, GEPA's prompt-based approach plateaus quickly — demonstrating that explicitly training on capability-targeted environments is necessary for continued gains.
+TRACE continues to improve as more capability-specific adapters are added, reaching **47.0%** with 4 capabilities. In contrast, GEPA's prompt-based approach plateaus quickly — demonstrating that explicitly training on capability-targeted environments enables more significant gains.
 
 <img src="../figures/cap_scaling.png" alt="Overall pass rate scaling with number of capabilities on tau2-Bench" style="width: 60%; height: auto; display: block; margin: 0 auto;">
 <p style="text-align: center;"><i>Overall pass rate on &tau;<sup>2</sup>-Bench as the number of capabilities increases. TRACE with trained LoRA adapters scales steadily, while GEPA's prompt-based approach saturates.</i></p>
