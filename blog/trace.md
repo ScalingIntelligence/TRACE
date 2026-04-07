@@ -48,7 +48,7 @@ LLM agents in environments like customer service or tool use must exercise multi
 3. **GRPO Training.** Train a lightweight LoRA adapter on each capability-specific synthetic environment via RL.
 4. **Select & Adapt.** At inference, route each task to the relevant LoRA adapter using the base model as a classifier.
 
-<img src="figures/diagram.png" alt="Overview of TRACE: an end-to-end system with four steps — capability selection, synthetic environment generation, GRPO training, and select-and-adapt routing at inference." style="width: 100%; height: auto;">
+<img src="../figures/diagram.png" alt="Overview of TRACE: an end-to-end system with four steps — capability selection, synthetic environment generation, GRPO training, and select-and-adapt routing at inference." style="width: 100%; height: auto;">
 <p style="text-align: center;"><i>Overview of TRACE. An analysis agent identifies capability deficits from the agent's trajectories. For each deficit, a generation agent synthesizes a targeted training environment. A LoRA adapter is trained via GRPO on each environment, and a router selects the appropriate adapter at inference.</i></p>
 
 ---
@@ -113,8 +113,8 @@ Even a **single adapter** trained on one synthesized capability environment surp
 TRACE scales more efficiently with training rollouts than both GRPO (direct RL on the target environment) and GEPA (evolutionary prompt optimization). On &tau;<sup>2</sup>-Bench, TRACE shows consistent, monotonic improvement up to **47.0%** at 5,120 rollouts, while GRPO stalls at 37.8% and GEPA plateaus at 39.6%. A consistent trend appears on ToolSandBox.
 
 <div style="display: flex; gap: 16px; align-items: center;">
-  <img src="figures/scale_rollouts_taubench.png" alt="Pass rate scaling with number of rollouts on tau2-Bench" style="max-width: 49%; height: auto; display: block;">
-  <img src="figures/scale_rollouts_toolsandbox.png" alt="Mean similarity scaling with number of rollouts on ToolSandBox" style="max-width: 49%; height: auto; display: block;">
+  <img src="../figures/scale_rollouts_taubench.png" alt="Pass rate scaling with number of rollouts on tau2-Bench" style="max-width: 49%; height: auto; display: block;">
+  <img src="../figures/scale_rollouts_toolsandbox.png" alt="Mean similarity scaling with number of rollouts on ToolSandBox" style="max-width: 49%; height: auto; display: block;">
 </div>
 <p style="text-align: center;"><i>Performance scaling with number of rollouts on &tau;<sup>2</sup>-Bench (left) and ToolSandBox (right). TRACE scales consistently while baselines plateau or become unstable.</i></p>
 
@@ -122,7 +122,7 @@ TRACE scales more efficiently with training rollouts than both GRPO (direct RL o
 
 TRACE continues to improve as more capability-specific adapters are added, reaching **47.0%** with 4 capabilities. In contrast, GEPA's prompt-based approach plateaus quickly — demonstrating that explicitly training on capability-targeted environments is necessary for continued gains.
 
-<img src="figures/cap_scaling.png" alt="Overall pass rate scaling with number of capabilities on tau2-Bench" style="width: 60%; height: auto; display: block; margin: 0 auto;">
+<img src="../figures/cap_scaling.png" alt="Overall pass rate scaling with number of capabilities on tau2-Bench" style="width: 60%; height: auto; display: block; margin: 0 auto;">
 <p style="text-align: center;"><i>Overall pass rate on &tau;<sup>2</sup>-Bench as the number of capabilities increases. TRACE with trained LoRA adapters scales steadily, while GEPA's prompt-based approach saturates.</i></p>
 
 ---
