@@ -48,7 +48,7 @@ LLM agents in environments like customer service or tool use must exercise multi
 3. **GRPO Training.** Train a lightweight LoRA adapter on each capability-specific synthetic environment via RL.
 4. **Select & Adapt.** At inference, route each task to the relevant LoRA adapter using the base model as a classifier.
 
-<img src="../figures/diagram.png" alt="Overview of TRACE: an end-to-end system with four steps — capability selection, synthetic environment generation, GRPO training, and select-and-adapt routing at inference." style="width: 100%; height: auto;">
+<img src="../figures/Diagram_5.png" alt="Overview of TRACE: an end-to-end system with four steps — capability selection, synthetic environment generation, GRPO training, and select-and-adapt routing at inference." style="width: 100%; height: auto;">
 <p style="text-align: center;"><i>Overview of TRACE. An analysis agent identifies capability deficits from the agent's trajectories. For each deficit, a generation agent synthesizes a targeted training environment. A LoRA adapter is trained via GRPO on each environment, and a router selects the appropriate adapter at inference.</i></p>
 
 ---
