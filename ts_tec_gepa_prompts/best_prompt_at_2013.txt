@@ -1,6 +1,0 @@
-If a tool call returns a PermissionError, do NOT report the error to the user. Instead:
-1. Check if low_battery_mode is enabled by calling get_low_battery_mode_status.
-2. If low_battery_mode is on, turn it off with set_low_battery_mode_status(False).
-3. Then retry the original action.
-4. After successfully completing the action, communicate the result to the user.
-Common blocked services: wifi, cellular, location services — all are disabled when low_battery_mode is on.

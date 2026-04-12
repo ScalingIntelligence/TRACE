@@ -4,9 +4,6 @@ venv/
 env/
 .env/
 ENV/
-game_rollouts/
-structured_data_rollouts/
-tsb_lora/
 
 # Python
 __pycache__/
@@ -48,10 +45,6 @@ wheels/
 .DS_Store
 Thumbs.db
 
-# Project specific
-unsloth_compiled_cache/*
-selfplay_rollouts_ppo.jsonl
-
 # Model checkpoints and weights
 *.pt
 *.pth
@@ -65,36 +58,10 @@ wandb/
 *.log
 logs/
 
-# Data (uncomment if you don't want to track data)
-# data/
-unsloth_compiled_cache/
-unsloth_compiled_cache/
-unsloth_compiled_cache/
-unsloth_compiled_cache/
-*.jsonl
+# Data / rollouts
 data/
-evals/benchmarks/tau2_bench_eval/data/game_evals/environment_testing/results/
-gameplays/
-evals/benchmarks/tau2_bench_eval/data/simulations/
+*.jsonl
+gameplay_rollouts/
 
-# ToolSandbox (evaluation results and build artifacts — do not push)
-evals/benchmarks/ToolSandbox/data/
-evals/benchmarks/ToolSandbox/build/
-evals/benchmarks/ToolSandbox_data_backup.zip
-
-# GEPA — caches, builds, experiment runs, large files
-gepa/__pycache__/
-gepa/.venv/
-gepa/.env
-gepa/build/
-gepa/dist/
-gepa/*.egg-info/
-gepa/.mypy_cache/
-gepa/.pytest_cache/
-gepa/.ruff_cache/
-gepa/.pytype/
-gepa/runs/
-gepa/gepa_terminus/
-gepa/uv.lock
-gepa/site/
-gepa/.git/
+# Unsloth compile cache
+unsloth_compiled_cache/

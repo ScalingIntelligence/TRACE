@@ -1,4 +1,0 @@
-User-agent: *
-Allow: /
-
-Sitemap: https://gepa-ai.github.io/gepa/sitemap.xml

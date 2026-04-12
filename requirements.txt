@@ -1,15 +1,16 @@
-torch>=2.8.0
-triton>=3.4.0
+torch
+triton
 torchvision
 bitsandbytes
-transformers==4.56.2
+transformers
 tokenizers
 datasets
 accelerate
 peft
-trl==0.22.2
+trl
 trackio
 wandb
+vllm
 fastapi
 uvicorn
 requests
@@ -21,10 +22,7 @@ open_spiel
 # Unsloth (from PyPI – git source has broken metadata)
 unsloth-zoo[base]
 unsloth[base]
-# Triton kernels used by Unsloth GRPO notebooks
-git+https://github.com/triton-lang/triton.git@05b2c186c1b6c9a08375389d5efe9cb4c401c075#subdirectory=python/triton_kernels
 pyyaml
-# AWM (Agent World Model) dependencies
-sqlalchemy>=2.0
+sqlalchemy
 httpx
 huggingface_hub

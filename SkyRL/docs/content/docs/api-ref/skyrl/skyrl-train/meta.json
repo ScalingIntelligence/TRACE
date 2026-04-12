@@ -1,4 +1,0 @@
-{
-  "title": "SkyRL-Train Backend",
-  "pages": ["trainer", "data", "generators", "registry", "utils"]
-}

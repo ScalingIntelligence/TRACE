@@ -1,116 +1,196 @@
-# PPO Training for Kuhn Poker
+# TRACE: Capability-Targeted Agentic Training
 
-## Quick Start
+[![Paper](https://img.shields.io/badge/Paper-ArXiv-red.svg)](#)
+[![Status](https://img.shields.io/badge/Status-Code_Coming_Soon-blue.svg)](#)
 
-### 1. Start as many vLLM servers as wanted for inference.
+This repository contains the official implementation for **TRACE (Turning Recurrent Agent failures into Capability-targeted training Environments)**. TRACE is an end-to-end system for environment-specific agent self-improvement. 
 
-Remember to change port and cuda_visible_device for each server
+Large Language Models (LLMs) deployed in complex agentic environments often fail because they lack specific, underlying capabilities. Existing approaches typically rely on generic synthetic data or direct reinforcement learning (RL) on the target environment, which forces the model to learn these capabilities implicitly and inefficiently. TRACE solves this by automatically identifying the exact capabilities an agent lacks, synthesizing targeted training environments to isolate and train those capabilities, and routing to the appropriate adapter at inference time.
+
+## How TRACE Works
+
+The TRACE pipeline consists of four automated steps:
+
+1. **Capability Selection:** An analysis agent contrasts successful and failed trajectories from the base model in the target environment. It identifies and ranks the specific capabilities that meaningfully distinguish successes from failures.
+2. **Synthetic Environment Generation:** For each identified deficit, a generation agent constructs a capability-targeted synthetic training environment. This environment preserves the target environment's interface (tool schemas, interaction protocols) while isolating the missing capability for verifiable training.
+3. **GRPO Training:** We train a separate Low-Rank Adaptation (LoRA) module for each capability-specific synthetic environment using Group Relative Policy Optimization (GRPO).
+4. **Select & Adapt:** At inference, the base model identifies the most relevant capability for the task given natural language descriptions of each capability, and the corresponding LoRA adapter is activated for generation. 
+
+## Key Results
+
+TRACE demonstrates significant improvements and generalization across different complex environments:
+
+* **$\tau^{2}$-Bench (Customer Service):** Improves upon the base agent by +14.1 points, achieving an overall pass rate of 47.0%. It scales more efficiently than baselines, outperforming GRPO and GEPA by +9.2 and +7.4 points given the same rollout budget.
+* **ToolSandBox (Tool Use):** Achieves a mean similarity score of 0.552, improving over the base model by +0.141 points and +7 perfect scores.
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Python 3.11+
+- CUDA-capable GPUs (1 GPU for vLLM inference server, additional GPUs for training)
+- [conda](https://docs.conda.io/en/latest/) or equivalent environment manager
+
+### Installation
 
 ```bash
+conda create -n trace python=3.11 -y
+conda activate trace
+pip install -r requirements.txt
+```
 
-export HF_HOME=/matx/u/$USER/.cache/huggingface #matx
-export HF_HOME=/home/ubuntu/.cache/huggingface #pi
+---
+
+## Running the TRACE Pipeline
+
+TRACE is designed to be driven by an LLM coding agent (Claude Code, Codex, etc.). Each pipeline step is defined in a markdown file under `pipeline/` that you fill in with your configuration and then hand to the agent as instructions.
+
+### Step 1: Capability Selection
+
+Identify which capabilities your model lacks by analyzing its evaluation trajectories.
+
+**Template:** [`pipeline/trace_capability_selection.md`](pipeline/trace_capability_selection.md)  
+**Example (pre-filled):** [`pipeline/test_capability_selection.md`](pipeline/test_capability_selection.md)
+
+Open the template and fill in the placeholders at the top:
+
+| Placeholder | Description | Example |
+|---|---|---|
+| `{EVAL_RESULTS}` | Path to your evaluation results file(s) containing pass/fail trajectories | `results/eval_baseline.json` |
+| `{MODEL_NAME}` | Name of the model being evaluated (for record-keeping) | `Qwen/Qwen3-30B-A3B-Instruct-2507` |
+| `{N_RUNS}` | Number of independent labeling runs (default: `10`) | `10` |
+| `{N_CANDIDATES}` | Max candidate capabilities to propose (default: `10`) | `10` |
+| `{RHO}` | Coverage threshold (default: `0.10`) | `0.10` |
+| `{DELTA}` | Contrastive gap threshold (default: `0.20`) | `0.20` |
+| `{K_CONSISTENCY}` | Cross-run consistency threshold (default: `8`) | `8` |
+| `{OUTPUT_DIR}` | Output directory (default: `pipeline/`) | `pipeline/` |
+
+Then hand the filled-in document to your coding agent. It will:
+1. **Phase 1 (Discovery):** Read trajectories and propose candidate capabilities → `pipeline/candidate_capabilities.json`
+2. **Phase 2 (Labeling):** Run `{N_RUNS}` independent labeling passes → `pipeline/run_01.json` ... `pipeline/run_10.json`
+3. **Phase 3 (Aggregation):** Run the filtering script → `pipeline/selected_capabilities.json`
+
+### Step 2: Synthetic Environment Generation
+
+Generate a targeted training environment for each identified capability deficit.
+
+**Template:** [`pipeline/trace_environment_generation.md`](pipeline/trace_environment_generation.md)  
+**Example (pre-filled):** [`pipeline/test_environment_generation.md`](pipeline/test_environment_generation.md)
+
+Open the template and fill in the placeholders:
+
+| Placeholder | Description | Example |
+|---|---|---|
+| `{MODEL}` | HuggingFace model ID to train / collect rollouts with | `Qwen/Qwen3-30B-A3B-Instruct-2507` |
+| `{CAPABILITIES_FILE}` | Path to selected capabilities (default: `pipeline/selected_capabilities.json`) | `pipeline/selected_capabilities.json` |
+| `{GPU_DEVICE}` | GPU index for vLLM server (auto-detected if omitted) | `2` |
+| `{PORT}` | Port for the vLLM server (default: `5050`) | `5050` |
+| `{GROUP_SIZE}` | Rollouts per seed for GRPO (default: `16`) | `16` |
+| `{NUM_SEEDS}` | Number of task seeds to collect (default: `100`) | `100` |
+| `{HINT_RATIO}` | Fraction of rollouts with hint injection (default: `0.25-0.5`) | `0.25` |
+
+Then hand the document to your coding agent. **Each invocation processes one capability** (the highest-priority PENDING one). Re-invoke to process the next. For each capability, the agent will:
+1. Generate a synthetic environment file (e.g., `capability_<name>_game.py`)
+2. Launch a vLLM server and collect validation rollouts
+3. Validate the reward distribution (target: 20-60% success rate)
+4. Mark the capability as DONE in `selected_capabilities.json`
+
+### Step 3: GRPO Training
+
+Train a LoRA adapter for each generated environment.
+
+#### 3a. Launch the vLLM Inference Server
+
+The training loop collects rollouts from a running vLLM server. Start it on a dedicated GPU:
+
+```bash
+conda activate trace
+
+export CUDA_VISIBLE_DEVICES=0        # GPU for inference
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
-export VLLM_RPC_TIMEOUT=2000
-export CUDA_VISIBLE_DEVICES=0 # then 1, then 2
-vllm serve Qwen/Qwen3-4B-Instruct-2507 \
+
+vllm serve <YOUR_MODEL> \
   --host 0.0.0.0 \
-  --port 8082 \
+  --port 8080 \
   --dtype bfloat16 \
-  --max-model-len 55000 \
+  --max-model-len 32000 \
   --enable-lora \
   --max-loras 2 \
-  --gpu-memory-utilization 0.8 \
+  --gpu-memory-utilization 0.85 \
   --enable-auto-tool-choice \
   --tool-call-parser hermes
-
 ```
-#Qwen/Qwen3-30B-A3B-Instruct-2507
 
+Replace `<YOUR_MODEL>` with your HuggingFace model ID (e.g., `Qwen/Qwen3-30B-A3B-Instruct-2507`).
 
-### 2. Start Training
+#### 3b. Run GRPO Training
+
+In a separate terminal, launch training on the remaining GPUs:
 
 ```bash
-# With vLLM server
-export CUDA_VISIBLE_DEVICES=3
-export VLLM_BASE_URLS="http://localhost:8080,http://localhost:8081,http://localhost:8082"
-export VLLM_MODEL="Qwen/Qwen3-4B-Instruct-2507"
+conda activate trace
+
+export CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7   # GPUs for training
+export VLLM_BASE_URLS=http://localhost:8080
+export VLLM_MODEL=<YOUR_MODEL>
 export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
-export VLLM_TIMEOUT_S=2000
-python train_ppo.py --root /matx/u/$USER --use_constrained_decoding True #matx
 
-python train_ppo.py --game liars_dice --root /home/ubuntu/Alex/run35 
-#pi liars dice
-
-
+torchrun --nproc_per_node=<N_GPUS> --master-port=29501 -m train \
+    --game capability_<YOUR_CAPABILITY_NAME> \
+    --model <YOUR_MODEL> \
+    --group-size 8 \
+    --groups-per-batch 8
 ```
 
-All model weights and outputs will be saved to `/matx/u/$USER/` (3T drive).
+| Argument | Description |
+|---|---|
+| `--game` | Registered game name (e.g., `capability_multi_step_transaction_completion`) |
+| `--model` | HuggingFace model ID (must match what vLLM is serving) |
+| `--group-size` | Number of rollouts per seed in each GRPO group |
+| `--groups-per-batch` | Number of groups per training batch |
+| `--resume` | Path to a checkpoint directory to resume from (optional) |
 
-## Add a new OpenSpiel game (simple)
-1) Open `openspiel_wrapper.py` and add a new `OpenSpielGameConfig` entry to `OPENSPIEL_GAME_CONFIGS` with your alias, the `openspiel_name` passed to `pyspiel.load_game`, and a short system prompt.  
-2) (Optional) Provide a stable `action_map` or `allowed_action_ids` if the default `[action_N]` mapping is not what you want.  
-3) Run training with `python train_ppo.py --game <your_alias> --use_constrained_decoding True --root /home/ubuntu` (adjust root/path as needed).
+Repeat Steps 3a-3b for each capability-specific environment to produce a set of LoRA adapters.
 
-## tau2-bench evaluation during training
-You can optionally run eval on tau2-bench at a fixed iteration interval.
+---
 
-1) Install tau2-bench (provides the `tau2` CLI) and its dependencies using `pip install -e evals/benchmarks/tau2_bench_eval/ from repo root`
-2) Download tau2 data files:
-   `python evals/benchmarks/tau2_bench_eval/setup_data.py`
-3) Enable the periodic eval by setting `Config.TAU2_EVAL_EVERY_ITERS` in `config.py` to a positive integer.
+## Project Structure
 
-Currently, the eval setup is:
-- `agent_llm` is the currently-trained LoRA adapter served by vLLM (`ppo_policy` by default).
-- `user_llm` is the base `Qwen/Qwen3-4B-Instruct-2507` model served by vLLM.
-
-## OpenBMB ToolBench Evaluation
-
-Evaluate models on [OpenBMB ToolBench](https://github.com/OpenBMB/ToolBench) benchmark (16,000+ real-world APIs).
-
-### Setup
-
-1) Clone OpenBMB ToolBench data (already included at `evals/toolbench/`):
-   ```bash
-   cd evals
-   git clone https://github.com/OpenBMB/ToolBench.git toolbench
-   ```
-
-2) Download full test data from [Google Drive](https://drive.google.com/drive/folders/1TysbSWYpP8EioFu9xPJtpbJZMLLmwAmL) and place in `evals/toolbench/data/test_instruction/`
-
-### Running Evaluation
-
-Make sure a vLLM server is running (see Quick Start above), then:
-
-```bash
-# Evaluate on G1 test set (single-tool scenarios)
-python3 evals/benchmarks/eval_openbmb_toolbench.py \
-    --test-set G1 \
-    --vllm-url http://localhost:8082 \
-    --vllm-model Qwen/Qwen3-4B-Instruct-2507 \
-    --toolbench-dir evals/toolbench \
-    --num-samples 50 \
-    --output-dir evals/toolbench_results
-
-# Evaluate on G2 test set (intra-category multi-tool)
-python3 evals/benchmarks/eval_openbmb_toolbench.py \
-    --test-set G2 \
-    --vllm-url http://localhost:8082 \
-    --num-samples 50
-
-# Evaluate on G3 test set (intra-collection multi-tool)
-python3 evals/benchmarks/eval_openbmb_toolbench.py \
-    --test-set G3 \
-    --vllm-url http://localhost:8082 \
-    --num-samples 50
+```
+├── pipeline/
+│   ├── trace_capability_selection.md      # Step 1 template
+│   ├── trace_environment_generation.md    # Step 2 template
+│   ├── test_capability_selection.md       # Pre-filled example (Step 1)
+│   ├── test_environment_generation.md     # Pre-filled example (Step 2)
+│   ├── aggregate_capabilities.py          # Aggregation script for Phase 3
+│   ├── candidate_capabilities.json        # Phase 1 output
+│   ├── selected_capabilities.json         # Phase 3 output
+│   └── run_*.json                         # Phase 2 labeling outputs
+├── train/
+│   ├── __main__.py                        # Training entry point
+│   ├── config.py                          # Hyperparameters (LoRA rank, LR, etc.)
+│   ├── train_grpo.py                      # GRPO training loop
+│   ├── collect_rollouts.py                # Rollout collection against vLLM
+│   ├── inference.py                       # vLLM client & prompt building
+│   ├── model.py                           # Model loading with LoRA
+│   └── ppo.py                             # GRPO loss computation
+├── game_registry.py                       # Central game/environment registry
+├── capability_*_game.py                   # Generated synthetic environments
+├── requirements.txt                       # Python dependencies
+└── gameplay_rollouts/                     # Training rollout logs
 ```
 
-### Test Sets
-- **G1**: Single-tool scenarios (easiest)
-- **G2**: Intra-category multi-tool scenarios
-- **G3**: Intra-collection multi-tool scenarios (hardest)
+## Citation
 
-### Output
-Results are saved to `--output-dir` (default: `eval_results/openbmb_toolbench/`):
-- `{test_set}_{model}_{timestamp}.json`: Aggregated metrics (precision, recall, F1, pass rate)
-- `{test_set}_{model}_{timestamp}_responses.jsonl`: Detailed per-query responses for analysis
+If you find this work helpful in your research, please consider citing our paper:
+
+```bibtex
+@article{kang2026trace,
+  title={TRACE: Capability-Targeted Agentic Training},
+  author={Kang, Hangoo and Suresh, Tarun and Saad-Falcon, Jon and Mirhoseini, Azalia},
+  journal={arXiv preprint},
+  year={2026}
+}
+```
