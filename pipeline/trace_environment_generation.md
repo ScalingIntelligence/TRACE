@@ -94,24 +94,24 @@ capability, generates its environment, validates it, marks it DONE, and stops.
 
 On each invocation, the agent will:
 
-1. Read `{CAPABILITIES_FILE}` and find all entries with `status: "PENDING"`, sorted
-   by `mean_delta` descending (strongest weakness first).
+1. Read `{CAPABILITIES_FILE}` and find all entries with
+   `status: "PENDING"`, sorted by `mean_delta` descending (strongest weakness first).
 2. If there are no PENDING capabilities, report "all capabilities done" and exit.
 3. Otherwise, pick the **top one** (highest mean Δ) and process only that one
    through Steps 1-4.
-4. After marking it DONE in `{CAPABILITIES_FILE}`, **stop and report**. Do not move
-   on to the next capability. The user will re-invoke the agent when they want the
-   next environment generated.
+4. After marking it DONE, **stop and report**. Do not move on to the next
+   capability. The user will re-invoke the agent when they want the next
+   environment generated.
 
 ---
 
 ## Step 1: Generate the Environment
 
 > **Execution note:** Process exactly ONE capability per invocation — the top
-> PENDING capability in `{CAPABILITIES_FILE}` (sorted by `mean_delta` descending).
-> After completing Steps 1-4 for that one capability, stop and report. Do not loop
-> to the next PENDING capability. The user controls iteration by re-running the
-> pipeline.
+> PENDING capability in `{CAPABILITIES_FILE}` (sorted by `mean_delta`
+> descending). After completing Steps 1-4 for that one capability, stop and report.
+> Do not loop to the next PENDING capability. The user controls iteration by
+> re-running the pipeline.
 
 Give the following prompt to an LLM agent (Claude, Codex, etc.) to generate the environment
 for a specific capability. The agent will read the capability description and the existing
@@ -322,8 +322,8 @@ training: it ensures at least some rollouts in each group succeed, giving the
 training algorithm both positive and negative examples to learn from.
 
 How it works:
-1. For a fraction of rollouts in each group (e.g., {HINT_RATIO} of {GROUP_SIZE}),
-   append an `<expert_guidance>` block to the system prompt containing soft guidance:
+1. For a fraction of rollouts in each group (e.g., {HINT_RATIO} of {GROUP_SIZE}), append an
+   `<expert_guidance>` block to the system prompt containing soft guidance:
 
    ```
    <expert_guidance>
@@ -428,9 +428,9 @@ that contains:
 
 ## Step 2: Host vLLM Server and Collect Rollouts
 
-> **Execution note:** Before launching, compute the VRAM requirement for `{MODEL}`
-> yourself based on its parameter count, dtype, and the configured `--max-model-len`
-> and `--gpu-memory-utilization`. Then run
+> **Execution note:** Before launching, compute the VRAM requirement for
+> `{MODEL}` yourself based on its parameter count, dtype, and the configured
+> `--max-model-len` and `--gpu-memory-utilization`. Then run
 > `nvidia-smi --query-gpu=index,memory.total,memory.free --format=csv,noheader,nounits`
 > and pick the first GPU whose `memory.free` exceeds your computed requirement
 > (with a small safety margin). The GPU does NOT need to be idle — other small
@@ -584,8 +584,8 @@ and it's worth iterating.
 - **Too easy** (most rollouts succeed): Add constraints, require more steps, make
   the task more ambiguous, or reduce hint injection ratio
 - **Too hard** (most rollouts fail): Simplify scenarios, provide clearer instructions
-  in the system prompt, increase hint injection ratio (e.g., `{HINT_RATIO}` → 0.5-0.75),
-  or break the capability into simpler sub-capabilities
+  in the system prompt, increase hint injection ratio (e.g., 0.5-0.75), or break the
+  capability into simpler sub-capabilities
 
 If after 5 regeneration attempts the reward distribution still falls outside the
 "good" range, **stop and report to the user**. Show the best-attempt distribution
@@ -596,8 +596,8 @@ Do NOT mark a capability DONE if its distribution is bad.
 
 ## Step 4: Mark Capability as Complete
 
-Once the reward distribution looks good, update `{CAPABILITIES_FILE}` to mark this
-capability as done:
+Once the reward distribution looks good, update `{CAPABILITIES_FILE}` to
+mark this capability as done:
 
 ```python
 import json
@@ -649,9 +649,9 @@ pick up the next top PENDING capability because this one is now marked DONE.
            │
            ▼
 ┌───────────────────────────────────────┐
-│ Step 2: Host vLLM + Collect Rollouts  │  vLLM serves {MODEL} on port {PORT}
-│  - Launch server on a free GPU        │  collect_rollouts.py runs {NUM_SEEDS}
-│  - {GROUP_SIZE} rollouts per seed     │  seeds × {GROUP_SIZE} rollouts each
+│ Step 2: Host vLLM + Collect Rollouts  │  vLLM serves {MODEL} on :{PORT}
+│  - nvidia-smi → pick free GPU        │  collect_rollouts.py runs {NUM_SEEDS} seeds
+│  - {GROUP_SIZE} rollouts per seed              │  × {GROUP_SIZE} rollouts each
 └──────────┬────────────────────────────┘
            │
            ▼

@@ -117,4 +117,3 @@ class GameMix:
 # Auto-register capability environments. Each `capability_*_game.py` lives at
 # the project root and calls `register_game(...)` on import.
 # ---------------------------------------------------------------------------
-import capability_multi_step_transaction_completion_game  # noqa: E402, F401

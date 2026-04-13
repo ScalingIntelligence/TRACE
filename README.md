@@ -45,53 +45,46 @@ pip install -r requirements.txt
 
 ## Running the TRACE Pipeline
 
-TRACE is designed to be driven by an LLM coding agent (Claude Code, Codex, etc.). Each pipeline step is defined in a markdown file under `pipeline/` that you fill in with your configuration and then hand to the agent as instructions.
+TRACE is designed to be driven by an LLM coding agent (Claude Code, Codex, etc.). You write a short YAML config, render it into step-by-step instructions, and hand those instructions to the agent.
+
+### Quick Start
+
+**1. Create a config file** with your model and evaluation results:
+
+```yaml
+# pipeline/my_config.yaml
+run_name: my_experiment
+model: Qwen/Qwen3-30B-A3B-Instruct-2507
+
+capability_selection:
+  eval_results:
+    - results/eval_baseline.json
+```
+
+All other parameters have sensible defaults (see [`pipeline/trace_config.yaml`](pipeline/trace_config.yaml) for the full list).
+
+**2. Render the pipeline documents:**
+
+```bash
+python pipeline/render_pipeline.py pipeline/my_config.yaml
+```
+
+This produces two files in `pipeline/`:
+- `my_experiment_capability_selection.md` — instructions for Step 1
+- `my_experiment_environment_generation.md` — instructions for Step 2
+
+**3. Hand each file to your coding agent** (Claude Code, Codex, etc.) to execute.
 
 ### Step 1: Capability Selection
 
-Identify which capabilities your model lacks by analyzing its evaluation trajectories.
-
-**Template:** [`pipeline/trace_capability_selection.md`](pipeline/trace_capability_selection.md)  
-**Example (pre-filled):** [`pipeline/test_capability_selection.md`](pipeline/test_capability_selection.md)
-
-Open the template and fill in the placeholders at the top:
-
-| Placeholder | Description | Example |
-|---|---|---|
-| `{EVAL_RESULTS}` | Path to your evaluation results file(s) containing pass/fail trajectories | `results/eval_baseline.json` |
-| `{MODEL_NAME}` | Name of the model being evaluated (for record-keeping) | `Qwen/Qwen3-30B-A3B-Instruct-2507` |
-| `{N_RUNS}` | Number of independent labeling runs (default: `10`) | `10` |
-| `{N_CANDIDATES}` | Max candidate capabilities to propose (default: `10`) | `10` |
-| `{RHO}` | Coverage threshold (default: `0.10`) | `0.10` |
-| `{DELTA}` | Contrastive gap threshold (default: `0.20`) | `0.20` |
-| `{K_CONSISTENCY}` | Cross-run consistency threshold (default: `8`) | `8` |
-| `{OUTPUT_DIR}` | Output directory (default: `pipeline/`) | `pipeline/` |
-
-Then hand the filled-in document to your coding agent. It will:
+Hand the rendered `*_capability_selection.md` to your coding agent. It will:
 1. **Phase 1 (Discovery):** Read trajectories and propose candidate capabilities → `pipeline/candidate_capabilities.json`
-2. **Phase 2 (Labeling):** Run `{N_RUNS}` independent labeling passes → `pipeline/run_01.json` ... `pipeline/run_10.json`
+2. **Phase 2 (Labeling):** Run N independent labeling passes → `pipeline/run_01.json` ... `pipeline/run_10.json`
 3. **Phase 3 (Aggregation):** Run the filtering script → `pipeline/selected_capabilities.json`
 
 ### Step 2: Synthetic Environment Generation
 
-Generate a targeted training environment for each identified capability deficit.
-
-**Template:** [`pipeline/trace_environment_generation.md`](pipeline/trace_environment_generation.md)  
-**Example (pre-filled):** [`pipeline/test_environment_generation.md`](pipeline/test_environment_generation.md)
-
-Open the template and fill in the placeholders:
-
-| Placeholder | Description | Example |
-|---|---|---|
-| `{MODEL}` | HuggingFace model ID to train / collect rollouts with | `Qwen/Qwen3-30B-A3B-Instruct-2507` |
-| `{CAPABILITIES_FILE}` | Path to selected capabilities (default: `pipeline/selected_capabilities.json`) | `pipeline/selected_capabilities.json` |
-| `{GPU_DEVICE}` | GPU index for vLLM server (auto-detected if omitted) | `2` |
-| `{PORT}` | Port for the vLLM server (default: `5050`) | `5050` |
-| `{GROUP_SIZE}` | Rollouts per seed for GRPO (default: `16`) | `16` |
-| `{NUM_SEEDS}` | Number of task seeds to collect (default: `100`) | `100` |
-| `{HINT_RATIO}` | Fraction of rollouts with hint injection (default: `0.25-0.5`) | `0.25` |
-
-Then hand the document to your coding agent. **Each invocation processes one capability** (the highest-priority PENDING one). Re-invoke to process the next. For each capability, the agent will:
+Hand the rendered `*_environment_generation.md` to your coding agent. **Each invocation processes one capability** (the highest-priority PENDING one). Re-invoke to process the next. For each capability, the agent will:
 1. Generate a synthetic environment file (e.g., `capability_<name>_game.py`)
 2. Launch a vLLM server and collect validation rollouts
 3. Validate the reward distribution (target: 20-60% success rate)
@@ -160,10 +153,10 @@ Repeat Steps 3a-3b for each capability-specific environment to produce a set of 
 
 ```
 ├── pipeline/
+│   ├── trace_config.yaml                  # YAML config template (copy & edit)
+│   ├── render_pipeline.py                 # Renders templates from YAML config
 │   ├── trace_capability_selection.md      # Step 1 template
 │   ├── trace_environment_generation.md    # Step 2 template
-│   ├── test_capability_selection.md       # Pre-filled example (Step 1)
-│   ├── test_environment_generation.md     # Pre-filled example (Step 2)
 │   ├── aggregate_capabilities.py          # Aggregation script for Phase 3
 │   ├── candidate_capabilities.json        # Phase 1 output
 │   ├── selected_capabilities.json         # Phase 3 output
@@ -187,10 +180,13 @@ Repeat Steps 3a-3b for each capability-specific environment to produce a set of 
 If you find this work helpful in your research, please consider citing our paper:
 
 ```bibtex
-@article{kang2026trace,
-  title={TRACE: Capability-Targeted Agentic Training},
-  author={Kang, Hangoo and Suresh, Tarun and Saad-Falcon, Jon and Mirhoseini, Azalia},
-  journal={arXiv preprint},
-  year={2026}
+@misc{kang2026tracecapabilitytargetedagentictraining,
+      title={TRACE: Capability-Targeted Agentic Training}, 
+      author={Hangoo Kang and Tarun Suresh and Jon Saad-Falcon and Azalia Mirhoseini},
+      year={2026},
+      eprint={2604.05336},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2604.05336}, 
 }
 ```

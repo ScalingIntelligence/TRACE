@@ -99,7 +99,7 @@ python -c "import numpy, matplotlib" || pip install numpy matplotlib
 This pipeline follows the TRACE paper's two-phase design:
 
 1. **Phase 1 — Discovery (1 run):** An LLM agent reads all trajectories and proposes up to
-   `{N_CANDIDATES}` candidate capabilities, each with a name, description, and example
+   {N_CANDIDATES} candidate capabilities, each with a name, description, and example
    trajectories. Discovery runs **once** to fix the candidate set.
 
 2. **Phase 2 — Labeling ({N_RUNS} parallel subagents):** Given the fixed candidates, each
@@ -224,7 +224,7 @@ to Phase 2.
 
 ## Phase 2: Labeling ({N_RUNS} parallel subagents)
 
-Given the fixed candidates from Phase 1, run `{N_RUNS}` independent labeling runs in
+Given the fixed candidates from Phase 1, run {N_RUNS} independent labeling runs in
 parallel using **subagents**. Each subagent gets a fresh, isolated context containing only
 the Phase 2 prompt, the candidates from Phase 1, and access to the eval files.
 
@@ -237,7 +237,7 @@ disagreement is exactly what the consistency filter measures.
 
 - **True independence:** A single agent doing 10 sequential runs would see all prior runs
   in its context, biasing later runs. Subagents have zero shared context.
-- **Parallelism:** All `{N_RUNS}` runs finish in roughly the time of one.
+- **Parallelism:** All {N_RUNS} runs finish in roughly the time of one.
 - **Single command:** The orchestrating agent fans out, collects results, and runs the
   aggregation script — the user only issues one instruction.
 
@@ -330,10 +330,10 @@ Return ONLY a JSON object with this exact structure (no other text):
 
 ### Running Phase 2 with subagents
 
-The orchestrating agent should spawn `{N_RUNS}` subagents in parallel — all in a single
+The orchestrating agent should spawn {N_RUNS} subagents in parallel — all in a single
 message so they execute concurrently — using the `Agent` tool.
 
-For each subagent `i` from 1 to `{N_RUNS}`:
+For each subagent `i` from 1 to {N_RUNS}:
 
 1. Substitute `{ATTEMPT_NUMBER}` with `i` in the Phase 2 prompt above
 2. Substitute `{CANDIDATE_CAPABILITIES_JSON}` with the contents of
@@ -351,7 +351,7 @@ Each subagent will:
 
 ## Step 3: Aggregation with Dual Thresholds and Consistency Filter
 
-Once all `{N_RUNS}` subagents complete, run `aggregate_capabilities.py` to compute the
+Once all {N_RUNS} subagents complete, run `aggregate_capabilities.py` to compute the
 paper's metrics and apply the filter.
 
 ```bash
@@ -447,16 +447,16 @@ This file is the input to the next step: [Environment Generation](./trace_enviro
            │
            ▼
 ┌──────────────────────────────────────┐
-│  Phase 2: Labeling (×{N_RUNS})       │  Parallel subagents. Each labels
+│  Phase 2: Labeling (×{N_RUNS})             │  Parallel subagents. Each labels
 │  Three-way labels:                   │  every (trajectory, capability)
 │  NA / PRESENT / LACKING              │  pair. Fresh isolated contexts.
-│  Produces run_01..run_{N_RUNS}.json  │
+│  Produces run_01..run_{N_RUNS}.json        │
 └──────────┬───────────────────────────┘
            │
            ▼
 ┌──────────────────────────────────────┐
 │  Step 3: aggregate_capabilities.py   │  Per-run: Cov(c), Δ(c)
-│  Filter: Cov ≥ {RHO} AND Δ ≥ {DELTA} │  Cross-run: must pass in
+│  Filter: Cov ≥ {RHO} AND Δ ≥ {DELTA}    │  Cross-run: must pass in
 │  Cross-run consistency: ≥ {K_CONS}/  │  ≥ {K_CONSISTENCY} of {N_RUNS} runs
 │  {N_RUNS}                            │
 └──────────┬───────────────────────────┘
