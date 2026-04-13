@@ -1,0 +1,15 @@
+run_name: my_experiment
+# file_prefix: my_experiment
+model: Qwen/Qwen3-30B-A3B-Instruct-2507
+output_dir: pipeline/
+
+eval_results:
+  - results/eval_baseline.json
+# eval_labels:
+#   - airline
+#   - retail
+n_runs: 10
+n_candidates: 10
+rho: 0.10
+delta: 0.20
+k_consistency: 8

@@ -1,0 +1,21 @@
+run_name: my_experiment
+# file_prefix: my_experiment
+model: Qwen/Qwen3-30B-A3B-Instruct-2507
+output_dir: pipeline/
+
+capabilities_file: null
+gpu_device: null
+port: 5050
+group_size: 16
+num_seeds: 100
+hint_ratio: "0.25-0.5"
+temperature: 0.7
+reward_threshold: 0.0
+
+vllm:
+  conda_env: trace
+  env:
+    HF_HOME: /home/.cache/huggingface
+    VLLM_RPC_TIMEOUT: 2000
+
+  serve_args: "--host 0.0.0.0 --dtype bfloat16 --max-model-len 32000 --gpu-memory-utilization 0.9 --enable-auto-tool-choice --tool-call-parser hermes"
