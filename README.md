@@ -1,7 +1,7 @@
 # TRACE: Capability-Targeted Agentic Training
 
-[![Paper](https://img.shields.io/badge/Paper-ArXiv-red.svg)](#)
-[![Status](https://img.shields.io/badge/Status-Code_Coming_Soon-blue.svg)](#)
+[![Paper](https://img.shields.io/badge/Paper-ArXiv-red.svg)](https://arxiv.org/abs/2604.05336)
+[![Blog](https://img.shields.io/badge/Blog-Post-blue.svg)](https://scalingintelligence.stanford.edu/blogs/trace/)
 
 This repository contains the official implementation for **TRACE (Turning Recurrent Agent failures into Capability-targeted training Environments)**. TRACE is an end-to-end system for environment-specific agent self-improvement. 
 
