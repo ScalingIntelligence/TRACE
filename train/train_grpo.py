@@ -5,8 +5,12 @@ import os
 import random
 import time
 
-from loguru import logger as _loguru_logger
-_loguru_logger.remove()
+try:
+    from loguru import logger as _loguru_logger
+
+    _loguru_logger.remove()
+except ImportError:
+    pass
 
 import requests
 import torch
@@ -1656,4 +1660,3 @@ if __name__ == "__main__":
         traceback.print_exc()
     finally:
         dist_cleanup()
-

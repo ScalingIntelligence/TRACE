@@ -1,0 +1,56 @@
+# MoE gate (capability routing) — training + inference config.
+#
+# Used by:
+#   train/train_router_sft.py       SFT warm-start on a labeled mix
+#   train/warmstart_gater.py        warm-start gater alone with frozen base + LoRAs
+#   train/grpo_gater.py             GRPO fine-tune of the gater
+#
+# The gater itself is a thin layer over `moe_gate.build_capability_model`.
+
+run_name: trace_moe_gate
+output_dir: pipeline/moe_gate/
+
+# Base model + the per-capability LoRA adapters to route over.
+base_model: Qwen/Qwen3.6-27B
+adapter_dir: pipeline/adapters/            # one .safetensors per capability
+adapter_names:                              # match filenames; order is the slot order
+  - deep_call_graph_traversal
+  - semantic_logic_precision
+  - multi_site_consistency
+  - diff_context_precision
+  - structural_refactor_awareness
+
+# Router architecture
+routing_scope: per_layer                    # 'per_layer' (default) | 'global'
+target_modules: [q_proj, k_proj, v_proj, o_proj]
+include_base_slot: true                     # add a "no adapter" slot the router can pick
+
+# Training
+optimizer: adamw
+lr: 1.0e-4
+weight_decay: 0.0
+warmup_steps: 100
+total_steps: 2000
+batch_size: 8
+gradient_accumulation: 4
+
+# Data
+sft_data: pipeline/router_sft_data.jsonl    # warm-start labels: (prompt, capability_name)
+grpo_data_glob: pipeline/scenarios_parsed/*/scenarios_parsed.json
+                                             # GRPO fine-tune uses the per-capability
+                                             # scenario sets to compute rewards.
+
+# vLLM serving for inference
+vllm:
+  conda_env: trace
+  port: 5050
+  serve_args: >-
+    --host 0.0.0.0
+    --dtype bfloat16
+    --max-model-len 65536
+    --gpu-memory-utilization 0.9
+    --enable-prefix-caching
+    --enable-chunked-prefill
+    --enable-lora
+    --max-loras 8
+    --max-lora-rank 32

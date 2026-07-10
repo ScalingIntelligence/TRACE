@@ -4,17 +4,56 @@ import json
 import time
 import argparse
 import threading
+import importlib
+import os
 from collections import defaultdict
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Any
 
-from loguru import logger as _loguru_logger
-_loguru_logger.remove()
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+try:
+    from loguru import logger as _loguru_logger
+
+    _loguru_logger.remove()
+except ImportError:
+    pass
 
 import requests
 
 from game_registry import get_game_spec, list_game_names
+
+
+def _auto_import_game_modules() -> None:
+    """Import generated capability game modules before argparse builds choices.
+
+    TRACE-generated environments are normally written as
+    `capability_<name>_game.py` at the repository root and register themselves at
+    module import time. Without this import pass, `--env capability_<name>` is
+    rejected before the module has a chance to call `register_game(...)`.
+    """
+    roots = [
+        Path.cwd(),
+        REPO_ROOT,
+    ]
+    module_names = set()
+    for root in roots:
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        for path in root.glob("capability_*_game.py"):
+            module_names.add(path.stem)
+
+    extra = [m.strip() for m in os.environ.get("TRACE_GAME_MODULES", "").split(",") if m.strip()]
+    module_names.update(extra)
+
+    for name in sorted(module_names):
+        try:
+            importlib.import_module(name)
+        except Exception as e:
+            print(f"[collect_rollouts] warning: failed to import {name}: {e}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +256,7 @@ def write_output(selected: List[Dict], output_path: Path):
             openai_msgs = conversation_to_openai_messages(rollout["conversation"])
             simulations.append({
                 "task_id": str(rollout["seed"]),
+                "sample_idx": rollout.get("sample_idx"),
                 "reward_info": {"reward": rollout["reward"]},
                 "messages": openai_msgs,
             })
@@ -245,6 +285,7 @@ def write_output(selected: List[Dict], output_path: Path):
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    _auto_import_game_modules()
     all_games = list_game_names()
 
     parser = argparse.ArgumentParser(
@@ -330,7 +371,9 @@ def main():
 
     def _run_one(seed, sample_idx):
         game = make_game()
-        return run_episode(game, client, seed)
+        result = run_episode(game, client, seed)
+        result["sample_idx"] = sample_idx
+        return result
 
     # -------------------------------------------------------------------
     # Run all seeds in parallel
@@ -412,7 +455,12 @@ def main():
             rejected_count += 1
             continue
 
-        passing.sort(key=lambda x: (x[1]["reward"], -x[1]["steps"]), reverse=True)
+        if select_topk >= len(passing):
+            # Calibration needs the full reward distribution for each seed.
+            # Preserve sample order when keeping all attempts.
+            passing.sort(key=lambda x: x[0])
+        else:
+            passing.sort(key=lambda x: (x[1]["reward"], -x[1]["steps"]), reverse=True)
         for sidx, result in passing[:select_topk]:
             selected.append(result)
 

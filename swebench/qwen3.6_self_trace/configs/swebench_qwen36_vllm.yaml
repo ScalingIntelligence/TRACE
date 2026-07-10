@@ -1,0 +1,41 @@
+# TRACE phase 1 baseline — Qwen3.6-27B via vLLM, sandboxes on Modal.
+# Tested on vLLM 0.22+ with 128 GiB /dev/shm. Adjust for your cluster.
+
+agent:
+  # Research from prior Qwen3 runs: max resolved step count was 32 on
+  # Qwen3-30B; 96.5% of frontier model resolved trajs finish in <100 steps.
+  # 150 gives 1.5× headroom over p99 with zero meaningful loss.
+  step_limit: 150
+  # Hard cost ceiling per task — protects Modal budget
+  cost_limit: 3.0
+
+environment:
+  environment_class: "swerex_modal"
+  startup_timeout: 600.0
+  deployment_timeout: 3600.0
+  # 60-min wall-cap per sandbox so reasoning agents don't get killed mid-flight
+  # by slow vLLM turns. Modal credit is plentiful per user.
+  runtime_timeout: 3600.0
+  install_pipx: true
+
+model:
+  model_name: "hosted_vllm/Qwen/Qwen3.6-27B"
+  cost_tracking: "ignore_errors"
+  model_kwargs:
+    api_base: "http://localhost:8000/v1"
+    drop_params: true
+    # Qwen3 official recipe: temp=0.7 + top_p=0.95 + top_k=20
+    # (temp=0.0 collapses reasoning trajectories; community evidence shows
+    # 2-3× more Submitted exits at temp=0.7)
+    temperature: 0.7
+    top_p: 0.95
+    parallel_tool_calls: true
+    # 24k = enough for full <think> + answer in a single turn.
+    # 131k context window holds ~5 turns of full-tank thinking,
+    # but vLLM --reasoning-parser qwen3 strips prior turns' <think>
+    # before re-injecting, so effective budget is much higher.
+    max_tokens: 24000
+    extra_body:
+      top_k: 20
+      chat_template_kwargs:
+        enable_thinking: true

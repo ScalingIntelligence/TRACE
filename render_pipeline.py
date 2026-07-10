@@ -17,8 +17,11 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent
 PIPELINE_DIR = REPO_ROOT / "pipeline"
 PROMPTS_DIR = REPO_ROOT / "prompts"
-CAPABILITY_SELECTION_TEMPLATE = PIPELINE_DIR / "trace_capability_selection.md"
-ENVIRONMENT_GENERATION_TEMPLATE = PIPELINE_DIR / "trace_environment_generation.md"
+# Templates live under prompts/<benchmark>/. The env-agnostic versions are in
+# prompts/general/; benchmark-specific filled-in versions live under
+# prompts/<benchmark>/ (e.g., prompts/tau-bench/, prompts/swebench/).
+CAPABILITY_SELECTION_TEMPLATE = PROMPTS_DIR / "general" / "capability_selection.md"
+ENVIRONMENT_GENERATION_TEMPLATE = PROMPTS_DIR / "general" / "environment_generation.md"
 
 
 def _fmt_float(val) -> str:
@@ -243,6 +246,12 @@ def render_capability_selection(template_text: str, cfg: dict) -> str:
         "trace_environment_generation.md",
         f"{file_prefix}_environment_generation.md",
     )
+    # Also rewrite the new-layout reference in case the template is the
+    # general one moved to prompts/general/.
+    text = text.replace(
+        "environment_generation.md",
+        f"{file_prefix}_environment_generation.md",
+    )
 
     return text
 
@@ -386,6 +395,10 @@ def render_environment_generation(template_text: str, cfg: dict) -> str:
         "trace_capability_selection.md",
         f"{file_prefix}_capability_selection.md",
     )
+    text = text.replace(
+        "capability_selection.md",
+        f"{file_prefix}_capability_selection.md",
+    )
 
     return text
 
@@ -403,12 +416,12 @@ def main():
     )
     parser.add_argument(
         "-o", "--output-dir",
-        help="Output directory for rendered files (default: prompts/)",
+        help="Output directory for rendered files (default: prompts/rendered/)",
         default=None,
     )
     args = parser.parse_args()
 
-    out_dir = Path(args.output_dir) if args.output_dir else PROMPTS_DIR
+    out_dir = Path(args.output_dir) if args.output_dir else (PROMPTS_DIR / "rendered")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if args.stage == "capability":

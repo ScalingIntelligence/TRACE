@@ -79,10 +79,10 @@ Create a synthetic training environment (a Python game class) that:
 **Important:** `game_registry.py` declares a legacy `GameEnv` protocol with methods
 like `observe()`, `legal_actions()`, etc. **IGNORE that protocol.** It is not what
 the rollout script actually uses. The real contract your env must satisfy is the
-one called by `collect_rollouts.py`'s `run_episode_toolcall` function, which is
+one called by `train/collect_rollouts.py`'s `run_episode` function, which is
 designed for chat-based tool-calling agents.
 
-Read `collect_rollouts.py` (specifically `run_episode_toolcall`) before writing
+Read `train/collect_rollouts.py` (specifically `run_episode`) before writing
 your env to confirm the exact interface. As of the current codebase, your game
 class must expose:
 
@@ -123,7 +123,7 @@ register_game(GameSpec(
 ```
 
 If `collect_rollouts.py` ever calls a method you haven't implemented, the rollout
-will crash with `AttributeError`. Re-read `run_episode_toolcall` until you've
+will crash with `AttributeError`. Re-read `run_episode` until you've
 covered every method/attribute it touches on the game object.
 
 ## Format Fidelity
@@ -292,10 +292,27 @@ How it works:
    actions are kept, but the hint tokens are removed so the gradient teaches the
    model the underlying behavior, not how to condition on hint tokens.
 
-See `train/collect_rollouts.py` for the reference implementation
-(`get_expert_guidance()` and `strip_expert_guidance()`). You must keep the
-`<expert_guidance>` tag name so these existing helpers continue to work — only
-the content inside the tag changes from a literal solution to soft guidance.
+The GRPO trainer removes hint conditioning through `train/train_grpo.py`'s
+training-time hint swap. For structured-message environments, implement this by
+making `get_system_prompt()` return either a base prompt or a hinted prompt for
+the episode, then register both strings on `GameSpec`:
+
+```python
+register_game(GameSpec(
+    name="capability_<name>",
+    make_env=lambda **kw: YourGameClass(**kw),
+    extract_action=your_extract_action_fn,
+    system_prompt=BASE_SYSTEM_PROMPT,
+    max_gen_tokens=1024,
+    hint_prompt=HINT_SYSTEM_PROMPT,
+    base_prompt=BASE_SYSTEM_PROMPT,
+))
+```
+
+Do not put the hint only in the user message unless you intentionally want to
+train on hint tokens. The built-in swap compares the first system message
+against `GameSpec.hint_prompt` and replaces it with `GameSpec.base_prompt`
+before computing gradients.
 
 ## Reference Files
 
@@ -307,12 +324,13 @@ Two files matter for this step:
    not what the rollout script actually calls (see "Environment Interface" below
    for the real contract).
 
-2. **`collect_rollouts.py`** — the rollout script. It may live at the project
-   root or under `train/`. Find it via `glob "**/collect_rollouts.py"`. Read its
-   `run_episode_toolcall` function carefully — that function is the source of
-   truth for what methods and attributes your game class must expose. Also read
-   `get_expert_guidance()` and `strip_expert_guidance()` to learn the
-   `<expert_guidance>` block format your env must support for hint injection.
+2. **`train/collect_rollouts.py`** — the rollout script. Read its `run_episode`
+   function carefully — that function is the source of truth for what methods
+   and attributes your game class must expose.
+
+3. **`train/train_grpo.py`** — the trainer. Read `_swap_hint_prompts` and the
+   `GameSpec.hint_prompt/base_prompt` fields to understand how hinted rollouts
+   are converted back to base-prompt training samples.
 
 Do not assume any other files exist. Write the environment from scratch against
 the actual interface that `collect_rollouts.py` calls.
@@ -389,13 +407,14 @@ script is under `train/`, you may need `PYTHONPATH=. python train/collect_rollou
 from the project root to make the import resolve.
 
 ```bash
-# From the project root (assuming collect_rollouts.py is here or under train/)
-python collect_rollouts.py \
+# From the project root.
+PYTHONPATH=. python train/collect_rollouts.py \
   --env capability_<name> \
   --base-url http://localhost:{PORT}/v1 \
   --model {MODEL} \
   --num-seeds {NUM_SEEDS} \
   --num-samples {GROUP_SIZE} \
+  --select-topk {GROUP_SIZE} \
   --temperature {TEMPERATURE} \
   --reward-threshold {REWARD_THRESHOLD} \
   --output {OUTPUT_DIR}/rollouts_<capability_name>.json
@@ -407,6 +426,8 @@ python collect_rollouts.py \
 - `--model {MODEL}` — Must match the model served by vLLM
 - `--num-seeds {NUM_SEEDS}` — Number of different task scenarios to test
 - `--num-samples {GROUP_SIZE}` — Rollouts per seed (group size for GRPO)
+- `--select-topk {GROUP_SIZE}` — Keep all attempts. Without this, the collector
+  keeps only top-1 per seed and calibration is invalid.
 - `--temperature {TEMPERATURE}` — Sampling temperature for diverse rollouts within each group
 - `--reward-threshold {REWARD_THRESHOLD}` — Keep ALL trajectories (pass and fail) for reward analysis
 
@@ -423,28 +444,19 @@ GRPO learns from the contrast between good and bad rollouts within each group. I
 rollouts in a group get the same reward (all 1.0 or all 0.0), there is no contrast and
 no learning signal. The ideal environment produces a MIX of successes and failures.
 
-### Quick check
+### Calibration command
 
-```python
-import json
-import numpy as np
-
-with open("{OUTPUT_DIR}/rollouts_<capability_name>.json") as f:
-    data = json.load(f)
-
-rewards = [sim["reward_info"]["reward"] for sim in data["simulations"]]
-print(f"Mean reward:   {np.mean(rewards):.3f}")
-print(f"Std reward:    {np.std(rewards):.3f}")
-print(f"Success rate:  {np.mean([r == 1.0 for r in rewards]):.1%}")
-print(f"Zero rate:     {np.mean([r == 0.0 for r in rewards]):.1%}")
-print(f"Total rollouts: {len(rewards)}")
-
-# Per-group analysis
-group_size = {GROUP_SIZE}
-for i in range(0, min(len(rewards), group_size * 10), group_size):  # show first 10 groups
-    group = rewards[i:i+group_size]
-    print(f"  Group {i//group_size}: mean={np.mean(group):.2f}, "
-          f"pass={sum(r == 1.0 for r in group)}/{len(group)}")
+```bash
+PYTHONPATH=. python pipeline/calibrate_environment.py \
+  {OUTPUT_DIR}/rollouts_<capability_name>.json \
+  --group-size {GROUP_SIZE} \
+  --mean-min 0.2 --mean-max 0.6 \
+  --success-min 0.2 --success-max 0.6 \
+  --max-all-success-groups 0.2 \
+  --max-all-zero-groups 0.2 \
+  --max-constant-groups 0.5 \
+  --min-informative-groups 0.5 \
+  --pass-at-k 1,4,8,{GROUP_SIZE}
 ```
 
 ### Acceptable ranges
@@ -587,8 +599,10 @@ pick up the next top PENDING capability because this one is now marked DONE.
 - **`game_registry.py`** (project root) — `GameSpec` and `register_game()`. Note:
   also declares a legacy `GameEnv` protocol that is NOT what the rollout script
   actually uses — see "Environment Interface" above for the real contract.
-- **`collect_rollouts.py`** (project root or `train/`, find via glob) — Rollout
-  collection script. The `run_episode_toolcall` function defines the actual game
-  interface. Also contains `get_expert_guidance()` and `strip_expert_guidance()`
-  for hint injection.
+- **`train/collect_rollouts.py`** — Rollout collection script. The `run_episode`
+  function defines the actual game interface.
+- **`pipeline/calibrate_environment.py`** — Reward distribution, pass@k, and
+  group-variance calibration checker for collected rollouts.
+- **`train/train_grpo.py`** — GRPO trainer; `_swap_hint_prompts` implements the
+  `GameSpec.hint_prompt/base_prompt` hint-removal path.
 - **`pipeline/trace_capability_selection.md`** — Upstream pipeline.

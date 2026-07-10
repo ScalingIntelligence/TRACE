@@ -62,7 +62,9 @@ logs/
 data/
 *.jsonl
 gameplay_rollouts/
-prompts/
+# Rendered outputs from render_pipeline.py go here; the hand-curated
+# templates under prompts/{general,tau-bench,swebench}/ are source-controlled.
+prompts/rendered/
 
 # Unsloth compile cache
 unsloth_compiled_cache/
