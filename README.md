@@ -40,9 +40,8 @@ TRACE has been validated on three benchmarks across two model scales:
 
 | Benchmark | Base model | Baseline | + TRACE | Δ | Notes |
 |---|---|---:|---:|---:|---|
-| τ²-Bench (Airline + Retail) | Qwen3-8B | 32.9% | **47.0%** | **+14.1 pp** | from paper |
-| ToolSandBox | Qwen3-8B | 0.411 | **0.552** | **+0.141** | mean similarity score |
-| **SWE-bench Verified** | **Qwen3.6-27B** | **58.2%** | **62.2%** | **+4.0 pp** | best iter checkpoint; see `swebench/qwen3.6_self_trace/` |
+| τ²-Bench (Airline + Retail) | Qwen3-30B-a3b-instruct | 32.9% | **48.3%** | **+15.4 pp** | from paper |
+| **SWE-bench Verified** | **Qwen3.6-27B** | **68.0%** | **73.2%** | **+5.2 pp** | best iter checkpoint; see `swebench/qwen3.6_self_trace/` |
 
 The Qwen3.6 SWE-bench reference run lives in `swebench/qwen3.6_self_trace/`,
 including the phase scripts, generated-environment wrapper, and reproduction notes.
